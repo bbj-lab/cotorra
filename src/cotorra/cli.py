@@ -245,6 +245,10 @@ def rep_based_score(
             "--verbose", "-v", help="Verbose logging for collate", is_flag=True
         ),
     ] = False,
+    ridge: Annotated[
+        bool,
+        typer.Option("--ridge", help="Use ridge regression (alpha=0.1) instead of LightGBM", is_flag=True),
+    ] = False,
 ):
     """
     Generate rep-based scores for the token-based outcomes of interest.
@@ -253,14 +257,15 @@ def rep_based_score(
     with console.status("[bold green]Rep-based scoring on held-out data..."):
         t0 = time.perf_counter()
         scorer = RepBasedScorer(
-            main_cfg=main_config, processed_data_home=processed_data_home
+            main_cfg=main_config, processed_data_home=processed_data_home, ridge=ridge
         )
         scorer.save_all(verbose=verbose)
         t1 = time.perf_counter()
         print(f"\n[green]✓[/green] Rep-based scoring completed in {t1 - t0:.2f}s.")
+        scorer_tag = "ridge" if ridge else "rep-based"
         out_path = (
             scorer.processed_data_home
-            / f"scores-rep-based-{scorer.cfg.run_name}.parquet"
+            / f"scores-{scorer_tag}-{scorer.cfg.run_name}.parquet"
         )
         print(f"  Scores: [cyan]{out_path}[/cyan]")
 

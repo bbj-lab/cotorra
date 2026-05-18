@@ -21,6 +21,7 @@ class Loss:
             sorted(self.tkzr_cfg.lookup, key=self.tkzr_cfg.lookup.get)
         )
         self.logger = Logger()
+        self.pool_cats = False
         self.kernels = {"cubic": lambda x, a: 0.5 + a*4*(x-0.5)**3 + (1-a) * (x - 0.5),
                         "atanh": lambda x, a: 0.5 + 1/(2*a)*t.atanh(a*(2*x - 1)),
                         "linear": lambda x, a: x
@@ -29,7 +30,7 @@ class Loss:
         self.loss_functions = {
             "mse": t.nn.MSELoss,
             "mae": t.nn.L1Loss,
-            "smooth_mae": t.nn.SmoothL1Loss
+            "smooth_mae": t.nn.SmoothL1Loss,
         }
 
         if "label_weighted_loss" in self.cfg:
@@ -45,6 +46,9 @@ class Loss:
                 self.logger.warn(
                     "Quantile token loss is still experimental for fused tokenizers."
                 )
+
+            if "pool_categories" in self.cfg.quantile_token_loss:
+                self.pool_cats = True
 
             self.q_type = np.array(
                 [
@@ -79,15 +83,17 @@ class Loss:
                     self.kernel_type = self.cfg.quantile_token_loss.kernel.type
                 else:
                     self.kernel_type = "linear"
+                self.kernel_factor = 1.0
                 if "factor" in self.cfg.quantile_token_loss.kernel:
                     self.kernel_factor = self.cfg.quantile_token_loss.kernel.factor
 
 
     def quantile_token_loss(self, outputs, labels, **kwargs):
         total_loss = t.zeros((), device=labels.device)
-        total_tokens = 0
         shift_logits = outputs.get("logits")[:, :-1].contiguous()
         shift_labels = labels[:, 1:].contiguous()
+        total_tokens = shift_labels.numel()
+        total_num_tokens = 0
         def aggregate_first(cat_logits, cat_labels, i):
             cat_preds = t.softmax(cat_logits, dim=-1) @ (
                 self.label_to_q[self.label_to_cat == i]
@@ -99,16 +105,16 @@ class Loss:
                 cat_true = kernel(cat_true, self.kernel_factor)
             return self.loss_function()(cat_preds, cat_true)
         def loss_first(cat_logits, cat_labels, i):
-            cat_true = self.label_to_q.to(device=cat_labels.device)[cat_labels]
-            values =(
-                self.label_to_q[self.label_to_cat == i]
-            ).to(device=cat_logits.device)
+            cat_true = self.label_to_q.to(device=cat_labels.device)[cat_labels]  # (N,)
+            values = (self.label_to_q[self.label_to_cat == i]).to(device=cat_logits.device)  # (K,)
             if self.cfg.quantile_token_loss.kernel.type in self.kernels:
                 kernel = self.kernels[self.kernel_type]
                 values = kernel(values, self.kernel_factor)
                 cat_true = kernel(cat_true, self.kernel_factor)
-            cat_true_full = cat_true.unsqueeze(-1).expand(*cat_true.shape, values.shape[0])
-            losses = self.loss_function(reduction = 'none')(values, cat_true_full)
+            N, K = cat_true.shape[0], values.shape[0]
+            cat_true_full = cat_true.unsqueeze(-1).expand(N, K)       # (N, K)
+            values_full = values.unsqueeze(0).expand(N, K)             # (N, K)
+            losses = self.loss_function(reduction='none')(values_full, cat_true_full)
             return (t.softmax(cat_logits, dim=-1) * losses).sum(dim=-1).mean()
             
         for i in range(self.n_cats):
@@ -123,8 +129,46 @@ class Loss:
             else: 
                 loss_del = aggregate_first(cat_logits, cat_labels, i)
             total_loss += loss_del * n_i
+            total_num_tokens += n_i
+        return total_loss / max(total_tokens,1), total_num_tokens/total_tokens
+    
+    def x_ent_loss_cat(self, outputs, labels, **kwargs):
+        logits = outputs.get("logits")
+        assert logits.shape[:2] == labels.shape, \
+            f"logits {logits.shape} and labels {labels.shape} disagree on (batch, seq)"
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        total_loss = t.zeros((), device=labels.device)
+        total_tokens = 0
+        label_to_cat = self.label_to_cat.to(device=labels.device)
+        token_cats = label_to_cat[shift_labels]
+
+        flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+        flat_labels = shift_labels.view(-1)
+        flat_token_cats = token_cats.view(-1)
+        log_probs = t.log_softmax(flat_logits, dim=-1) 
+
+        for i in range(self.n_cats):
+            mask = flat_token_cats == i
+            n_i = mask.sum().item()
+            if n_i == 0:
+                continue
+            cat_cols = (self.label_to_cat == i).to(labels.device)
+            log_p_cat = t.logsumexp(log_probs[mask][:, cat_cols], dim=-1)
+            loss_i = -log_p_cat.mean()
+            total_loss += loss_i * n_i
             total_tokens += n_i
-        return total_loss / max(total_tokens,1)
+
+        non_numeric_mask = ~t.isin(flat_token_cats, t.arange(self.n_cats, device=labels.device))
+        n_non = non_numeric_mask.sum().item()
+        if n_non > 0:
+            loss_non = t.nn.functional.nll_loss(log_probs[non_numeric_mask], flat_labels[non_numeric_mask])
+            total_loss += loss_non * n_non
+            total_tokens += n_non
+
+        return total_loss / max(total_tokens, 1)
+    
+    #TODO Implement category pooled label_weighted_loss
 
     def label_weighted_loss(self, outputs, labels, **kwargs):
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
@@ -150,13 +194,14 @@ class Loss:
             log |= {"label_weighted_loss": label_weighted_loss.item()}
             loss += label_weighted_loss
         else:
-            x_ent_loss = self.x_ent_loss(outputs, labels)
+            x_ent_loss = self.x_ent_loss(outputs, labels) if (not self.pool_cats) else self.x_ent_loss_cat(outputs, labels)
             log |= {"x_ent_loss": x_ent_loss.item()}
             loss += x_ent_loss
         if "quantile_token_loss" in self.cfg:
-            quantile_token_loss = self.quantile_token_loss(outputs, labels)
-            log |= {"quantile_token_loss": quantile_token_loss.item()}
+            quantile_token_loss, frac_numeric = self.quantile_token_loss(outputs, labels)
+            log |= {"quantile_token_loss": quantile_token_loss.item()/frac_numeric, "frac_numeric": frac_numeric}
             loss += self.cfg.quantile_token_loss.qt_weight * quantile_token_loss
+            loss = loss/2
         if wandb.run is not None:
             log |= {"custom_loss": loss.item()}
             wandb.log(log)
