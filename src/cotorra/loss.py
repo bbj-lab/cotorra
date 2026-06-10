@@ -74,13 +74,9 @@ class Loss:
                 self.loss_function = self.loss_functions[self.cfg.quantile_token_loss.loss_type]
             else:
                 self.loss_function = t.nn.MSELoss
-            if "kernel" in self.cfg.quantile_token_loss:
-                if "type" in self.cfg.quantile_token_loss.kernel:
-                    self.kernel_type = self.cfg.quantile_token_loss.kernel.type
-                else:
-                    self.kernel_type = "linear"
-                if "factor" in self.cfg.quantile_token_loss.kernel:
-                    self.kernel_factor = self.cfg.quantile_token_loss.kernel.factor
+            kernel_cfg = self.cfg.quantile_token_loss.get("kernel", {})
+            self.kernel_type = kernel_cfg.get("type", "linear")
+            self.kernel_factor = kernel_cfg.get("factor", 1.0)
 
 
     def quantile_token_loss(self, outputs, labels, **kwargs):
@@ -93,7 +89,7 @@ class Loss:
                 self.label_to_q[self.label_to_cat == i]
             ).to(device=cat_logits.device)
             cat_true = self.label_to_q.to(device=cat_labels.device)[cat_labels]
-            if self.cfg.quantile_token_loss.kernel.type in self.kernels:
+            if self.kernel_type in self.kernels:
                 kernel = self.kernels[self.kernel_type]
                 cat_preds = kernel(cat_preds, self.kernel_factor)
                 cat_true = kernel(cat_true, self.kernel_factor)
@@ -103,7 +99,7 @@ class Loss:
             values =(
                 self.label_to_q[self.label_to_cat == i]
             ).to(device=cat_logits.device)
-            if self.cfg.quantile_token_loss.kernel.type in self.kernels:
+            if self.kernel_type in self.kernels:
                 kernel = self.kernels[self.kernel_type]
                 values = kernel(values, self.kernel_factor)
                 cat_true = kernel(cat_true, self.kernel_factor)
