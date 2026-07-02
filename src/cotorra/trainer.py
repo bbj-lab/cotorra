@@ -15,7 +15,12 @@ from transformers import Trainer as t_Trainer
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
 from cotorra.loss import Loss
-from cotorra.packing import admission_relative_position_ids, mask_cross_admission_labels
+from cotorra.packing import (
+    admission_relative_position_ids,
+    block_causal_attention_mask,
+    mask_cross_admission_labels,
+    validate_block_attn_implementation,
+)
 
 
 class TrainerWithCustomLoss(t_Trainer):
@@ -87,7 +92,14 @@ class Trainer(Configurable):
         config = AutoConfig.from_pretrained(
             self.cfg.model.model_name, **conf_param, **self.cfg.model.model_args
         )
-        mdl = AutoModelForCausalLM.from_config(config)
+        from_config_args = dict()
+        if self.cfg.get("block_packed_attention", False):
+            from_config_args["attn_implementation"] = (
+                validate_block_attn_implementation(
+                    self.cfg.get("attn_implementation", "sdpa")
+                )
+            )
+        mdl = AutoModelForCausalLM.from_config(config, **from_config_args)
         self.logger.info(
             "Loaded model {name} with {num} params ({dtype}).".format(
                 name=self.cfg.model.model_name,
@@ -105,6 +117,7 @@ class Trainer(Configurable):
         if "admission_ids" in batch[0]:
             admission_ids = t.stack([x["admission_ids"] for x in batch])
             collated["labels"] = mask_cross_admission_labels(input_ids, admission_ids)
+            collated["attention_mask"] = block_causal_attention_mask(admission_ids)
             token_idx = admission_relative_position_ids(admission_ids)
             collated["position_ids"] = token_idx
         if "time_based_rope" in self.cfg:

@@ -79,9 +79,11 @@ label_weighted_loss:
 time_based_rope:
   sec_per_pos_id: !!int 300
 
-# packed-window hygiene: emit admission_ids, use admission-relative position
-# indices, and mask CE labels at admission boundaries
+# packed-window hygiene: emit admission_ids, block attention across packed
+# admissions with a 4D mask, use admission-relative position indices, and
+# mask CE labels at admission boundaries
 block_packed_attention: !!bool false
+attn_implementation: sdpa # 4D block masks require sdpa or eager
 
 training_args:
   report_to: wandb

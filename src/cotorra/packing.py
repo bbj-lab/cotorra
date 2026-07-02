@@ -9,6 +9,19 @@ contiguous run of tokens inside a packed window, identified by the
 
 import torch as t
 
+# FlashAttention kernels ignore additive 4D masks; only these honor them
+BLOCK_ATTN_IMPLEMENTATIONS = ("sdpa", "eager")
+
+
+def validate_block_attn_implementation(attn_implementation: str) -> str:
+    if attn_implementation not in BLOCK_ATTN_IMPLEMENTATIONS:
+        raise ValueError(
+            f"block_packed_attention requires attn_implementation in "
+            f"{BLOCK_ATTN_IMPLEMENTATIONS}, got {attn_implementation!r}: "
+            "FlashAttention does not support 4D block-causal masks"
+        )
+    return attn_implementation
+
 
 def admission_relative_position_ids(admission_ids: t.Tensor) -> t.Tensor:
     """
@@ -25,6 +38,23 @@ def admission_relative_position_ids(admission_ids: t.Tensor) -> t.Tensor:
     is_start[:, 1:] = admission_ids[:, 1:] != admission_ids[:, :-1]
     admission_start_idx = t.where(is_start, seq_idx, 0).cummax(dim=-1).values
     return seq_idx - admission_start_idx
+
+
+def block_causal_attention_mask(
+    admission_ids: t.Tensor, dtype: t.dtype = t.float32
+) -> t.Tensor:
+    """
+    4D additive attention mask of shape (batch, 1, seq_len, seq_len):
+    0.0 where the query may attend (causal and same admission), the most
+    negative representable value (the additive "-inf" convention) everywhere
+    else; every query can attend at least to itself, so no row is fully blocked
+    """
+    seq_len = admission_ids.shape[-1]
+    same_admission = admission_ids.unsqueeze(-1) == admission_ids.unsqueeze(-2)
+    causal = t.tril(t.ones(seq_len, seq_len, dtype=t.bool, device=admission_ids.device))
+    allowed = (same_admission & causal).unsqueeze(1)
+    mask = t.zeros(allowed.shape, dtype=dtype, device=admission_ids.device)
+    return mask.masked_fill(~allowed, t.finfo(dtype).min)
 
 
 def mask_cross_admission_labels(
