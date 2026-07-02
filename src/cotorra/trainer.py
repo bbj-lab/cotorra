@@ -15,6 +15,7 @@ from transformers import Trainer as t_Trainer
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
 from cotorra.loss import Loss
+from cotorra.packing import admission_relative_position_ids, mask_cross_admission_labels
 
 
 class TrainerWithCustomLoss(t_Trainer):
@@ -99,15 +100,21 @@ class Trainer(Configurable):
 
     def collate_fn(self, batch):
         input_ids = t.stack([x["input_ids"] for x in batch])
-        if "time_based_rope" not in self.cfg:
-            return {"input_ids": input_ids, "labels": input_ids}
-        else:
+        collated = {"input_ids": input_ids, "labels": input_ids}
+        token_idx = t.arange(input_ids.shape[-1], device=input_ids.device)
+        if "admission_ids" in batch[0]:
+            admission_ids = t.stack([x["admission_ids"] for x in batch])
+            collated["labels"] = mask_cross_admission_labels(input_ids, admission_ids)
+            token_idx = admission_relative_position_ids(admission_ids)
+            collated["position_ids"] = token_idx
+        if "time_based_rope" in self.cfg:
             p_ids = (
                 t.stack([x["s_elapsed"] for x in batch])
                 / self.cfg.time_based_rope.sec_per_pos_id
             )
-            p_ids += t.arange(p_ids.shape[-1], device=p_ids.device, dtype=p_ids.dtype)
-            return {"input_ids": input_ids, "labels": input_ids, "position_ids": p_ids}
+            p_ids += token_idx.to(dtype=p_ids.dtype)
+            collated["position_ids"] = p_ids
+        return collated
 
     def train(self, resume_from_checkpoint: bool = False, verbose: bool = False):
         if resume_from_checkpoint:

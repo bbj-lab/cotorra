@@ -102,6 +102,7 @@ class Loader(Configurable):
                 .repeat(self.cfg.n_epochs)
                 .shuffle(generator=self.rng),
                 "seq_len": self.cfg.max_seq_len,
+                "with_admission_ids": self.cfg.get("block_packed_attention", False),
             },
         ).with_format("torch")
 
@@ -111,6 +112,7 @@ class Loader(Configurable):
             gen_kwargs={
                 "dset": self.dataset[self.splits[1]],
                 "seq_len": self.cfg.max_seq_len,
+                "with_admission_ids": self.cfg.get("block_packed_attention", False),
             },
         ).with_format("torch")
 

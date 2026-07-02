@@ -28,16 +28,25 @@ def batched(iterable, n) -> collections.abc.Iterator:
         yield batch
 
 
-def batched_iter(dset: ds.Dataset, seq_len: int) -> collections.abc.Iterator:
+def batched_iter(
+    dset: ds.Dataset, seq_len: int, with_admission_ids: bool = False
+) -> collections.abc.Iterator:
     """
     batched iteration on a huggingface dataset;
-    as opposed to `batched`, the remainder here is dropped
+    as opposed to `batched`, the remainder here is dropped;
+    with `with_admission_ids`, each packed window also carries a parallel
+    `admission_ids` list marking which admission timeline every token came from
     """
-    dq = {k: collections.deque() for k in dset.column_names}
-    for eg in iter(dset):
-        for k in dq:
+    cols = list(dset.column_names)
+    dq = {k: collections.deque() for k in cols}
+    if with_admission_ids:
+        dq["admission_ids"] = collections.deque()
+    for i, eg in enumerate(iter(dset)):
+        for k in cols:
             dq[k].extend(list(eg[k]))
-        while len(dq[list(dq.keys())[0]]) >= seq_len:
+        if with_admission_ids:
+            dq["admission_ids"].extend([i] * len(eg[cols[0]]))
+        while len(dq[cols[0]]) >= seq_len:
             yield {k: [dq[k].popleft() for _ in range(seq_len)] for k in dq}
 
 

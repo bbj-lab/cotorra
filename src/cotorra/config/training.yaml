@@ -79,6 +79,10 @@ label_weighted_loss:
 time_based_rope:
   sec_per_pos_id: !!int 300
 
+# packed-window hygiene: emit admission_ids, use admission-relative position
+# indices, and mask CE labels at admission boundaries
+block_packed_attention: !!bool false
+
 training_args:
   report_to: wandb
   run_name: *run_name
