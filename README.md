@@ -346,28 +346,30 @@ We provide a CLI:
 ```
  Usage: cotorra [OPTIONS] COMMAND [ARGS]...
 
- Configurable training for generative event models (vXX.X.X)
+ Configurable training for generative event models (v26.6.1)
 
-╭─ Options ───────────────────────────────────────────────────────────────────╮
-│ --install-completion            Install completion for the current shell.   │
-│ --show-completion               Show completion for the current shell, to   │
-│                                 copy it or customize the installation.      │
-│ --help                -h        Show this message and exit.                 │
-╰─────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ──────────────────────────────────────────────────────────────────╮
-│ train             Train a model on tokenized data. For tokenization,        │
-│                   consult the cocoa package.                                │
-│ train-private     Train a model with differential privacy on tokenized      │
-│                   data.                                                     │
-│ tune              Run hyperparameter tuning while training a model.         │
-│ extract           Extract representations from a trained model.             │
-│ generative-score  Generate SCORE/REACH metrics from a trained model and     │
-│                   save them to parquet.                                     │
-│ rep-based-score   Generate rep-based scores for the token-based outcomes of │
-│                   interest.                                                 │
-│                   Note: this requires that features have already been       │
-│                   extracted and saved                                       │
-╰─────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ───────────────────────────────────────────────────────────────╮
+│ --install-completion            Install completion for the current      │
+│                                 shell.                                  │
+│ --show-completion               Show completion for the current shell,  │
+│                                 to copy it or customize the             │
+│                                 installation.                           │
+│ --help                -h        Show this message and exit.             │
+╰─────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ──────────────────────────────────────────────────────────────╮
+│ train             Train a model on tokenized data. For tokenization,    │
+│                   consult the cocoa package.                            │
+│ train-private     Train a model with differential privacy on tokenized  │
+│                   data.                                                 │
+│ tune              Run hyperparameter tuning while training a model.     │
+│ extract           Extract representations from a trained model.         │
+│ generative-score  Generate SCORE/REACH metrics from a trained model and │
+│                   save them to parquet.                                 │
+│ rep-based-score   Generate rep-based scores for the token-based         │
+│                   outcomes of interest.                                 │
+│                   Note: this requires that features have already been   │
+│                   extracted and saved                                   │
+╰─────────────────────────────────────────────────────────────────────────╯
 ```
 
 with commands:
@@ -377,23 +379,24 @@ with commands:
     ```
     Usage: cotorra train [OPTIONS]
 
-    Train a model on tokenized data. For tokenization, consult the cocoa package.
+    Train a model on tokenized data. For tokenization, consult the cocoa
+    package.
 
-    ╭─ Options ───────────────────────────────────────────────────────────────────╮
-    │    --training-config         -t      PATH  Training configuration file      │
-    │                                            (overrides default)              │
-    │ *  --processed-data-home     -p      TEXT  Processed data directory         │
-    │                                            (overrides config)               │
-    │                                            [required]                       │
-    │ *  --output-home             -o      TEXT  Output directory for trained     │
-    │                                            models                           │
-    │                                            [required]                       │
-    │    --resume-from-checkpoint  -r            Try to resume training from the  │
-    │                                            latest checkpoint in             │
-    │                                            --output-home.                   │
-    │    --verbose                 -v            Verbose logging                  │
-    │    --help                    -h            Show this message and exit.      │
-    ╰─────────────────────────────────────────────────────────────────────────────╯
+    ╭─ Options ───────────────────────────────────────────────────────────────╮
+    │    --training-config         -t      PATH  Training configuration file  │
+    │                                            (overrides default)          │
+    │ *  --processed-data-home     -p      TEXT  Processed data directory     │
+    │                                            (overrides config)           │
+    │                                            [required]                   │
+    │ *  --output-home             -o      TEXT  Output directory for trained │
+    │                                            models                       │
+    │                                            [required]                   │
+    │    --resume-from-checkpoint  -r            Try to resume training from  │
+    │                                            the latest checkpoint in     │
+    │                                            --output-home.               │
+    │    --verbose                 -v            Verbose logging              │
+    │    --help                    -h            Show this message and exit.  │
+    ╰─────────────────────────────────────────────────────────────────────────╯
     ```
 
 - `cotorra tune`
@@ -403,17 +406,18 @@ with commands:
 
     Run hyperparameter tuning while training a model.
 
-    ╭─ Options ───────────────────────────────────────────────────────────────────╮
-    │    --training-config      -t      PATH  Training configuration file         │
-    │                                         (overrides default)                 │
-    │ *  --processed-data-home  -p      TEXT  Processed data directory (overrides │
-    │                                         config)                             │
-    │                                         [required]                          │
-    │ *  --output-home          -o      TEXT  Output directory for trained models │
-    │                                         [required]                          │
-    │    --verbose              -v            Verbose logging                     │
-    │    --help                 -h            Show this message and exit.         │
-    ╰─────────────────────────────────────────────────────────────────────────────╯
+    ╭─ Options ───────────────────────────────────────────────────────────────╮
+    │    --training-config      -t      PATH  Training configuration file     │
+    │                                         (overrides default)             │
+    │ *  --processed-data-home  -p      TEXT  Processed data directory        │
+    │                                         (overrides config)              │
+    │                                         [required]                      │
+    │ *  --output-home          -o      TEXT  Output directory for trained    │
+    │                                         models                          │
+    │                                         [required]                      │
+    │    --verbose              -v            Verbose logging                 │
+    │    --help                 -h            Show this message and exit.     │
+    ╰─────────────────────────────────────────────────────────────────────────╯
     ```
 
 - `cotorra train-private`
@@ -423,22 +427,22 @@ with commands:
 
     Train a model with differential privacy on tokenized data.
 
-    ╭─ Options ───────────────────────────────────────────────────────────────────╮
-    │    --training-config      -t      PATH   Training configuration file        │
-    │                                          (overrides default)                │
-    │ *  --processed-data-home  -p      TEXT   Processed data directory           │
-    │                                          (overrides config)                 │
-    │                                          [required]                         │
-    │ *  --output-home          -o      TEXT   Output directory for trained       │
-    │                                          models                             │
-    │                                          [required]                         │
-    │    --noise-multiplier     -n      FLOAT  Noise multiplier (overrides        │
-    │                                          configuration)                     │
-    │    --max-grad-norm        -m      FLOAT  Max grad norm (overrides           │
-    │                                          configuration)                     │
-    │    --verbose              -v             Verbose logging                    │
-    │    --help                 -h             Show this message and exit.        │
-    ╰─────────────────────────────────────────────────────────────────────────────╯
+    ╭─ Options ───────────────────────────────────────────────────────────────╮
+    │    --training-config      -t      PATH   Training configuration file    │
+    │                                          (overrides default)            │
+    │ *  --processed-data-home  -p      TEXT   Processed data directory       │
+    │                                          (overrides config)             │
+    │                                          [required]                     │
+    │ *  --output-home          -o      TEXT   Output directory for trained   │
+    │                                          models                         │
+    │                                          [required]                     │
+    │    --noise-multiplier     -n      FLOAT  Noise multiplier (overrides    │
+    │                                          configuration)                 │
+    │    --max-grad-norm        -m      FLOAT  Max grad norm (overrides       │
+    │                                          configuration)                 │
+    │    --verbose              -v             Verbose logging                │
+    │    --help                 -h             Show this message and exit.    │
+    ╰─────────────────────────────────────────────────────────────────────────╯
     ```
 
 - `cotorra extract`
@@ -448,20 +452,22 @@ with commands:
 
     Extract representations from a trained model.
 
-    ╭─ Options ───────────────────────────────────────────────────────────────────╮
-    │    --extraction-config    -e      PATH  Extraction configuration file       │
-    │                                         (overrides default)                 │
-    │ *  --processed-data-home  -p      TEXT  Processed data directory [required] │
-    │ *  --model-home           -m      TEXT  Directory of the trained model to   │
-    │                                         extract from                        │
-    │                                         [required]                          │
-    │    --output-home          -o      TEXT  Output directory for extracted      │
-    │                                         features, defaults to               │
-    │                                         processed-data-home                 │
-    │    --all-times            -a            Extract features for all time steps │
-    │                                         (instead of just the final one)?    │
-    │    --help                 -h            Show this message and exit.         │
-    ╰─────────────────────────────────────────────────────────────────────────────╯
+    ╭─ Options ───────────────────────────────────────────────────────────────╮
+    │    --extraction-config    -e      PATH  Extraction configuration file   │
+    │                                         (overrides default)             │
+    │ *  --processed-data-home  -p      TEXT  Processed data directory        │
+    │                                         [required]                      │
+    │ *  --model-home           -m      TEXT  Directory of the trained model  │
+    │                                         to extract from                 │
+    │                                         [required]                      │
+    │    --output-home          -o      TEXT  Output directory for extracted  │
+    │                                         features, defaults to           │
+    │                                         processed-data-home             │
+    │    --all-times            -a            Extract features for all time   │
+    │                                         steps (instead of just the      │
+    │                                         final one)?                     │
+    │    --help                 -h            Show this message and exit.     │
+    ╰─────────────────────────────────────────────────────────────────────────╯
     ```
 
 - `cotorra generative-score`
@@ -469,20 +475,22 @@ with commands:
     ```
     Usage: cotorra generative-score [OPTIONS]
 
-    Generate SCORE/REACH metrics from a trained model and save them to parquet.
+    Generate SCORE/REACH metrics from a trained model and save them to
+    parquet.
 
-    ╭─ Options ───────────────────────────────────────────────────────────────────╮
-    │    --scoring-config       -s      PATH  Scoring configuration file          │
-    │                                         (overrides default)                 │
-    │ *  --processed-data-home  -p      TEXT  Processed data directory [required] │
-    │ *  --model-home           -m      TEXT  Directory of the trained model to   │
-    │                                         score with                          │
-    │                                         [required]                          │
-    │    --output-home          -o      TEXT  Output directory for scores,        │
-    │                                         defaults to processed-data-home     │
-    │    --verbose              -v            Verbose logging                     │
-    │    --help                 -h            Show this message and exit.         │
-    ╰─────────────────────────────────────────────────────────────────────────────╯
+    ╭─ Options ───────────────────────────────────────────────────────────────╮
+    │    --scoring-config       -s      PATH  Scoring configuration file      │
+    │                                         (overrides default)             │
+    │ *  --processed-data-home  -p      TEXT  Processed data directory        │
+    │                                         [required]                      │
+    │ *  --model-home           -m      TEXT  Directory of the trained model  │
+    │                                         to score with                   │
+    │                                         [required]                      │
+    │    --output-home          -o      TEXT  Output directory for scores,    │
+    │                                         defaults to processed-data-home │
+    │    --verbose              -v            Verbose logging                 │
+    │    --help                 -h            Show this message and exit.     │
+    ╰─────────────────────────────────────────────────────────────────────────╯
     ```
 
 - `cotorra rep-based-score` (note: you need to run `extract` first)
@@ -493,29 +501,29 @@ with commands:
     Generate rep-based scores for the token-based outcomes of interest. Note:
     this requires that features have already been extracted and saved
 
-    ╭─ Options ───────────────────────────────────────────────────────────────────╮
-    │    --scoring-config      -s      PATH                 Scoring configuration │
-    │                                                       file (overrides       │
-    │                                                       default)              │
-    │ *  --processed-data-ho…  -p      TEXT                 Processed data        │
-    │                                                       directory             │
-    │                                                       [required]            │
-    │ *  --model-home          -m      TEXT                 Directory of the      │
-    │                                                       trained model to      │
-    │                                                       score with            │
-    │                                                       [required]            │
-    │    --output-home         -o      TEXT                 Output directory for  │
-    │                                                       scores, defaults to   │
-    │                                                       processed-data-home   │
-    │                                                       [default: None]       │
-    │    --estimator           -e      [k-NN|lightGBM|logi  Estimator to use for  │
-    │                                  stic|logistic-z|log  rep-based scoring     │
-    │                                  istic-CV|logistic-C  [default: lightGBM]   │
-    │                                  V-z|XGBoost]                               │
-    │    --verbose             -v                           Verbose logging       │
-    │    --help                -h                           Show this message and │
-    │                                                       exit.                 │
-    ╰─────────────────────────────────────────────────────────────────────────────╯
+    ╭─ Options ───────────────────────────────────────────────────────────────╮
+    │    --scoring-config    -s      PATH                 Scoring             │
+    │                                                     configuration file  │
+    │                                                     (overrides default) │
+    │ *  --processed-data-…  -p      TEXT                 Processed data      │
+    │                                                     directory           │
+    │                                                     [required]          │
+    │ *  --model-home        -m      TEXT                 Directory of the    │
+    │                                                     trained model to    │
+    │                                                     score with          │
+    │                                                     [required]          │
+    │    --output-home       -o      TEXT                 Output directory    │
+    │                                                     for scores,         │
+    │                                                     defaults to         │
+    │                                                     processed-data-home │
+    │    --estimator         -e      [k-NN|lightGBM|logi  Estimator to use    │
+    │                                stic|logistic-z|log  for rep-based       │
+    │                                istic-CV|logistic-C  scoring             │
+    │                                V-z|XGBoost]         [default: lightGBM] │
+    │    --verbose           -v                           Verbose logging     │
+    │    --help              -h                           Show this message   │
+    │                                                     and exit.           │
+    ╰─────────────────────────────────────────────────────────────────────────╯
     ```
 
 [^1]:

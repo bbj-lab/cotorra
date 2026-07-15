@@ -1,3 +1,8 @@
+---
+hide:
+    - navigation
+---
+
 {%
    include-markdown "../README.md"
    heading-offset=0
@@ -6,9 +11,9 @@
 
 <div class="grid cards" markdown>
 
--   :material-school:{ .lg .middle } __Train__
+- :material-school:{ .lg .middle } **Train**
 
-    ---
+    ***
 
     Fit a causal LM to predict the next token in each subject's timeline —
     optionally with custom losses, time-aware RoPE, differential privacy, or
@@ -16,18 +21,18 @@
 
     [:octicons-arrow-right-24: Training](#1-training)
 
--   :material-table-arrow-right:{ .lg .middle } __Extract__
+- :material-table-arrow-right:{ .lg .middle } **Extract**
 
-    ---
+    ***
 
     Run a trained model over inference contexts and write hidden-state feature
     tables for downstream representation-based scoring.
 
     [:octicons-arrow-right-24: Extraction](#2-extraction)
 
--   :material-target:{ .lg .middle } __Score__
+- :material-target:{ .lg .middle } **Score**
 
-    ---
+    ***
 
     Produce outcome scores for tokens of interest — Monte-Carlo generative
     scoring (MC / SCOPE / REACH) or a lightweight estimator on extracted
@@ -35,9 +40,9 @@
 
     [:octicons-arrow-right-24: Scoring](#3-scoring)
 
--   :material-book-open-variant:{ .lg .middle } __Recipes__
+- :material-book-open-variant:{ .lg .middle } **Recipes**
 
-    ---
+    ***
 
     Task-oriented guides for common workflows, from the development workflow to
     transfer learning.
