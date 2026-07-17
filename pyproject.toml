@@ -1,10 +1,6 @@
 [project]
     authors = [
-        { name = "Michael C. Burkhart", email = "burkh4rt@uchicago.edu" },
-        { name = "Inhyeok Lee", email = "ihlee@uchicago.edu" },
-        { name = "Luke Solo", email = "lsolo@uchicago.edu" },
-        { name = "S'Khaja Charles", email = "skhaja@uchicago.edu" },
-        { name = "Brett K. Beaulieu-Jones", email = "beaulieujones@uchicago.edu" },
+        { name = "Michael C. Burkhart <burkh4rt@uchicago.edu>, Luke Solo <lsolo@uchicago.edu>, Inhyeok Lee <ihlee@uchicago.edu>, S'Khaja Charles <skhaja@uchicago.edu>, & Brett K. Beaulieu-Jones <beaulieujones@uchicago.edu>" },
     ]
     classifiers = [
         "Development Status :: 2 - Pre-Alpha",
@@ -45,7 +41,7 @@
     name = "cotorra"
     readme = { file = "README.md", content-type = "text/markdown" }
     requires-python = ">=3.11"
-    version = "26.6.1"
+    version = "26.6.2"
 
     [project.scripts]
         cotorra = "cotorra.cli:main"
@@ -70,6 +66,9 @@
             "quick-sco-re @ git+https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git",
             "sglang",
         ]
+
+        # maybe: "quick-sco-re @ git+https://github.com/lukesolo-ml/SCOPE-REACH-Codebase-Companion"
+        # potentially faster
 
 [build-system]
     build-backend = "setuptools.build_meta"
