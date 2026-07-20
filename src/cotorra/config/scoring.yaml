@@ -11,11 +11,33 @@ tokens_of_interest: &tois
 
 score:
   max_len: *max_len
-  n_samp: !!int 10 # MC samples per input per trajectory type
+  n_samp: !!int 100 # MC samples per input per trajectory type
   target_tokens: *tois # token-based outcomes of interest
   end_tokens: # tokens that naturally terminate a sequence
     - EOS
   suppressed_tokens: [] # tokens to suppress (e.g. PAD) via logit bias
-  trunc_id: !!int 0 # token id to force after time horizon exceeded
-  max_time: !!int 1440 # 1 day, max time horizon in minutes
   batch_size: !!int 64
+
+# generative-score only: Monte Carlo trajectory generation settings (used by
+# GenerativeScorer; ignored by rep-based-score). Modeled on the pipeline_config.yaml
+# used by github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.
+generation:
+  temperature: !!float 1.0 # sampling temperature (1.0 for proper MC estimation)
+  score_inline: true # track all score.target_tokens' SCOPE/REACH in one generation pass
+  methods: [M1, M2] # trajectory types to run
+  end_tokens:
+    prefixes: [] # end-token prefixes (e.g. DSCG), in addition to score.end_tokens
+  time_stopping:
+    enabled: false
+    trunc_token: TRUNC # token forced once max_time_minutes is exceeded
+    max_time_minutes: null
+    time_check_interval: !!int 100 # tokens generated between time-horizon checks
+    time_token_bounds: {} # token name -> [lo, hi] minutes, e.g. "TIME//1h-2h": [60, 120]
+
+engine:
+  mem_fraction: !!float 0.85
+  patient_chunk_size: !!int 64 # patients generated per SGLang batch
+
+# how to handle prompts (tokens_past) longer than score.max_len:
+# "drop" skips the patient; "truncate_left" keeps the last max_len tokens
+prompt_overflow: truncate_left
