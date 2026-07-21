@@ -41,6 +41,13 @@ def batched_iter(dset: ds.Dataset, seq_len: int) -> collections.abc.Iterator:
             yield {k: [dq[k].popleft() for _ in range(seq_len)] for k in dq}
 
 
+def pr_auc_score(y_true: np.ndarray, y_score: np.ndarray):
+    precs, recs, *_ = skl_mets.precision_recall_curve(
+        y_true, np.round(y_score, decimals=4), drop_intermediate=True
+    )
+    return skl_mets.auc(recs, precs)
+
+
 def bootstrap_ci(
     y_true: np.ndarray,
     y_score: np.ndarray,
@@ -78,12 +85,59 @@ def bootstrap_ci(
         if "roc_auc" in metrics:
             ret["roc_auc"] = skl_mets.roc_auc_score(yti, ysi)
         if "pr_auc" in metrics:
-            precs, recs, _ = skl_mets.precision_recall_curve(
-                yti, np.round(ysi, decimals=4), drop_intermediate=True
-            )
-            ret["pr_auc"] = skl_mets.auc(recs, precs)
+            ret["pr_auc"] = pr_auc_score(yti, ysi)
         if "brier" in metrics:
             ret["brier"] = skl_mets.brier_score_loss(yti, ysi)
+        return ret
+
+    with jl.Parallel(n_jobs=n_jobs) as par:
+        scores = par(jl.delayed(get_scores_i)(rng_i) for rng_i in rng.spawn(n_samples))
+
+    return {
+        m: np.nanquantile([s[m] for s in scores], q=[alpha / 2, 1 - (alpha / 2)])
+        for m in metrics
+    }
+
+
+def bootstrap_aggregate_ci(
+    y_trues: np.ndarray,
+    y_scores: np.ndarray,
+    *,
+    n_samples: int = 10_000,
+    alpha: float = 0.05,
+    rng: Generator = np.random.default_rng(seed=42),
+    metrics: collections.abc.Sequence[
+        typing.Literal["avg_roc_auc", "avg_pr_auc", "avg_brier"]
+    ] = ("avg_roc_auc", "avg_pr_auc", "avg_brier"),
+    n_jobs: int = -1,
+) -> dict[str, np.ndarray]:
+    """
+    Like `bootstrap_ci` but for the average performance over multiple labels
+    """
+
+    def get_scores_i(rng_i: Generator) -> dict[str, float]:
+        warnings.filterwarnings("ignore")
+        samp_i = rng_i.choice(len(y_trues), size=len(y_trues), replace=True)
+        yti, ysi = y_trues[samp_i], y_scores[samp_i]
+        ret = dict()
+        if "avg_roc_auc" in metrics:
+            ret["avg_roc_auc"] = np.mean(
+                [
+                    skl_mets.roc_auc_score(yti[:, j], ysi[:, j])
+                    for j in range(yti.shape[-1])
+                ]
+            )
+        if "avg_pr_auc" in metrics:
+            ret["avg_pr_auc"] = np.mean(
+                [pr_auc_score(yti[:, j], ysi[:, j]) for j in range(yti.shape[-1])]
+            )
+        if "avg_brier" in metrics:
+            ret["avg_brier"] = np.mean(
+                [
+                    skl_mets.brier_score_loss(yti[:, j], ysi[:, j])
+                    for j in range(yti.shape[-1])
+                ]
+            )
         return ret
 
     with jl.Parallel(n_jobs=n_jobs) as par:
