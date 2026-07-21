@@ -100,8 +100,8 @@ def bootstrap_ci(
 
 
 def bootstrap_aggregate_ci(
-    y_trues: np.ndarray,
-    y_scores: np.ndarray,
+    y_trues: tuple[np.ndarray],
+    y_scores: tuple[np.ndarray],
     *,
     n_samples: int = 10_000,
     alpha: float = 0.05,
@@ -112,31 +112,27 @@ def bootstrap_aggregate_ci(
     n_jobs: int = -1,
 ) -> dict[str, np.ndarray]:
     """
-    Like `bootstrap_ci` but for the average performance over multiple labels
+    Like `bootstrap_ci` but for the average performance over multiple labels;
+    allow pairs of (y_true, y_score) to have different lengths
     """
 
     def get_scores_i(rng_i: Generator) -> dict[str, float]:
         warnings.filterwarnings("ignore")
-        samp_i = rng_i.choice(len(y_trues), size=len(y_trues), replace=True)
-        yti, ysi = y_trues[samp_i], y_scores[samp_i]
+        resamples = [
+            (yt[samp], ys[samp])
+            for yt, ys in zip(y_trues, y_scores)
+            if (samp := rng_i.choice(len(yt), size=len(yt), replace=True)) is not None
+        ]
         ret = dict()
         if "avg_roc_auc" in metrics:
             ret["avg_roc_auc"] = np.mean(
-                [
-                    skl_mets.roc_auc_score(yti[:, j], ysi[:, j])
-                    for j in range(yti.shape[-1])
-                ]
+                [skl_mets.roc_auc_score(yt, ys) for yt, ys in resamples]
             )
         if "avg_pr_auc" in metrics:
-            ret["avg_pr_auc"] = np.mean(
-                [pr_auc_score(yti[:, j], ysi[:, j]) for j in range(yti.shape[-1])]
-            )
+            ret["avg_pr_auc"] = np.mean([pr_auc_score(yt, ys) for yt, ys in resamples])
         if "avg_brier" in metrics:
             ret["avg_brier"] = np.mean(
-                [
-                    skl_mets.brier_score_loss(yti[:, j], ysi[:, j])
-                    for j in range(yti.shape[-1])
-                ]
+                [skl_mets.brier_score_loss(yt, ys) for yt, ys in resamples]
             )
         return ret
 
