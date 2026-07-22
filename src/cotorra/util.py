@@ -151,7 +151,7 @@ def bootstrap_pval(
     *,
     n_samples: int = 10_000,
     rng: Generator = np.random.default_rng(seed=42),
-    alternative: typing.Literal["one-sided", "two-sided"] = "one-sided",
+    alternative: typing.Literal["one-sided", "two-sided"] = "two-sided",
     metrics: typing.Tuple[typing.Literal["roc_auc", "pr_auc", "brier"], ...] = (
         "roc_auc",
         "pr_auc",
@@ -220,10 +220,12 @@ def bootstrap_pval(
         diffs = par(jl.delayed(get_diffs_i)(rng_i) for rng_i in rng.spawn(n_samples))
 
     if alternative == "one-sided":
-        return {ob: np.mean([d[ob] > diff_obs[ob] for d in diffs]) for ob in metrics}
+        return {
+            ob: np.mean([d[ob] > diff_obs[ob] for d in diffs]).item() for ob in metrics
+        }
     else:  # two-sided
         return {
-            ob: np.mean([np.abs(d[ob]) > np.abs(diff_obs[ob]) for d in diffs])
+            ob: np.mean([np.abs(d[ob]) > np.abs(diff_obs[ob]).item() for d in diffs])
             for ob in metrics
         }
 
@@ -235,7 +237,7 @@ def bootstrap_aggregate_pval(
     *,
     n_samples: int = 10_000,
     rng: Generator = np.random.default_rng(seed=42),
-    alternative: typing.Literal["one-sided", "two-sided"] = "one-sided",
+    alternative: typing.Literal["one-sided", "two-sided"] = "two-sided",
     metrics: typing.Tuple[
         typing.Literal["avg_roc_auc", "avg_pr_auc", "avg_brier"], ...
     ] = ("avg_roc_auc", "avg_pr_auc", "avg_brier"),
@@ -334,9 +336,11 @@ def bootstrap_aggregate_pval(
         diffs = par(jl.delayed(get_diffs_i)(rng_i) for rng_i in rng.spawn(n_samples))
 
     if alternative == "one-sided":
-        return {ob: np.mean([d[ob] > diff_obs[ob] for d in diffs]) for ob in metrics}
+        return {
+            ob: np.mean([d[ob] > diff_obs[ob] for d in diffs]).item() for ob in metrics
+        }
     else:  # two-sided
         return {
-            ob: np.mean([np.abs(d[ob]) > np.abs(diff_obs[ob]) for d in diffs])
+            ob: np.mean([np.abs(d[ob]) > np.abs(diff_obs[ob]) for d in diffs]).item()
             for ob in metrics
         }
