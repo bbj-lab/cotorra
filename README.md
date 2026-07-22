@@ -322,8 +322,8 @@ that specifies:
     - **max_len**: Maximum input length (tokens) during scoring.
     - **n_samp**: Number of Monte Carlo samples per input per trajectory type.
     - **target_tokens**: Token-based outcomes of interest to score. Supports
-      patterns specified with fnmatch. Every matching vocabulary token becomes
-      an outcome that `generative-score` samples trajectories for.
+      patterns specified with fnmatch. Every matching vocabulary token becomes an
+      outcome that `generative-score` samples trajectories for.
     - **end_tokens**: Tokens that naturally terminate a generated sequence (e.g.
       `EOS`).
     - **suppressed_tokens**: Tokens to suppress via logit bias during generation
@@ -335,8 +335,8 @@ that specifies:
     - **temperature**: Sampling temperature (1.0 for proper Monte Carlo
       estimation).
     - **score_inline**: If true, tracks every `score.target_tokens` outcome's
-      SCOPE/REACH estimate in a single generation pass instead of a separate
-      pass per outcome.
+      SCOPE/REACH estimate in a single generation pass instead of a separate pass
+      per outcome.
     - **methods**: Which trajectory types to run — some subset of `[M1, M2]`.
     - **end_tokens.prefixes**: Additional end-token prefixes (e.g. `DSCG`), on
       top of `score.end_tokens`.
@@ -344,14 +344,12 @@ that specifies:
         - **enabled**: Turns on simulated-time-horizon stopping.
         - **trunc_token**: Token forced once the time horizon is exceeded.
         - **max_time_minutes**: Maximum simulated time horizon, in minutes.
-        - **time_check_interval**: Tokens generated between time-horizon
-          checks.
-        - **time_token_bounds**: Map of time-bin token name to `[lo, hi]`
-          minute bounds (e.g. `"TIME//1h-2h": [60, 120]`), used to estimate
-          elapsed time from generated tokens.
+        - **time_check_interval**: Tokens generated between time-horizon checks.
+        - **time_token_bounds**: Map of time-bin token name to `[lo, hi]` minute
+          bounds (e.g. `"TIME//1h-2h": [60, 120]`), used to estimate elapsed time
+          from generated tokens.
 - **engine** _(generative-score only)_:
-    - **mem_fraction**: Fraction of GPU memory reserved for the inference
-      engine.
+    - **mem_fraction**: Fraction of GPU memory reserved for the inference engine.
     - **patient_chunk_size**: Number of patients generated per batch.
 - **prompt_overflow** _(generative-score only)_: How to handle `tokens_past`
   longer than `score.max_len` — `"drop"` skips the patient, `"truncate_left"`

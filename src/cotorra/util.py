@@ -152,7 +152,7 @@ def bootstrap_pval(
     n_samples: int = 10_000,
     rng: Generator = np.random.default_rng(seed=42),
     alternative: typing.Literal["one-sided", "two-sided"] = "one-sided",
-    objs: typing.Tuple[typing.Literal["roc_auc", "pr_auc", "brier"], ...] = (
+    metrics: typing.Tuple[typing.Literal["roc_auc", "pr_auc", "brier"], ...] = (
         "roc_auc",
         "pr_auc",
         "brier",
@@ -176,13 +176,13 @@ def bootstrap_pval(
 
     def get_diffs(yt0, ys0, yt1, ys1) -> dict[str, float]:
         diffs = dict()
-        if "roc_auc" in objs:
+        if "roc_auc" in metrics:
             diffs["roc_auc"] = skl_mets.roc_auc_score(
                 yt1, ys1
             ) - skl_mets.roc_auc_score(yt0, ys0)
-        if "pr_auc" in objs:
+        if "pr_auc" in metrics:
             diffs["pr_auc"] = pr_auc_score(yt1, ys1) - pr_auc_score(yt0, ys0)
-        if "brier" in objs:  # higher brier is worse
+        if "brier" in metrics:  # higher brier is worse
             diffs["brier"] = -1 * (
                 skl_mets.brier_score_loss(yt1, ys1)
                 - skl_mets.brier_score_loss(yt0, ys0)
@@ -220,11 +220,11 @@ def bootstrap_pval(
         diffs = par(jl.delayed(get_diffs_i)(rng_i) for rng_i in rng.spawn(n_samples))
 
     if alternative == "one-sided":
-        return {ob: np.mean([d[ob] > diff_obs[ob] for d in diffs]) for ob in objs}
+        return {ob: np.mean([d[ob] > diff_obs[ob] for d in diffs]) for ob in metrics}
     else:  # two-sided
         return {
             ob: np.mean([np.abs(d[ob]) > np.abs(diff_obs[ob]) for d in diffs])
-            for ob in objs
+            for ob in metrics
         }
 
 
@@ -236,7 +236,7 @@ def bootstrap_aggregate_pval(
     n_samples: int = 10_000,
     rng: Generator = np.random.default_rng(seed=42),
     alternative: typing.Literal["one-sided", "two-sided"] = "one-sided",
-    objs: typing.Tuple[
+    metrics: typing.Tuple[
         typing.Literal["avg_roc_auc", "avg_pr_auc", "avg_brier"], ...
     ] = ("avg_roc_auc", "avg_pr_auc", "avg_brier"),
     n_jobs: int = -1,
@@ -260,21 +260,21 @@ def bootstrap_aggregate_pval(
     def get_diffs(resamples: list[tuple]) -> dict[str, float]:
         # `resamples`: per-label tuples of (yt0, ys0, yt1, ys1)
         diffs = dict()
-        if "avg_roc_auc" in objs:
+        if "avg_roc_auc" in metrics:
             diffs["avg_roc_auc"] = np.mean(
                 [
                     skl_mets.roc_auc_score(yt1, ys1) - skl_mets.roc_auc_score(yt0, ys0)
                     for yt0, ys0, yt1, ys1 in resamples
                 ]
             )
-        if "avg_pr_auc" in objs:
+        if "avg_pr_auc" in metrics:
             diffs["avg_pr_auc"] = np.mean(
                 [
                     pr_auc_score(yt1, ys1) - pr_auc_score(yt0, ys0)
                     for yt0, ys0, yt1, ys1 in resamples
                 ]
             )
-        if "avg_brier" in objs:  # higher brier is worse
+        if "avg_brier" in metrics:  # higher brier is worse
             diffs["avg_brier"] = np.mean(
                 [
                     -1
@@ -334,9 +334,9 @@ def bootstrap_aggregate_pval(
         diffs = par(jl.delayed(get_diffs_i)(rng_i) for rng_i in rng.spawn(n_samples))
 
     if alternative == "one-sided":
-        return {ob: np.mean([d[ob] > diff_obs[ob] for d in diffs]) for ob in objs}
+        return {ob: np.mean([d[ob] > diff_obs[ob] for d in diffs]) for ob in metrics}
     else:  # two-sided
         return {
             ob: np.mean([np.abs(d[ob]) > np.abs(diff_obs[ob]) for d in diffs])
-            for ob in objs
+            for ob in metrics
         }

@@ -30,6 +30,7 @@
     "editor.rulers": [81]
   },
   "prettier.configPath": ".prettierrc.toml",
+  "prettier.ignorePath": ".prettierignore",
   "python.experiments.enabled": false,
   "[python]": {
     "editor.defaultFormatter": "charliermarsh.ruff",

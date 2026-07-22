@@ -67,9 +67,6 @@
             "sglang",
         ]
 
-        # maybe: "quick-sco-re @ git+https://github.com/lukesolo-ml/SCOPE-REACH-Codebase-Companion"
-        # potentially faster
-
 [build-system]
     build-backend = "setuptools.build_meta"
     requires      = [ "setuptools", "wheel" ]
