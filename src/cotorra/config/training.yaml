@@ -55,7 +55,7 @@ model_presets:
 model: *llama_32
 
 max_seq_len: !!int &max_len 4096
-n_epochs: !!int 2
+n_epochs: !!int 1
 run_name: &run_name cotorra-tuning
 
 tokens_of_interest: &tois
@@ -104,6 +104,7 @@ training_args:
   local_rank: -1
   # gradient_checkpointing: !!bool true # needed for large gemma architectures
   use_cache: !!bool false # incompatible with gradient_checkpointing
+  num_train_epochs: !!int 1 # hf default is 3; thanks @AuroraColombo for pointing this out
 
 tuning_args:
   direction: minimize
