@@ -103,7 +103,7 @@ Finally, we need `subject_splits.parquet` which is a table listing out all
 subject_id's and their corresponding split assignment (with splits: `train`,
 `tuning`, and `held_out`). This table may include additional demographic
 information provided as pass-through-columns to
-[cocoa](https://github.com/bbj-lab/cocoa).
+[cocoa-tokenizer](https://pypi.org/project/cocoa-tokenizer/).
 
 ```
 ┌────────────┬──────────┐
@@ -138,7 +138,7 @@ The `cocoa winnow` command provides these.
 <!-- prettier-ignore-start -->
 > [!TIP]
 > For getting your data to this point, check out our configurable
-> collator / tokenizer: [☕️ cocoa](https://github.com/bbj-lab/cocoa)
+> collator / tokenizer: [☕️ cocoa-tokenizer](https://pypi.org/project/cocoa-tokenizer/)
 <!-- prettier-ignore-end -->
 
 Each command below is driven by a YAML config. The package ships a default for
