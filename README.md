@@ -27,7 +27,7 @@ tokenized timelines. _Cotorra_ is a Spanish term for a small-to-medium sized
 parrot, particularly the Monk parakeet. Monk parakeets were introduced to the
 south side of Chicago, where they have flourished. [^1] It benefits from previous
 experience training foundation models on tokenized electronic health records.
-[^2] [^3] [^4] [^5]
+[^2] [^3] [^4] [^5] [^6]
 
 Given a dataset of tokenized timelines, this package trains a model to predict
 the next token in a subject's timeline given their history up to that point, and
@@ -578,6 +578,12 @@ with commands:
     medical event models,
     [arXiv:2604.16775](https://doi.org/10.48550/arXiv.2604.16775)
 
+[^6]:
+    M. Burkhart, L. Solo, I. Lee, S. Charles, Z. Liao, K. Chhikara, D. Therese,
+    W.-T. Liao, C. Gao, W. Parker, & B. Beaulieu-Jones, Federated generative
+    event models for tokenized electronic health records,
+    [arXiv:2608.02939](https://doi.org/10.48550/arXiv.2608.02939)
+
 <!--
 
 Run in tmux:
@@ -650,7 +656,8 @@ rm -rf dist
 python3 -m pip install --upgrade build
 python3 -m build
 python3 -m pip install --upgrade twine
-python3 -m twine upload --repository pypi dist/*
+python -m pypi_attestations sign dist/*
+python3 -m twine upload --attestations --repository pypi dist/*
 ```
 
 Make docs:
@@ -661,7 +668,7 @@ mkdocs serve --dev-addr 127.0.0.1:8002
 
 Make tag:
 ```
-git tag -s v26.6.1 -m "docs may be read"
+git tag -s v26.6.3 -m "bootstrapping utilities"
 ```
 
 -->

@@ -1,6 +1,11 @@
 # idiosyncratic
 .venv
 .idea
+data-raw
+dist
+build
+site
+.claude
 output
 processed
 wandb
