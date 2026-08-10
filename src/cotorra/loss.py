@@ -79,8 +79,28 @@ class Loss:
                 self.label_to_q[self.label_to_cat == i]
             ).to(device=cat_logits.device, dtype=t.float32)
             cat_true = self.label_to_q.to(device=cat_labels.device)[cat_labels]
-            loss += t.nn.MSELoss()(cat_preds, cat_true).to(dtype=t.float32)
+            loss += t.nn.MSELoss(reduction='sum')(cat_preds, cat_true).to(dtype=t.float32)
         return loss
+
+    def quantile_token_loss(self, outputs, labels, **kwargs):
+            loss = 0.0
+            shift_logits = outputs.get("logits")[:, :-1].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+            for i in range(self.n_cats):
+                mask = self.label_to_cat.to(device=labels.device)[shift_labels] == i
+                if not mask.any():
+                    continue
+                cat_labels = shift_labels[mask]
+                cat_logits = shift_logits[mask][:, self.label_to_cat == i].to(
+                    dtype=t.float32
+                )
+                cat_true = self.label_to_q.to(device=cat_labels.device)[cat_labels] # shape: N
+                q = (self.label_to_q[self.label_to_cat == i]
+                    ).to(device=cat_logits.device, dtype=t.float32).view(-1)        # shape: num_cats
+                cat_errors = (cat_true.unsqueeze(-1) - q).abs()                     # shape: N x num_cats                 
+                cat_probs = t.softmax(cat_logits, dim=-1)                           # shape: N x num_cats
+                loss += (cat_errors * cat_probs).sum(dim=-1)                        # shape: N
+            return loss
 
     def label_weighted_loss(self, outputs, labels, **kwargs):
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
@@ -96,7 +116,7 @@ class Loss:
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = labels[:, 1:].contiguous()
-        return t.nn.CrossEntropyLoss()(
+        return t.nn.CrossEntropyLoss(reduction='sum')(
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
         ).to(dtype=t.float32)
 
@@ -115,6 +135,10 @@ class Loss:
             quantile_token_loss = self.quantile_token_loss(outputs, labels)
             log |= {"quantile_token_loss": quantile_token_loss.item()}
             loss += self.cfg.quantile_token_loss.qt_weight * quantile_token_loss
+        if "was_token_loss" in self.cfg:
+            quantile_token_loss = self.was_token_loss(outputs, labels)
+            log |= {"was_token_loss": quantile_token_loss.item()}
+            loss += self.cfg.was_tokenLoss.qt_weight * quantile_token_loss
         if wandb.run is not None:
             log |= {"custom_loss": loss.item()}
             wandb.log(log)
