@@ -133,7 +133,6 @@ class RepBasedScorer(Configurable):
                     n_jobs=-1,
                     scoring="roc_auc",
                     max_iter=10_000,
-                    use_legacy_attributes=False,
                     l1_ratios=(0,),
                 )
             case "logistic-cv-z" | "lr-cv-z":
@@ -147,7 +146,6 @@ class RepBasedScorer(Configurable):
                         n_jobs=-1,
                         scoring="roc_auc",
                         max_iter=10_000,
-                        use_legacy_attributes=False,
                         l1_ratios=(0,),  # suppresses a warning
                     ),
                 )

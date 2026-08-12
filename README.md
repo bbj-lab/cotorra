@@ -199,6 +199,26 @@ that specifies:
   embeddings.
     - **sec_per_pos_id**: Number of seconds represented by one position id
       increment.
+- **basis_blended_tokens** _(optional)_: Represents each numeric measurement
+  as a Beta-mixture blend of `k` learned basis embeddings per numeric
+  category (keyed by rank, not by quantile bin), with a matching soft-label
+  next-token-prediction loss, instead of a single fused decile/percentile
+  token. Requires the processed data to have been tokenized with cocoa's
+  `fused: true` and `include_exact_rank: true`. Replaces the base
+  cross-entropy term entirely (mutually exclusive in effect, though not
+  enforced, with `label_weighted_loss`); composes with `time_based_rope`.
+  Not supported by `generative-score`, which relies on an external engine
+  that has no notion of this vocab/model shape.
+    - **k**: Number of basis elements per numeric category.
+    - **train_beta_params**: Whether the per-category Beta shape parameters
+      (`log(alpha)`, `log(beta)`) receive gradient, or stay frozen at their
+      order-statistic initialization.
+    - **train_importance_scale**: Whether the per-category, per-basis
+      importance weights `log(a_c,i)` receive gradient. These scale each
+      basis element's contribution to the mixture weights independently of
+      its Beta shape (`w_c,i = a_c,i * f(r,i) / sum_j a_c,j * f(r,j)`,
+      instead of the plain density ratio). Initialized to `a = 1`
+      uniformly, so training starts identical to the unscaled formula.
 - **training_args**: Arguments passed to HuggingFace's
   [`TrainingArguments`](https://huggingface.co/docs/transformers/en/main_classes/trainer#transformers.TrainingArguments).
 - **tuning_args**: Arguments passed to HuggingFace's
@@ -274,6 +294,12 @@ that specifies:
   extraction (must match the setting used at training time).
     - **sec_per_pos_id**: Number of seconds represented by one position id
       increment.
+- **basis_blended_tokens** _(optional)_: Presence enables reading the
+  `exact_ranks_past` column needed by a model trained with
+  `basis_blended_tokens`. Unlike `time_based_rope`, no sub-keys are read here
+  at extraction time -- `k` and the category/basis-id assignment are loaded
+  from the checkpoint's own config, not re-derived, so they can't drift out
+  of sync with training.
 - **extract**:
     - **max_len**: Maximum input length (tokens) during extraction.
     - **batch_size**: Batch size for inference.

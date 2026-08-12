@@ -149,8 +149,8 @@ class TrainerDP(Trainer):
         if verbose:
             self.logger.summarize_trained_model(
                 model=unwrapped_model,
-                bos_token_id=self.tkzr_cfg.lookup["BOS"],
-                reverse={v: k for k, v in self.tkzr_cfg.lookup.items()},
+                bos_token_id=self.bos_token_id,
+                reverse=self.reverse_lookup,
             )
 
 

@@ -69,8 +69,8 @@ class Loader(Configurable):
             .rename_column("tokens", "input_ids")
             .select_columns(
                 ["input_ids"]
-                if "time_based_rope" not in self.cfg
-                else ["input_ids", "s_elapsed"]
+                + (["s_elapsed"] if "time_based_rope" in self.cfg else [])
+                + (["exact_ranks"] if "basis_blended_tokens" in self.cfg else [])
             )
         )
 
@@ -86,8 +86,12 @@ class Loader(Configurable):
                 .rename_column("tokens_past", "input_ids")
                 .select_columns(
                     ["input_ids"]
-                    if "time_based_rope" not in self.cfg
-                    else ["input_ids", "s_elapsed_past"]
+                    + (["s_elapsed_past"] if "time_based_rope" in self.cfg else [])
+                    + (
+                        ["exact_ranks_past"]
+                        if "basis_blended_tokens" in self.cfg
+                        else []
+                    )
                 )
             )
             if self.inference_files

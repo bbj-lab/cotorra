@@ -9,25 +9,37 @@ import fnmatch
 
 import numpy as np
 import torch as t
-
 import wandb
+
 from cotorra.logger import Logger
 
 
 class Loss:
-    def __init__(self, cfg=None, tkzr_cfg=None):
-
+    def __init__(self, cfg=None, tkzr_cfg=None, basis_vocab=None):
         self.cfg = cfg
         self.tkzr_cfg = tkzr_cfg
         self.vocab = np.array(
             sorted(self.tkzr_cfg.lookup, key=self.tkzr_cfg.lookup.get)
         )
+
+        # basis_vocab (see cotorra.basis_blended.build_basis_vocab), when
+        # provided, is the *same* collapsed-vocab object the model was built
+        # from -- category/basis-id assignment can never disagree between the
+        # embedding blend and the loss target because both read from this one
+        # source of truth (threaded through by Trainer.__init__).
+        self.basis_vocab = basis_vocab
+        if self.basis_vocab is not None:
+            self._category_base_id_t = t.tensor(
+                self.basis_vocab["category_base_id"], dtype=t.long
+            )
         self.grokked_outcome_tokens = [
             x.item()
             for x in self.vocab
             if any(
                 fnmatch.fnmatch(x, p)
-                for p in self.cfg.label_weighted_loss.tokens_of_interest
+                for p in self.cfg.get("label_weighted_loss", {}).get(
+                    "tokens_of_interest", []
+                )
             )
         ]
         self.logger = Logger()
@@ -79,28 +91,83 @@ class Loss:
                 self.label_to_q[self.label_to_cat == i]
             ).to(device=cat_logits.device, dtype=t.float32)
             cat_true = self.label_to_q.to(device=cat_labels.device)[cat_labels]
-            loss += t.nn.MSELoss(reduction='sum')(cat_preds, cat_true).to(dtype=t.float32)
+            loss += t.nn.MSELoss(reduction="sum")(cat_preds, cat_true).to(
+                dtype=t.float32
+            )
         return loss
 
     def quantile_token_loss(self, outputs, labels, **kwargs):
-            loss = 0.0
-            shift_logits = outputs.get("logits")[:, :-1].contiguous()
-            shift_labels = labels[:, 1:].contiguous()
-            for i in range(self.n_cats):
-                mask = self.label_to_cat.to(device=labels.device)[shift_labels] == i
-                if not mask.any():
-                    continue
-                cat_labels = shift_labels[mask]
-                cat_logits = shift_logits[mask][:, self.label_to_cat == i].to(
-                    dtype=t.float32
-                )
-                cat_true = self.label_to_q.to(device=cat_labels.device)[cat_labels] # shape: N
-                q = (self.label_to_q[self.label_to_cat == i]
-                    ).to(device=cat_logits.device, dtype=t.float32).view(-1)        # shape: num_cats
-                cat_errors = (cat_true.unsqueeze(-1) - q).abs()                     # shape: N x num_cats                 
-                cat_probs = t.softmax(cat_logits, dim=-1)                           # shape: N x num_cats
-                loss += (cat_errors * cat_probs).sum(dim=-1)                        # shape: N
-            return loss
+        loss = 0.0
+        shift_logits = outputs.get("logits")[:, :-1].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        for i in range(self.n_cats):
+            mask = self.label_to_cat.to(device=labels.device)[shift_labels] == i
+            if not mask.any():
+                continue
+            cat_labels = shift_labels[mask]
+            cat_logits = shift_logits[mask][:, self.label_to_cat == i].to(
+                dtype=t.float32
+            )
+            cat_true = self.label_to_q.to(device=cat_labels.device)[
+                cat_labels
+            ]  # shape: N
+            q = (
+                (self.label_to_q[self.label_to_cat == i])
+                .to(device=cat_logits.device, dtype=t.float32)
+                .view(-1)
+            )  # shape: num_cats
+            cat_errors = (cat_true.unsqueeze(-1) - q).abs()  # shape: N x num_cats
+            cat_probs = t.softmax(cat_logits, dim=-1)  # shape: N x num_cats
+            loss += (cat_errors * cat_probs).sum(dim=-1)  # shape: N
+        return loss
+
+    def basis_blended_token_loss(
+        self, outputs, labels, category_ids=None, ranks=None, **kwargs
+    ):
+        """
+        replaces one-hot next-token-prediction CE with a soft target for
+        numeric (category, rank) positions: P(other categories / non-numeric)
+        = 0, P(this category's i-th basis token) = w_i(rank) -- see "Loss
+        function" in fuzzy_token_planning.md. Non-numeric positions keep
+        ordinary one-hot CE. Sum-reduced (not mean), matching the rest of
+        this module, so batches with more/fewer numeric tokens contribute
+        proportionally more/less gradient signal.
+
+        `outputs["mixture_weights"]` is read directly from the model's own
+        forward pass (see BasisBlendedCausalLM) rather than recomputed here
+        from log_alpha/log_beta, so the loss target and the input embedding
+        blend can never disagree, and this keeps working unmodified under
+        Opacus's GradSampleModule wrapping (which would otherwise require
+        unwrapping the model just to read its parameters).
+        """
+        shift_logits = outputs.get("logits")[:, :-1].contiguous().to(dtype=t.float32)
+        shift_labels = labels[:, 1:].contiguous()
+        shift_cat = category_ids[:, 1:].contiguous()
+        log_probs = t.log_softmax(shift_logits, dim=-1)
+        numeric = shift_cat >= 0
+
+        loss = t.zeros((), dtype=t.float32, device=shift_logits.device)
+
+        nonnum = ~numeric
+        if nonnum.any():
+            nn_labels = shift_labels[nonnum].unsqueeze(-1)
+            loss = loss - log_probs[nonnum].gather(-1, nn_labels).squeeze(-1).sum()
+
+        if numeric.any():
+            mixture_weights = outputs.get("mixture_weights")
+            assert mixture_weights is not None, (
+                "basis_blended_tokens requires the model to return mixture_weights"
+            )
+            shift_w = mixture_weights[:, 1:].contiguous()[numeric].to(dtype=t.float32)
+            cat_num = shift_cat[numeric]
+            k = shift_w.shape[-1]
+            basis_ids = self._category_base_id_t.to(cat_num.device)[cat_num].unsqueeze(
+                -1
+            ) + t.arange(k, device=cat_num.device)
+            log_probs_numeric = log_probs[numeric].gather(-1, basis_ids)
+            loss = loss - (shift_w * log_probs_numeric).sum()
+
+        return loss.to(dtype=t.float32)
 
     def label_weighted_loss(self, outputs, labels, **kwargs):
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
@@ -116,14 +183,20 @@ class Loss:
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = labels[:, 1:].contiguous()
-        return t.nn.CrossEntropyLoss(reduction='sum')(
+        return t.nn.CrossEntropyLoss(reduction="sum")(
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
         ).to(dtype=t.float32)
 
     def custom_loss(self, outputs, labels, **kwargs):
         loss = 0.0
         log = dict()
-        if "label_weighted_loss" in self.cfg:
+        if "basis_blended_tokens" in self.cfg:
+            basis_blended_token_loss = self.basis_blended_token_loss(
+                outputs, labels, **kwargs
+            )
+            log |= {"basis_blended_token_loss": basis_blended_token_loss.item()}
+            loss += basis_blended_token_loss
+        elif "label_weighted_loss" in self.cfg:
             label_weighted_loss = self.label_weighted_loss(outputs, labels)
             log |= {"label_weighted_loss": label_weighted_loss.item()}
             loss += label_weighted_loss

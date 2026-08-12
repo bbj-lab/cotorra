@@ -1,0 +1,61 @@
+%YAML 1.2
+---
+# Isolates the mixture-weight scheme itself, with nothing about it learned:
+# k=8 (matching the original tuned run), train_beta_params=false (log_alpha/
+# log_beta frozen at their order-statistic init) AND train_importance_scale=
+# false (log_importance frozen at 0, a=1 uniformly). Only e_c,i (and the rest
+# of the transformer) actually train -- w_c,i(r) is a fixed function of rank
+# throughout. Tests whether the original k=8 result depended on adapting the
+# Beta shapes/importances at all, or whether the fixed order-statistic blend
+# alone is enough.
+model:
+  model_name: meta-llama/Llama-3.2-1B
+  model_args:
+    hidden_size: !!int 256
+    intermediate_size: !!int 1024
+    num_hidden_layers: !!int 6
+    num_attention_heads: !!int 8
+    max_position_embeddings: !!int 32768
+
+max_seq_len: !!int 1024
+n_epochs: !!int 1
+run_name: &run_name basis-blended-mimic-tune-k8frozen
+
+wandb:
+  project: cotorra
+  run_name: *run_name
+
+custom_loss: !!bool true
+basis_blended_tokens:
+  k: !!int 8
+  train_beta_params: !!bool false
+  train_importance_scale: !!bool false
+
+tuning_args:
+  direction: minimize
+  backend: optuna
+  n_trials: !!int 10
+
+training_args:
+  report_to: wandb
+  run_name: *run_name
+  per_device_train_batch_size: !!int 32
+  per_device_eval_batch_size: !!int 32
+  save_total_limit: !!int 1
+  metric_for_best_model: eval_loss
+  load_best_model_at_end: !!bool true
+  greater_is_better: !!bool false
+  eval_strategy: steps
+  eval_steps: !!float 0.1
+  prediction_loss_only: !!bool true
+  save_strategy: steps
+  save_steps: !!float 0.1
+  ddp_find_unused_parameters: !!bool false
+  auto_find_batch_size: !!bool false
+  learning_rate: !!float 2e-4
+  gradient_accumulation_steps: !!int 1
+  remove_unused_columns: !!bool false
+  local_rank: !!int -1
+  use_cache: !!bool false
+  logging_steps: !!int 50
+  num_train_epochs: !!int 1

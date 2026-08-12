@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModelForCausalLM
 
+from cotorra.basis_blended import BasisBlendedConfig  # import registers Auto* class
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
 
@@ -53,6 +54,25 @@ class Extractor(Configurable):
         self.model.to(self.device).eval()
         if not isinstance(self.model.config.pad_token_id, int):
             self.model.config.pad_token_id = self.model.config.eos_token_id
+
+        # basis-blended-ness (k, category assignment, etc.) is read from the
+        # loaded checkpoint's own config, not from extraction.yaml -- it's
+        # fixed at train time and must be loaded faithfully, not re-derived.
+        if isinstance(self.model.config, BasisBlendedConfig):
+            self._raw_to_category_t = t.tensor(
+                self.model.config.raw_to_category, dtype=t.long
+            ).to(self.device)
+            self._raw_to_collapsed_t = t.tensor(
+                self.model.config.raw_to_collapsed, dtype=t.long
+            ).to(self.device)
+            # pad_sequence below pads *raw* cocoa token ids (batch["input_ids"]
+            # is still raw-vocab space at this point), so the pad value must
+            # also be raw-space -- self.model.config.pad_token_id is already
+            # in collapsed space and would index raw_to_collapsed_t wrongly.
+            self._raw_pad_value = self.tkzr_cfg.lookup["EOS"]
+        else:
+            self._raw_to_category_t = None
+            self._raw_pad_value = self.model.config.pad_token_id
         self.ds = None
 
     def collate_fn(self, batch):
@@ -60,8 +80,22 @@ class Extractor(Configurable):
         input_ids = pad_sequence(
             [x[:ml] for x in batch["input_ids"]],
             batch_first=True,
-            padding_value=self.model.config.pad_token_id,
+            padding_value=self._raw_pad_value,
         ).to(self.model.device)
+
+        extra = {}
+        if self._raw_to_category_t is not None:
+            extra["category_ids"] = self._raw_to_category_t[input_ids]
+            extra["ranks"] = pad_sequence(
+                [
+                    t.as_tensor(x[:ml], dtype=t.float32)
+                    for x in batch["exact_ranks_past"]
+                ],
+                batch_first=True,
+                padding_value=0.0,
+            ).to(self.model.device)
+            input_ids = self._raw_to_collapsed_t[input_ids]
+
         if "time_based_rope" in self.cfg:
             p_ids = (
                 pad_sequence(
@@ -74,7 +108,7 @@ class Extractor(Configurable):
             p_ids += t.arange(p_ids.shape[-1], device=p_ids.device, dtype=p_ids.dtype)
         else:
             p_ids = None
-        return {"input_ids": input_ids, "position_ids": p_ids}
+        return {"input_ids": input_ids, "position_ids": p_ids, **extra}
 
     def extract_final(self, batch, all_times: bool = False):
         collated = self.collate_fn(batch)

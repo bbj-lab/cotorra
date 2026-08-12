@@ -1,0 +1,51 @@
+%YAML 1.2
+---
+model:
+  model_name: meta-llama/Llama-3.2-1B
+  model_args:
+    hidden_size: !!int 256
+    intermediate_size: !!int 1024
+    num_hidden_layers: !!int 6
+    num_attention_heads: !!int 8
+    max_position_embeddings: !!int 32768
+
+max_seq_len: !!int 1024
+n_epochs: !!int 1
+run_name: &run_name basis-blended-mimic
+
+wandb:
+  project: cotorra
+  run_name: *run_name
+
+custom_loss: !!bool true
+basis_blended_tokens:
+  k: !!int 8
+  train_beta_params: !!bool true
+label_weighted_loss:
+  tokens_of_interest:
+    - XFR-IN//icu
+    - RESP//imv
+    - DSCG//expired
+    - ASMT//cam_total_yes
+    - LABEL//*
+  toi_weight: !!float 20.0
+
+training_args:
+  report_to: "none"
+  run_name: *run_name
+  per_device_train_batch_size: !!int 32
+  per_device_eval_batch_size: !!int 32
+  max_steps: !!int 3000
+  eval_strategy: "no"
+  save_strategy: "no"
+  load_best_model_at_end: !!bool false
+  prediction_loss_only: !!bool true
+  remove_unused_columns: !!bool false
+  use_cache: !!bool false
+  logging_steps: !!int 50
+  local_rank: !!int -1
+  ddp_find_unused_parameters: !!bool false
+  auto_find_batch_size: !!bool false
+  gradient_accumulation_steps: !!int 1
+  learning_rate: !!float 2e-4
+  num_train_epochs: !!int 1
