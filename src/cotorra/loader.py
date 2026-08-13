@@ -70,7 +70,11 @@ class Loader(Configurable):
             .select_columns(
                 ["input_ids"]
                 + (["s_elapsed"] if "time_based_rope" in self.cfg else [])
-                + (["exact_ranks"] if "basis_blended_tokens" in self.cfg else [])
+                + (
+                    [self.cfg.basis_blended_tokens.get("rank_column", "exact_ranks")]
+                    if "basis_blended_tokens" in self.cfg
+                    else []
+                )
             )
         )
 
@@ -88,7 +92,12 @@ class Loader(Configurable):
                     ["input_ids"]
                     + (["s_elapsed_past"] if "time_based_rope" in self.cfg else [])
                     + (
-                        ["exact_ranks_past"]
+                        [
+                            self.cfg.basis_blended_tokens.get(
+                                "rank_column", "exact_ranks"
+                            )
+                            + "_past"
+                        ]
                         if "basis_blended_tokens" in self.cfg
                         else []
                     )

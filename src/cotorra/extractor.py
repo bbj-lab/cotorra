@@ -86,10 +86,14 @@ class Extractor(Configurable):
         extra = {}
         if self._raw_to_category_t is not None:
             extra["category_ids"] = self._raw_to_category_t[input_ids]
+            rank_column = (
+                self.cfg.basis_blended_tokens.get("rank_column", "exact_ranks")
+                + "_past"
+            )
             extra["ranks"] = pad_sequence(
                 [
                     t.as_tensor(x[:ml], dtype=t.float32)
-                    for x in batch["exact_ranks_past"]
+                    for x in batch[rank_column]
                 ],
                 batch_first=True,
                 padding_value=0.0,

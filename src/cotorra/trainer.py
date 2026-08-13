@@ -155,7 +155,8 @@ class Trainer(Configurable):
             # must read category_ids/ranks off the *raw* cocoa token ids before
             # input_ids gets remapped into collapsed-vocab space below
             extra["category_ids"] = self._raw_to_category_t[input_ids]
-            extra["ranks"] = t.stack([x["exact_ranks"] for x in batch]).to(t.float32)
+            rank_column = self.cfg.basis_blended_tokens.get("rank_column", "exact_ranks")
+            extra["ranks"] = t.stack([x[rank_column] for x in batch]).to(t.float32)
             input_ids = self._raw_to_collapsed_t[input_ids]
             labels = input_ids
 
