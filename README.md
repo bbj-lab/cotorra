@@ -219,6 +219,15 @@ that specifies:
       its Beta shape (`w_c,i = a_c,i * f(r,i) / sum_j a_c,j * f(r,j)`,
       instead of the plain density ratio). Initialized to `a = 1`
       uniformly, so training starts identical to the unscaled formula.
+    - **kl_loss** _(optional, default `false`)_: At numeric positions, use
+      `KL(w || p) = CE(w, p) - H(w)` instead of plain `CE(w, p)`, where `w`
+      is the mixture-weight target and `H(w)` its entropy. No effect at
+      non-numeric positions (one-hot targets have zero entropy, so `CE` and
+      `KL` coincide there). Since `w` is itself a function of the model's
+      trainable Beta/importance parameters (when those are enabled), the
+      `-H(w)` term carries real gradient back into them, rewarding mixtures
+      that stay spread across basis elements over ones that collapse onto a
+      single element.
 - **training_args**: Arguments passed to HuggingFace's
   [`TrainingArguments`](https://huggingface.co/docs/transformers/en/main_classes/trainer#transformers.TrainingArguments).
 - **tuning_args**: Arguments passed to HuggingFace's

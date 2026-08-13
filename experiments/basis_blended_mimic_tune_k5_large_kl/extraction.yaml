@@ -1,0 +1,9 @@
+%YAML 1.2
+---
+max_seq_len: !!int 1024
+basis_blended_tokens: {}
+
+extract:
+  max_len: !!int 1024
+  batch_size: !!int 64
+  shard_size: !!int 20000

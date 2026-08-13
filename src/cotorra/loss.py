@@ -139,6 +139,19 @@ class Loss:
         blend can never disagree, and this keeps working unmodified under
         Opacus's GradSampleModule wrapping (which would otherwise require
         unwrapping the model just to read its parameters).
+
+        `basis_blended_tokens.kl_loss: true` switches the numeric-position
+        term from CE(w, p) to KL(w || p) = CE(w, p) - H(w), where H(w) is
+        the target mixture's own entropy. H(w) is exactly 0 for a one-hot
+        target, so this is a no-op for non-numeric positions -- CE and KL
+        coincide there, hence the nonnum branch above is unaffected either
+        way. For numeric positions, though, w is a function of the model's
+        own (trainable, when train_beta_params/train_importance_scale are
+        on) log_alpha/log_beta/log_importance, not a fixed label -- so -H(w)
+        carries real gradient into those parameters, rewarding mixtures that
+        stay spread across basis elements (high entropy) over ones that
+        collapse onto a single basis element (low entropy), on top of
+        whatever CE alone would do.
         """
         shift_logits = outputs.get("logits")[:, :-1].contiguous().to(dtype=t.float32)
         shift_labels = labels[:, 1:].contiguous()
@@ -166,6 +179,10 @@ class Loss:
             ) + t.arange(k, device=cat_num.device)
             log_probs_numeric = log_probs[numeric].gather(-1, basis_ids)
             loss = loss - (shift_w * log_probs_numeric).sum()
+            if self.cfg.basis_blended_tokens.get("kl_loss", False):
+                # KL(w||p) = CE(w,p) - H(w) = CE(w,p) + sum(w*log(w)); xlogy
+                # gives 0 (not nan) at w=0, matching the true limit of x*log(x).
+                loss = loss + t.xlogy(shift_w, shift_w).sum()
 
         return loss.to(dtype=t.float32)
 

@@ -1,0 +1,63 @@
+%YAML 1.2
+---
+# Identical to ../basis_blended_mimic_tune_k5_large/training.yaml (large
+# architecture, k=5, trainable alpha/beta, importance scaling off) except
+# the numeric-position loss term is KL(w || p) = CE(w, p) - H(w) instead of
+# plain CE(w, p) -- see loss.py's basis_blended_token_loss and the
+# `kl_loss` doc in README.md. No effect on non-numeric positions (one-hot
+# targets have zero entropy, so CE and KL coincide there). Since w is a
+# function of the model's own trainable log_alpha/log_beta, -H(w) carries
+# real gradient into them, rewarding mixtures that stay spread across basis
+# elements over ones that collapse onto a single element.
+model:
+  model_name: meta-llama/Llama-3.2-1B
+  model_args:
+    hidden_size: !!int 1024
+    intermediate_size: !!int 2048
+    num_hidden_layers: !!int 8
+    num_attention_heads: !!int 8
+    max_position_embeddings: !!int 32768
+
+max_seq_len: !!int 1024
+n_epochs: !!int 1
+run_name: &run_name basis-blended-mimic-tune-k5-large-kl
+
+wandb:
+  project: cotorra
+  run_name: *run_name
+
+custom_loss: !!bool true
+basis_blended_tokens:
+  k: !!int 5
+  train_beta_params: !!bool true
+  train_importance_scale: !!bool false
+  kl_loss: !!bool true
+
+tuning_args:
+  direction: minimize
+  backend: optuna
+  n_trials: !!int 10
+
+training_args:
+  report_to: wandb
+  run_name: *run_name
+  per_device_train_batch_size: !!int 32
+  per_device_eval_batch_size: !!int 32
+  save_total_limit: !!int 1
+  metric_for_best_model: eval_loss
+  load_best_model_at_end: !!bool true
+  greater_is_better: !!bool false
+  eval_strategy: steps
+  eval_steps: !!float 0.1
+  prediction_loss_only: !!bool true
+  save_strategy: steps
+  save_steps: !!float 0.1
+  ddp_find_unused_parameters: !!bool false
+  auto_find_batch_size: !!bool false
+  learning_rate: !!float 2e-4
+  gradient_accumulation_steps: !!int 1
+  remove_unused_columns: !!bool false
+  local_rank: !!int -1
+  use_cache: !!bool false
+  logging_steps: !!int 50
+  num_train_epochs: !!int 1
