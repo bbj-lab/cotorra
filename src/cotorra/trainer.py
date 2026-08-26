@@ -16,6 +16,7 @@ from cotorra.basis_blended import (
     BasisBlendedCausalLM,
     BasisBlendedConfig,
     build_basis_vocab,
+    build_gaussian_vocab,
 )
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
@@ -67,7 +68,11 @@ class Trainer(Configurable):
         # never disagree (see fuzzy_token_planning.md, "The collapsed basis
         # vocabulary")
         self.basis_vocab = (
-            build_basis_vocab(self.tkzr_cfg, self.cfg.basis_blended_tokens.k)
+            (
+                build_gaussian_vocab(self.tkzr_cfg)
+                if self.cfg.basis_blended_tokens.get("numerical_basis_model", False)
+                else build_basis_vocab(self.tkzr_cfg, self.cfg.basis_blended_tokens.k)
+            )
             if "basis_blended_tokens" in self.cfg
             else None
         )
@@ -123,6 +128,12 @@ class Trainer(Configurable):
                 train_importance_scale=self.cfg.basis_blended_tokens.get(
                     "train_importance_scale", True
                 ),
+                train_category_embed=self.cfg.basis_blended_tokens.get(
+                    "train_category_embed", True
+                ),
+                numerical_basis_model=self.cfg.basis_blended_tokens.get(
+                    "numerical_basis_model", False
+                ),
                 **self.basis_vocab,
             )
             mdl = BasisBlendedCausalLM(basis_cfg)
@@ -155,7 +166,9 @@ class Trainer(Configurable):
             # must read category_ids/ranks off the *raw* cocoa token ids before
             # input_ids gets remapped into collapsed-vocab space below
             extra["category_ids"] = self._raw_to_category_t[input_ids]
-            rank_column = self.cfg.basis_blended_tokens.get("rank_column", "exact_ranks")
+            rank_column = self.cfg.basis_blended_tokens.get(
+                "rank_column", "exact_ranks"
+            )
             extra["ranks"] = t.stack([x[rank_column] for x in batch]).to(t.float32)
             input_ids = self._raw_to_collapsed_t[input_ids]
             labels = input_ids

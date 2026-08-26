@@ -83,12 +83,13 @@ class Extractor(Configurable):
             padding_value=self._raw_pad_value,
         ).to(self.model.device)
 
+        past_suffix = self.cfg.get("past_suffix", "")
         extra = {}
         if self._raw_to_category_t is not None:
             extra["category_ids"] = self._raw_to_category_t[input_ids]
             rank_column = (
                 self.cfg.basis_blended_tokens.get("rank_column", "exact_ranks")
-                + "_past"
+                + f"_past{past_suffix}"
             )
             extra["ranks"] = pad_sequence(
                 [
@@ -103,7 +104,7 @@ class Extractor(Configurable):
         if "time_based_rope" in self.cfg:
             p_ids = (
                 pad_sequence(
-                    [x[:ml] for x in batch["s_elapsed_past"]],
+                    [x[:ml] for x in batch[f"s_elapsed_past{past_suffix}"]],
                     batch_first=True,
                     padding_value=self.model.config.pad_token_id,
                 ).to(self.model.device)
@@ -125,9 +126,15 @@ class Extractor(Configurable):
             collated["input_ids"].shape[-1] - 1,
         )
         with t.inference_mode():
-            features = self.model(**collated, output_hidden_states=True).hidden_states[
-                -1
-            ]  # last hidden layer
+            hidden_states = self.model(
+                **collated, output_hidden_states=True
+            ).hidden_states
+            # k=1 (default) is the last hidden layer (unchanged behavior);
+            # k=2 the second-to-last, etc. -- see extract()'s hidden_state_k
+            # docstring for why more intermediate layers might separate
+            # models better than the final one alone.
+            k = self.cfg.get("extract", {}).get("hidden_state_k", 1)
+            features = hidden_states[-k]
         if all_times:
             features = features.half().cpu().numpy()
             collated = np.full(
@@ -146,8 +153,42 @@ class Extractor(Configurable):
         return batch
 
     def extract(self, all_times: bool = False):
+        """
+        extract.hidden_state_k (default 1): which hidden layer to pull
+        features from, counting from the end -- k=1 is the last layer
+        (output.hidden_states[-1], the original/default behavior), k=2 the
+        second-to-last, and so on. HF's output_hidden_states=True returns
+        num_hidden_layers+1 tensors (index 0 is the embedding output, not a
+        transformer layer), so k must be in [1, num_hidden_layers+1].
+        Motivation: the final layer's representation is shaped by next-
+        token-prediction specifically and may compress away distinctions
+        between models that an earlier, less task-specialized layer still
+        carries -- worth comparing empirically against k=1 for rep-based
+        scoring, where the goal is separating models/outcomes rather than
+        predicting the immediate next token.
+
+        k=1's output filename is unchanged from before this option existed
+        (features-<split>-<model_name>.parquet), so every existing
+        features/scores file and RepBasedScorer's own glob
+        (features-<split>*-<model_name>.parquet) keep working untouched.
+        k>1 gets a distinct -hsk<k> suffix on the model-name portion of the
+        filename specifically so it can NEVER silently collide with (or
+        get glob-matched alongside) the k=1 files for the same model --
+        learned the hard way this session that an output filename which
+        doesn't encode what produced it (rep-based-score's estimator type)
+        makes it trivial to silently overwrite/co-mingle incompatible
+        results under the same name.
+        """
         a = "-all" if all_times else ""
         shard_size = self.cfg.get("extract", {}).get("shard_size", None)
+        k = self.cfg.get("extract", {}).get("hidden_state_k", 1)
+        max_k = self.model.config.num_hidden_layers + 1
+        assert 1 <= k <= max_k, (
+            f"extract.hidden_state_k={k} out of range -- must be in [1, {max_k}]"
+            f" (num_hidden_layers={self.model.config.num_hidden_layers} + 1 for"
+            " the embedding output HF includes at hidden_states[0])"
+        )
+        model_tag = self.model_home.name if k == 1 else f"{self.model_home.name}-hsk{k}"
         ds = self.loader.for_inference.with_format("torch")
         for split, dset in ds.items():
             n = math.ceil(len(dset) / shard_size) if shard_size else 1
@@ -159,8 +200,7 @@ class Extractor(Configurable):
                     batch_size=self.cfg.get("extract", {}).get("batch_size", 8),
                     load_from_cache_file=False,  # disable caching
                 ).to_parquet(
-                    self.output_home
-                    / f"features{a}-{split}{index}-{self.model_home.name}.parquet"
+                    self.output_home / f"features{a}-{split}{index}-{model_tag}.parquet"
                 )
 
 

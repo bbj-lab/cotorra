@@ -35,13 +35,22 @@ class Loader(Configurable):
         )
         self.splits: tuple = ("train", "tuning", "held_out")
 
-        tt_all = self.processed_data_home / "tokens_times.parquet"
+        # tokens_times_file: override to e.g. "tokens_times_no_label.parquet"
+        # (see cocoa's Tokenizer.build_no_label_frame / exclude_tokens) to
+        # train on a timeline with certain tokens (e.g. LABEL//*) removed,
+        # without touching the default label-inclusive path. The per-split
+        # cache filenames are derived from this same stem so switching
+        # between source files can never silently reuse a stale/mismatched
+        # cache from a different one.
+        tt_filename = self.cfg.get("tokens_times_file", "tokens_times.parquet")
+        tt_stem = pathlib.Path(tt_filename).stem
+        tt_all = self.processed_data_home / tt_filename
         assert tt_all.is_file(), FileNotFoundError(
             f"Expected token and time data at {tt_all}, but not found."
         )
 
         tt_split = {
-            s: self.processed_data_home / f"{s}_tokens_times.parquet"
+            s: self.processed_data_home / f"{s}_{tt_stem}.parquet"
             for s in self.splits
         }
         if not all(s.is_file() for s in tt_split.values()) or any(
@@ -84,19 +93,29 @@ class Loader(Configurable):
             if (f := self.processed_data_home / f"{s}_for_inference.parquet").is_file()
         }
 
+        # past_suffix: "" (default) reads tokens_past/s_elapsed_past/*_past as
+        # always; "_no_label" reads tokens_past_no_label/etc instead (see
+        # cocoa's Winnower.add_outcome_flags) -- the label-inclusive columns
+        # are always present regardless, so this is purely an opt-in choice
+        # of which past-context a given experiment trains/extracts on.
+        past_suffix = self.cfg.get("past_suffix", "")
         self.for_inference = (
             (
                 ds.load_dataset("parquet", data_files=self.inference_files)
-                .rename_column("tokens_past", "input_ids")
+                .rename_column(f"tokens_past{past_suffix}", "input_ids")
                 .select_columns(
                     ["input_ids"]
-                    + (["s_elapsed_past"] if "time_based_rope" in self.cfg else [])
+                    + (
+                        [f"s_elapsed_past{past_suffix}"]
+                        if "time_based_rope" in self.cfg
+                        else []
+                    )
                     + (
                         [
                             self.cfg.basis_blended_tokens.get(
                                 "rank_column", "exact_ranks"
                             )
-                            + "_past"
+                            + f"_past{past_suffix}"
                         ]
                         if "basis_blended_tokens" in self.cfg
                         else []
