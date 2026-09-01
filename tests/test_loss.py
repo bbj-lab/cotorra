@@ -175,3 +175,88 @@ def test_custom_loss_does_not_touch_wandb_when_no_run_is_active(outputs, labels)
     loss = Loss(make_cfg(), make_tkzr_cfg())
     loss.custom_loss(outputs, labels)  # must not raise even though wandb is inactive
     assert wandb.run is None
+
+
+# `quantile_token_loss` maps a `..._Q<i>` token to the midpoint of its bin,
+# so with 5 bins Q0 is 0.1, Q1 is 0.3, ... Q4 is 0.9
+def _q(i: int) -> float:
+    return (i + 0.5) / N_BINS
+
+
+def _one_hot_logits(labels, predicted_ids):
+    """logits putting essentially all softmax mass on `predicted_ids`"""
+    logits = t.zeros(labels.shape[0], labels.shape[1], VOCAB_SIZE)
+    for row, ids in enumerate(predicted_ids):
+        for pos, tok in enumerate(ids):
+            logits[row, pos, tok] = 50.0
+    return {"logits": logits}
+
+
+def test_quantile_token_loss_is_zero_for_a_confident_correct_prediction():
+    """
+    the loss compares the softmax-weighted quantile against the label's own
+    quantile, so a model that names the right bin pays nothing
+    """
+    loss = Loss(make_cfg(), make_tkzr_cfg())
+    labels = t.tensor([[LOOKUP["BOS"], LOOKUP["VTL//heart_rate_Q0"], LOOKUP["EOS"]]])
+    # shift_labels are labels[:, 1:], so logits[:, 0] predicts Q0
+    outputs = _one_hot_logits(labels, [[LOOKUP["VTL//heart_rate_Q0"], LOOKUP["EOS"]]])
+
+    assert loss.quantile_token_loss(outputs, labels).item() == pytest.approx(0.0)
+
+
+def test_quantile_token_loss_is_the_mean_squared_quantile_error():
+    """
+    two heart-rate tokens, each predicted as the opposite extreme bin: the
+    loss must be the squared 0.1-vs-0.9 gap, averaged within the category.
+    The sodium category contributes nothing -- it has no labels in the batch.
+    """
+    loss = Loss(make_cfg(), make_tkzr_cfg())
+    labels = t.tensor(
+        [
+            [
+                LOOKUP["BOS"],
+                LOOKUP["VTL//heart_rate_Q0"],
+                LOOKUP["VTL//heart_rate_Q4"],
+                LOOKUP["EOS"],
+            ]
+        ]
+    )
+    outputs = _one_hot_logits(
+        labels,
+        [[LOOKUP["VTL//heart_rate_Q4"], LOOKUP["VTL//heart_rate_Q0"], LOOKUP["EOS"]]],
+    )
+
+    expected = ((_q(4) - _q(0)) ** 2 + (_q(0) - _q(4)) ** 2) / 2
+    assert loss.quantile_token_loss(outputs, labels).item() == pytest.approx(
+        expected, rel=1e-4
+    )
+
+
+def test_quantile_token_loss_ignores_batches_with_no_quantile_labels():
+    """non-quantile tokens map to category -1 and are skipped entirely"""
+    loss = Loss(make_cfg(), make_tkzr_cfg())
+    labels = t.tensor([[LOOKUP["BOS"], LOOKUP["DSCG//home"], LOOKUP["EOS"]]])
+    outputs = _one_hot_logits(labels, [[LOOKUP["DSCG//expired"], LOOKUP["EOS"]]])
+
+    out = loss.quantile_token_loss(outputs, labels)
+    assert isinstance(out, t.Tensor)
+    assert out.item() == 0.0
+
+
+def test_custom_loss_survives_a_batch_with_no_quantile_labels():
+    """
+    `custom_loss` calls `.item()` on whatever `quantile_token_loss` returns, so
+    the no-quantile-token case has to come back as a tensor; it used to return
+    a bare 0.0 and take training down with an `AttributeError` on any batch
+    (short `max_seq_len`, or a vocabulary with no quantile tokens at all) that
+    happened to contain none
+    """
+    loss = Loss(make_cfg(), make_tkzr_cfg())
+    labels = t.tensor([[LOOKUP["BOS"], LOOKUP["DSCG//home"], LOOKUP["EOS"]]])
+    outputs = _one_hot_logits(labels, [[LOOKUP["DSCG//expired"], LOOKUP["EOS"]]])
+
+    # only the cross-entropy term contributes
+    assert loss.custom_loss(outputs, labels).item() == pytest.approx(
+        loss.label_weighted_loss(outputs, labels).item(), rel=1e-5
+    )

@@ -4,7 +4,7 @@
 
 import pytest
 import torch as t
-from helpers import base_training_cfg, write_cfg
+from helpers import base_training_cfg, default_cfg, write_cfg
 from omegaconf import OmegaConf
 from transformers import AutoModelForCausalLM
 
@@ -157,3 +157,41 @@ def test_train_resume_from_checkpoint_falls_back_when_none_exists(
     trainer.train(resume_from_checkpoint=True)
 
     assert (out / f"mdl-{trainer.run_name}").is_dir()
+
+
+def test_shipped_default_config_keeps_unused_columns():
+    """
+    HF's `Trainer` drops any dataset column its model's `forward` does not
+    name, which would take `s_elapsed` with it; the shipped default has to
+    turn that off or time-based RoPE silently loses its position ids
+    """
+    training_args = default_cfg("cotorra", "training")["training_args"]
+    assert training_args["remove_unused_columns"] is False
+
+
+def test_train_dataloader_batches_carry_time_based_position_ids(built_trainer):
+    """
+    the end-to-end version of the above: what the model actually receives once
+    HF has built the dataloader around `collate_fn`
+    """
+    assert built_trainer.trainer.args.remove_unused_columns is False
+    batch = next(iter(built_trainer.trainer.get_train_dataloader()))
+    assert set(batch.keys()) == {"input_ids", "labels", "position_ids"}
+    assert batch["position_ids"].shape == batch["input_ids"].shape
+
+
+def test_removing_unused_columns_starves_the_collator_of_s_elapsed(
+    processed, tmp_path_factory
+):
+    """why the default has to be `false`, demonstrated rather than asserted"""
+    cfg = base_training_cfg()
+    cfg["training_args"]["remove_unused_columns"] = True
+    cfg_path = write_cfg(tmp_path_factory.mktemp("drop-columns") / "training.yaml", cfg)
+    trainer = Trainer(
+        training_cfg=cfg_path,
+        processed_data_home=processed,
+        output_home=tmp_path_factory.mktemp("drop-columns-output"),
+    )
+
+    with pytest.raises(KeyError, match="s_elapsed"):
+        next(iter(trainer.trainer.get_train_dataloader()))

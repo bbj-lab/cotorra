@@ -140,3 +140,23 @@ def test_get_tuning_data_ignores_n_epochs(processed, tmp_path_factory):
         lengths[n] = len(loader_n.get_tuning_data())
 
     assert lengths[1] == lengths[2]
+
+
+def test_for_inference_is_none_when_no_inference_files_exist(
+    processed, tmp_path_factory
+):
+    """
+    `{split}_for_inference.parquet` is only needed by extract/score, so a
+    processed directory holding nothing but training data must still load
+    """
+    home = tmp_path_factory.mktemp("loader-no-inference") / "processed"
+    shutil.copytree(processed, home)
+    for f in home.glob("*_for_inference.parquet"):
+        f.unlink()
+
+    cfg_path = write_cfg(home.parent / "training.yaml", base_training_cfg())
+    loader = Loader(training_cfg=cfg_path, processed_data_home=home)
+
+    assert loader.inference_files == {}
+    assert loader.for_inference is None
+    assert len(loader.get_train_data()) > 0

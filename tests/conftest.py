@@ -10,6 +10,7 @@ running full-size training
 
 import collections.abc
 import fnmatch
+import logging
 import pathlib
 import subprocess
 import sys
@@ -22,6 +23,7 @@ import pytest
 import synth
 from helpers import base_extraction_cfg, base_scoring_cfg, base_training_cfg, write_cfg
 from omegaconf import OmegaConf
+from rich.logging import RichHandler
 
 from cocoa.collator import Collator
 from cocoa.tokenizer import Tokenizer
@@ -33,22 +35,62 @@ if typing.TYPE_CHECKING:
 N_PATIENTS = 100
 
 
-_LIGHTGBM_PROBE = """
+# keyed by `EstimatorType` value; both boosting libraries ship their own
+# `libomp.dylib` and hit the clash described in `helpers.LIBOMP_HINT`
+_BOOSTER_PROBES = {
+    "lightGBM": """
 import numpy as np, torch, lightgbm as lgb
 X, y = np.random.randn(40, 4), (np.random.rand(40) > 0.5).astype(int)
 lgb.LGBMClassifier(n_estimators=10, n_jobs=-1, verbose=-1).fit(X, y)
-"""
+""",
+    "XGBoost": """
+import numpy as np, torch, xgboost as xgb
+X, y = np.random.randn(40, 4), (np.random.rand(40) > 0.5).astype(int)
+xgb.XGBClassifier(n_estimators=10, n_jobs=-1).fit(X, y)
+""",
+}
 
 
 @pytest.fixture(scope="session")
-def lightgbm_usable() -> bool:
+def boosters_usable() -> dict[str, bool]:
     """
-    whether torch and lightgbm can be fit in one process here; tests that
-    drive LightGBM skip with `helpers.LIBOMP_HINT` when they cannot, since
-    the failure mode is a segfault that would end the whole session
+    whether torch and each boosting library can be fit in one process here;
+    tests that drive one skip with `helpers.LIBOMP_HINT` when it cannot, since
+    the failure mode is a segfault that would end the whole session. Probe
+    both: guarding only LightGBM left `--estimator XGBoost` to take the suite
+    down as soon as its arm stopped raising before reaching `fit`.
     """
-    probe = subprocess.run([sys.executable, "-c", _LIGHTGBM_PROBE], capture_output=True)
-    return probe.returncode == 0
+    return {
+        name: subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True
+        ).returncode
+        == 0
+        for name, probe in _BOOSTER_PROBES.items()
+    }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def quiet_third_party_logging() -> collections.abc.Iterator[None]:
+    """
+    restore the root log level `cotorra.logger` asks for. It calls
+    `logging.basicConfig(level=logging.WARNING, handlers=[RichHandler()])` at
+    import, but pytest's logging plugin then resets the *root* logger to
+    NOTSET so that it can capture everything -- and that `RichHandler` carries
+    no level of its own, so every fsspec/filelock DEBUG record gets printed.
+    Left alone it buries failure reports (and any assertion on a command's
+    output) under thousands of lines of lock-acquired chatter. Setting the
+    handler rather than the logger leaves pytest's own capture handlers on
+    `log_level = INFO`, so `caplog` still sees INFO records.
+    """
+    import cotorra.logger  # noqa: F401 -- installs the root handler on import
+
+    handlers = [h for h in logging.getLogger().handlers if isinstance(h, RichHandler)]
+    restore = [(h, h.level) for h in handlers]
+    for handler in handlers:
+        handler.setLevel(logging.WARNING)
+    yield
+    for handler, level in restore:
+        handler.setLevel(level)
 
 
 @pytest.fixture(scope="session", autouse=True)

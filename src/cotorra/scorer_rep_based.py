@@ -19,6 +19,10 @@ from omegaconf import OmegaConf
 
 from cotorra.configurable import Configurable
 
+# the estimators `score_label` hands a tuning-split `eval_set`; they are the
+# only ones for which the tuning split has to be fittable too
+EVAL_SET_ESTIMATORS = ("lightgbm", "xgboost")
+
 
 class EstimatorType(str, enum.Enum):
     knn = "k-NN"
@@ -159,7 +163,13 @@ class RepBasedScorer(Configurable):
             case "xgboost":
                 self.logger.info("Using XGBoost classifier")
                 mdl = xgb.XGBClassifier(
-                    min_child_weight=5, max_leaves=64, n_estimators=250, n_jobs=-1
+                    min_child_weight=5,
+                    max_leaves=64,
+                    n_estimators=250,
+                    n_jobs=-1,
+                    # xgboost >= 2.0 takes `eval_metric` here rather than on
+                    # `fit`, where lightGBM still wants it
+                    eval_metric="auc",
                 )
             case _:
                 self.logger.info("Using (default) lightGBM classifier")
@@ -167,22 +177,18 @@ class RepBasedScorer(Configurable):
                     min_data_in_leaf=5, num_leaves=64, n_estimators=250, n_jobs=-1
                 )
 
+        fit_kwargs = dict()
+        if (estimator := str(self.estimator_type).lower()) in EVAL_SET_ESTIMATORS:
+            fit_kwargs["eval_set"] = [
+                (self.features["tuning"][tuning_valid], tuning_label[tuning_valid])
+            ]
+            if estimator == "lightgbm":
+                fit_kwargs["eval_metric"] = "auc"
+
         mdl.fit(
             X=self.features["train"][train_valid],
             y=train_label[train_valid],
-            **(
-                {
-                    "eval_set": [
-                        (
-                            self.features["tuning"][tuning_valid],
-                            tuning_label[tuning_valid],
-                        )
-                    ],
-                    "eval_metric": "auc",
-                }
-                if str(self.estimator_type).lower() in ("lightgbm", "xgboost")
-                else {}
-            ),
+            **fit_kwargs,
         )
 
         scores = np.nan * np.ones_like(held_out_valid)
@@ -192,9 +198,50 @@ class RepBasedScorer(Configurable):
 
         return scores
 
+    def unfittable_reason(self, target_token: str) -> str | None:
+        """
+        why `target_token` cannot be fit, or `None` if it can. The winnowed
+        inference tables routinely hold labels no estimator can be trained
+        on -- a token that never made it into the tables at all, or one whose
+        rows not already past the threshold are all a single class -- so
+        `score` checks before fitting rather than letting one bad label abort
+        the whole run and lose the scores for every other one.
+        """
+        splits = ("train", "tuning")
+        if str(self.estimator_type).lower() not in EVAL_SET_ESTIMATORS:
+            splits = ("train",)
+
+        for split in splits:
+            cols = self.labels[split].collect_schema().names()
+            if missing := [
+                c
+                for c in (f"{target_token}_past", f"{target_token}_future")
+                if c not in cols
+            ]:
+                return f"{split} is missing {', '.join(missing)}"
+
+            valid, label = (
+                self.labels[split]
+                .select(~pl.col(f"{target_token}_past"), f"{target_token}_future")
+                .collect()
+                .to_numpy()
+                .T
+            )
+            n_classes = len(np.unique(label[valid]))
+            if n_classes < 2:
+                return (
+                    f"{split} has {int(valid.sum())} row(s) not already past the "
+                    f"threshold, covering {n_classes} class(es)"
+                )
+
+        return None
+
     def score(self):
         res = dict()
         for tt in tqdm.tqdm(self.grokked_outcome_tokens, position=0):
+            if (reason := self.unfittable_reason(tt)) is not None:
+                self.logger.warning(f"Skipping {tt}: {reason}")
+                continue
             res[f"{tt}_rep_score"] = self.score_label(target_token=tt)
 
         return res

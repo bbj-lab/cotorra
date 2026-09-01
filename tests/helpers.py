@@ -13,16 +13,17 @@ import tempfile
 
 from omegaconf import OmegaConf
 
-# On macOS the LightGBM wheel links `@rpath/libomp.dylib` against Homebrew's
-# libomp, while torch and scikit-learn each bundle their own; with more than
-# one OpenMP runtime resident, fitting a LightGBM model *segfaults the
-# interpreter* rather than raising. `RepBasedScorer` uses LightGBM by default
-# and `cotorra.cli` imports torch (via `Extractor`) first, so `cotorra
-# rep-based-score` hits this too -- an environment problem rather than a
-# cotorra bug, but one that would otherwise take the whole session down.
+# On macOS the LightGBM and XGBoost wheels each link `@rpath/libomp.dylib`
+# against their own bundled copy, while torch and scikit-learn bundle theirs;
+# with more than one OpenMP runtime resident, fitting either booster
+# *segfaults the interpreter* rather than raising. `RepBasedScorer` uses
+# LightGBM by default and `cotorra.cli` imports torch (via `Extractor`) first,
+# so `cotorra rep-based-score` hits this too -- an environment problem rather
+# than a cotorra bug, but one that would otherwise take the whole session
+# down. `conftest.boosters_usable` probes both in a subprocess.
 LIBOMP_HINT = (
-    "torch and lightgbm resolve different libomp runtimes in this environment, "
-    "which segfaults on fit; re-run with DYLD_LIBRARY_PATH="
+    "torch and this boosting library resolve different libomp runtimes in this "
+    "environment, which segfaults on fit; re-run with DYLD_LIBRARY_PATH="
     "<venv>/lib/python3.*/site-packages/torch/lib"
 )
 

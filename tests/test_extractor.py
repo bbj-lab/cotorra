@@ -200,3 +200,74 @@ def test_extract_shards_are_named_and_globbed_as_the_scorer_expects(
                 f"features-{split}-{fake_model_home.name}.parquet"
             ]
     assert sharded, "no split was large enough to actually shard"
+
+
+def test_pad_token_id_falls_back_to_eos_when_the_model_has_none(extractor):
+    """
+    a checkpoint saved from `Trainer` carries no `pad_token_id`, and
+    `pad_sequence` needs one; the constructor backfills it from EOS
+    """
+    assert extractor.model.config.pad_token_id == extractor.model.config.eos_token_id
+
+
+def test_collate_fn_truncation_keeps_the_oldest_tokens(extractor):
+    """
+    `collate_fn` slices `x[:max_len]`, so an over-long prompt loses its most
+    *recent* tokens -- the opposite of `GenerativeScorer`, whose
+    `prompt_overflow: truncate_left` keeps the last `max_len`. Because
+    `extract_final` pools at the last surviving token, a subject whose history
+    exceeds `extract.max_len` gets features describing the start of their
+    timeline rather than the prediction time. Pinned rather than fixed:
+    changing it changes every feature table cotorra has ever written.
+    """
+    max_len = extractor.cfg.extract.max_len
+    prompt = t.arange(3 * max_len)
+    out = extractor.collate_fn(
+        {"input_ids": [prompt], "s_elapsed_past": [prompt.float() * 60.0]}
+    )
+    assert out["input_ids"].shape == (1, max_len)
+    assert t.equal(out["input_ids"][0].cpu(), prompt[:max_len])
+    assert not t.equal(out["input_ids"][0].cpu(), prompt[-max_len:])
+
+
+def test_extract_final_pools_at_the_last_position_when_no_eos_survives(extractor):
+    """
+    the common path in practice: every prompt in a real timeline is longer
+    than `extract.max_len`, so truncation drops the EOS and `extract_final`
+    falls back to the final position rather than the token before an EOS
+    """
+    ids = t.arange(4)
+    assert extractor.model.config.eos_token_id not in ids
+    batch = {"input_ids": [ids], "s_elapsed_past": [t.arange(4).float() * 60.0]}
+
+    final = extractor.extract_final(dict(batch))["features"]
+    all_times = extractor.extract_final(dict(batch), all_times=True)["features"]
+
+    np.testing.assert_allclose(all_times[0, len(ids) - 1], final[0])
+    assert np.isnan(all_times[0, len(ids)]).all()
+
+
+def test_dropping_time_based_rope_changes_the_extracted_features(
+    extractor, sample_batch, processed, fake_model_home, tmp_path_factory
+):
+    """
+    the `time_based_rope` block is not cosmetic: without it the model sees
+    plain 0..n-1 position ids, so a model trained *with* time-based RoPE has
+    to be extracted with it too (and at the same `sec_per_pos_id`) -- this
+    pins that the mismatch is observable rather than silently harmless
+    """
+    cfg = base_extraction_cfg()
+    del cfg["time_based_rope"]
+    cfg_path = write_cfg(
+        tmp_path_factory.mktemp("extract-rope-off-cfg") / "extraction.yaml", cfg
+    )
+    plain = Extractor(
+        extraction_cfg=cfg_path,
+        processed_data_home=processed,
+        model_home=fake_model_home,
+        output_home=tmp_path_factory.mktemp("extract-rope-off-output"),
+    )
+
+    with_rope = extractor.extract_final(dict(sample_batch))["features"]
+    without_rope = plain.extract_final(dict(sample_batch))["features"]
+    assert not np.allclose(with_rope, without_rope)

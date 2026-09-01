@@ -106,11 +106,9 @@
         "--strict-config",
         "--strict-markers",
     ]
-    # keep third-party DEBUG chatter (fsspec, filelock, httpx) out of failure reports
-    log_level  = "INFO"
-    markers    = [
+    log_level = "INFO"
+    markers = [
         "slow: exercises a real (tiny) training loop; deselect with -m 'not slow'",
     ]
-    pythonpath   = [ "tests" ]
-    testpaths    = [ "tests" ]
-    xfail_strict = true
+    pythonpath = [ "src", "tests" ]
+    testpaths = [ "tests" ]

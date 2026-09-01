@@ -64,9 +64,11 @@ class Loss:
             self.n_cats: int = self.label_to_cat.max().item() + 1
 
     def quantile_token_loss(self, outputs, labels, **kwargs):
-        loss = 0.0
         shift_logits = outputs.get("logits")[:, :-1].contiguous()
         shift_labels = labels[:, 1:].contiguous()
+        # a tensor rather than a bare 0.0: a batch need not contain any
+        # quantile token at all, and `custom_loss` calls `.item()` on this
+        loss = t.zeros((), device=shift_logits.device, dtype=t.float32)
         for i in range(self.n_cats):
             mask = self.label_to_cat.to(device=labels.device)[shift_labels] == i
             if not mask.any():
