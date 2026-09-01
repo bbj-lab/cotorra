@@ -52,7 +52,7 @@
         Repository    = "https://github.com/bbj-lab/cotorra"
 
     [project.optional-dependencies]
-        all = [ "cotorra[dev,docs]" ]
+        all = [ "cotorra[dev,docs,test]" ]
         dev = [ "pip", "ruff" ]
         docs = [
             "mkdocs",
@@ -66,6 +66,7 @@
             "quick-sco-re @ git+https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git",
             "sglang",
         ]
+        test = [ "pytest" ]
 
 [build-system]
     build-backend = "setuptools.build_meta"
@@ -98,3 +99,16 @@
 
     [tool.setuptools.package-data]
         "cotorra.config" = [ "*.yaml" ]
+
+[tool.pytest.ini_options]
+    addopts = [
+        "--import-mode=importlib",
+        "--strict-config",
+        "--strict-markers",
+    ]
+    log_level = "INFO"
+    markers = [
+        "slow: exercises a real (tiny) training loop; deselect with -m 'not slow'",
+    ]
+    pythonpath = [ "src", "tests" ]
+    testpaths = [ "tests" ]

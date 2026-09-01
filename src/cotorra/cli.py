@@ -252,7 +252,7 @@ def extract(
         t1 = time.perf_counter()
         print(f"\n[green]✓[/green] Extraction completed in {t1 - t0:.2f}s.")
         for split in extractor.loader.splits:
-            print(f" Output in: {extractor.processed_data_home}")
+            print(f" Output in: {extractor.output_home}")
 
 
 @app.command()
