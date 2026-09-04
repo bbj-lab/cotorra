@@ -11,7 +11,6 @@ Tokenized inputs are produced upstream by the
 | Command                    | What it does                                                          |
 | -------------------------- | --------------------------------------------------------------------- |
 | `cotorra train`            | Train a causal language model on tokenized timelines.                 |
-| `cotorra train-private`    | Train a model under differential privacy.                             |
 | `cotorra tune`             | Train while searching over hyperparameters.                           |
 | `cotorra extract`          | Extract hidden-state representations from a trained model.            |
 | `cotorra generative-score` | Score held-out timelines by autoregressive generation.                |

@@ -56,10 +56,10 @@ def test_none_valued_kwargs_are_ignored(tmp_path):
 
 
 def test_kwargs_can_add_new_nested_config_blocks():
-    cfg_obj = _WithDefault(privacy_parameters={"noise_multiplier": 0.5})
-    assert cfg_obj.cfg.privacy_parameters.noise_multiplier == 0.5
+    cfg_obj = _WithDefault(tuning_args={"n_trials": 3})
+    assert cfg_obj.cfg.tuning_args.n_trials == 3
     # untouched keys from the default file are still present
-    assert cfg_obj.cfg.privacy_parameters.max_grad_norm == 1.0
+    assert cfg_obj.cfg.tuning_args.backend == "optuna"
 
 
 def test_a_missing_config_file_raises(tmp_path):

@@ -13,14 +13,7 @@ from cotorra.cli import app
 
 runner = CliRunner()
 
-COMMANDS = (
-    "train",
-    "train-private",
-    "tune",
-    "extract",
-    "generative-score",
-    "rep-based-score",
-)
+COMMANDS = ("train", "tune", "extract", "generative-score", "rep-based-score")
 
 
 def test_top_level_help_lists_every_pipeline_stage():

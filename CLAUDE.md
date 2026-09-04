@@ -21,12 +21,12 @@ Everything is driven through the `cotorra` CLI
 ([src/cotorra/cli.py](src/cotorra/cli.py), a Typer app):
 
 ```
-train / train-private / tune   →  extract  →  rep-based-score
-                               ↘  generative-score
+train / tune   →  extract  →  rep-based-score
+               ↘  generative-score
 ```
 
-- **train / train-private / tune** — fit a causal LM; write `mdl-<run_name>/`
-  (HuggingFace `save_pretrained` format) + `mdl-<run_name>-training.yaml` under
+- **train / tune** — fit a causal LM; write `mdl-<run_name>/` (HuggingFace
+  `save_pretrained` format) + `mdl-<run_name>-training.yaml` under
   `--output-home`.
 - **extract** — run a trained model over inference contexts, write hidden-state
   feature tables (`features-<split>-<model_name>.parquet`).
@@ -47,7 +47,6 @@ the classes.
 | [configurable.py](src/cotorra/configurable.py)           | `Configurable`                     | base: loads/merges config, holds a `Logger`                  |
 | [loader.py](src/cotorra/loader.py)                       | `Loader`                           | splits `tokens_times.parquet` by subject, builds HF datasets |
 | [trainer.py](src/cotorra/trainer.py)                     | `Trainer`, `TrainerWithCustomLoss` | model init + HF Trainer                                      |
-| [trainer_dp.py](src/cotorra/trainer_dp.py)               | `TrainerDP`                        | Opacus-wrapped differentially private training               |
 | [tuner.py](src/cotorra/tuner.py)                         | `Tuner`                            | `Trainer` + Optuna hyperparameter search                     |
 | [loss.py](src/cotorra/loss.py)                           | `Loss`                             | custom losses (quantile-token, label-weighted)               |
 | [extractor.py](src/cotorra/extractor.py)                 | `Extractor`                        | hidden-state extraction                                      |
@@ -56,9 +55,9 @@ the classes.
 | [logger.py](src/cotorra/logger.py)                       | `Logger`                           | rich logging + bootstrap-CI eval summaries                   |
 | [util.py](src/cotorra/util.py)                           | —                                  | batching helpers, `bootstrap_ci`                             |
 
-Inheritance matters: `Tuner` and `TrainerDP` extend `Trainer`, which extends
-`Configurable`; `Loss` and `Logger` stand alone. Changing `Trainer.__init__` or
-`collate_fn` affects tuning and DP training too.
+Inheritance matters: `Tuner` extends `Trainer`, which extends `Configurable`;
+`Loss` and `Logger` stand alone. Changing `Trainer.__init__` or `collate_fn`
+affects tuning too.
 
 ### Configuration model (important)
 
@@ -71,12 +70,11 @@ earlier:
    etc.),
 3. keyword args passed to the constructor (only non-`None` values).
 
-So CLI flags like `--noise-multiplier` reach config by being threaded as kwargs
-(see `TrainerDP` passing `privacy_parameters={...}`). The merged result is
-`self.cfg` (an OmegaConf object). Read optional keys defensively with
-`self.cfg.get(...)` or `"key" in self.cfg` — several features (`time_based_rope`,
-`quantile_token_loss`, `label_weighted_loss`) are toggled purely by _presence_ of
-their config block, not a boolean.
+So CLI flags reach config by being threaded as kwargs to the constructor. The
+merged result is `self.cfg` (an OmegaConf object). Read optional keys defensively
+with `self.cfg.get(...)` or `"key" in self.cfg` — several features
+(`time_based_rope`, `quantile_token_loss`, `label_weighted_loss`) are toggled
+purely by _presence_ of their config block, not a boolean.
 
 The three packaged config files
 ([training.yaml](src/cotorra/config/training.yaml),
@@ -149,18 +147,13 @@ them when `tokens_times.parquet` is newer. Token-set selectors
   which is installed from git and only available from source. Note it's commented
   out in [pyproject.toml](pyproject.toml)'s `optional-dependencies`;
   `GenerativeScorer` imports `quick_sco_re` at module load, so
-  [cli.py](src/cotorra/cli.py) imports it _lazily_ inside the command (and
-  `train-private` likewise imports `TrainerDP` lazily). Preserve that laziness so
-  the base install works without these heavy/optional deps.
+  [cli.py](src/cotorra/cli.py) imports it _lazily_ inside the command. Preserve
+  that laziness so the base install works without these heavy/optional deps.
 - **`time_based_rope` must match between training and extraction.** If a model
   was trained with time-based RoPE, the extraction config must enable it too
   (same `sec_per_pos_id`), or position ids won't line up.
 - **`remove_unused_columns: false`** in `training_args` is required — otherwise
   HF drops the `s_elapsed` column that time-based RoPE needs.
-- **DP training requires `gradient_accumulation_steps == 1`** (Opacus limitation;
-  `TrainerDP.training_step` raises otherwise). The DP model is a
-  `GradSampleModule` wrapper; it's unwrapped (`._module`) before
-  `save_pretrained` — mirror that if you touch saving.
 - **`--resume-from-checkpoint` is safe to pass unconditionally**: `Trainer.train`
   falls back to training from scratch if no checkpoint is found.
 - **`processed` is a symlink** (`-> ../cocoa/processed`) and `output/`, `wandb/`,

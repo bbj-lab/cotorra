@@ -110,7 +110,3 @@ tuning_args:
   direction: minimize
   backend: optuna
   n_trials: !!int 10
-
-privacy_parameters:
-  noise_multiplier: !!float 1.5
-  max_grad_norm: !!float 1.0

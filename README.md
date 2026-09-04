@@ -158,9 +158,8 @@ predict the next token in each subject's timeline. It:
    tokens of clinical interest.
 4. Optionally uses time-aware rotary position embeddings so that position ids
    reflect elapsed time rather than token index.
-5. Trains the model — optionally with differential privacy
-   (`cotorra train-private`) or hyperparameter tuning (`cotorra tune`) — and
-   saves it.
+5. Trains the model — optionally with hyperparameter tuning (`cotorra tune`) —
+   and saves it.
 
 Training is driven by a YAML config (the package ships a default; see
 [`./src/cotorra/config/training.yaml`](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/training.yaml))
@@ -231,18 +230,6 @@ individual `model_args` entries as needed.
 > [training.yaml](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/training.yaml) file to control the frequency
 > of checkpointing.
 <!-- prettier-ignore-end -->
-
-### Differential privacy
-
-We wrap [opacus](https://opacus.ai) to support training with differential privacy
-(see `cotorra train-private`). The following relevant parameters can be modified
-in the configuration:
-
-```yaml
-privacy_parameters:
-    noise_multiplier: !!float 1.0
-    max_grad_norm: !!float 1.0
-```
 
 ### Outputs
 
@@ -383,8 +370,6 @@ We provide a CLI:
 ╭─ Commands ──────────────────────────────────────────────────────────────╮
 │ train             Train a model on tokenized data. For tokenization,    │
 │                   consult the cocoa package.                            │
-│ train-private     Train a model with differential privacy on tokenized  │
-│                   data.                                                 │
 │ tune              Run hyperparameter tuning while training a model.     │
 │ extract           Extract representations from a trained model.         │
 │ generative-score  Generate SCORE/REACH metrics from a trained model and │
@@ -441,31 +426,6 @@ with commands:
     │                                         [required]                      │
     │    --verbose              -v            Verbose logging                 │
     │    --help                 -h            Show this message and exit.     │
-    ╰─────────────────────────────────────────────────────────────────────────╯
-    ```
-
-- `cotorra train-private`
-
-    ```
-    Usage: cotorra train-private [OPTIONS]
-
-    Train a model with differential privacy on tokenized data.
-
-    ╭─ Options ───────────────────────────────────────────────────────────────╮
-    │    --training-config      -t      PATH   Training configuration file    │
-    │                                          (overrides default)            │
-    │ *  --processed-data-home  -p      TEXT   Processed data directory       │
-    │                                          (overrides config)             │
-    │                                          [required]                     │
-    │ *  --output-home          -o      TEXT   Output directory for trained   │
-    │                                          models                         │
-    │                                          [required]                     │
-    │    --noise-multiplier     -n      FLOAT  Noise multiplier (overrides    │
-    │                                          configuration)                 │
-    │    --max-grad-norm        -m      FLOAT  Max grad norm (overrides       │
-    │                                          configuration)                 │
-    │    --verbose              -v             Verbose logging                │
-    │    --help                 -h             Show this message and exit.    │
     ╰─────────────────────────────────────────────────────────────────────────╯
     ```
 
@@ -656,8 +616,7 @@ rm -rf dist
 python3 -m pip install --upgrade build
 python3 -m build
 python3 -m pip install --upgrade twine
-python -m pypi_attestations sign dist/*
-python3 -m twine upload --attestations --repository pypi dist/*
+python3 -m twine upload --repository pypi dist/*
 ```
 
 Make docs:
