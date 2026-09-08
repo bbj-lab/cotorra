@@ -24,7 +24,8 @@ class TrainerWithCustomLoss(t_Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         if self.compute_loss_func is not None:
-            labels = inputs.get("labels")
+            inputs = dict(inputs)
+            labels = inputs.pop("labels", None)
             outputs = model(**inputs)
             loss = self.compute_loss_func(outputs, labels)
             return (loss, outputs) if return_outputs else loss
@@ -99,15 +100,19 @@ class Trainer(Configurable):
 
     def collate_fn(self, batch):
         input_ids = t.stack([x["input_ids"] for x in batch])
-        if "time_based_rope" not in self.cfg:
-            return {"input_ids": input_ids, "labels": input_ids}
-        else:
+        f_set = {"input_ids": input_ids, "labels": input_ids}
+        if "time_based_rope" in self.cfg:
             p_ids = (
                 t.stack([x["s_elapsed"] for x in batch])
                 / self.cfg.time_based_rope.sec_per_pos_id
             )
             p_ids += t.arange(p_ids.shape[-1], device=p_ids.device, dtype=p_ids.dtype)
-            return {"input_ids": input_ids, "labels": input_ids, "position_ids": p_ids}
+            f_set["position_ids"] = p_ids
+        if "tte_aware_objective" in self.cfg:
+            f_set["hours_to_end_time"] = t.stack(
+                [x["hours_to_end_time"] for x in batch]
+            )
+        return f_set
 
     def train(self, resume_from_checkpoint: bool = False, verbose: bool = False):
         if resume_from_checkpoint:

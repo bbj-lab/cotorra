@@ -44,7 +44,7 @@ class Loss:
         if "quantile_token_loss" in self.cfg:
             self.q_type = np.array(
                 [
-                    v.endswith(tuple(f"Q{i}" for i in range(self.tkzr_cfg.cfg.n_bins)))
+                    v.endswith(tuple(f"_Q{i}" for i in range(self.tkzr_cfg.cfg.n_bins)))
                     for v in self.vocab
                 ]
             )
