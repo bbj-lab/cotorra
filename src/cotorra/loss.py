@@ -102,6 +102,21 @@ class Loss:
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
         ).to(dtype=t.float32)
 
+    def tte_loss(self, outputs, **kwargs):
+        """the time-to-event term, which `TteAwareForCausalLM` computes itself --
+        it owns the head -- and hands back alongside the logits. It gets folded
+        into the objective here rather than in the model because
+        `TrainerWithCustomLoss` pops `labels` before the forward call, so the
+        model's own `loss + tte_weight * tte_loss` is never formed"""
+        if (tte_loss := outputs.get("tte_loss")) is None:
+            raise ValueError(
+                "`tte_aware_objective` is configured but the model returned no "
+                "`tte_loss`: the term needs a `tte_aware` model (what "
+                "`Trainer.model_init` builds when the block is present) fed a "
+                "batch carrying `hours_to_end_time`"
+            )
+        return tte_loss.to(dtype=t.float32)
+
     def custom_loss(self, outputs, labels, **kwargs):
         loss = 0.0
         log = dict()
@@ -117,6 +132,10 @@ class Loss:
             quantile_token_loss = self.quantile_token_loss(outputs, labels)
             log |= {"quantile_token_loss": quantile_token_loss.item()}
             loss += self.cfg.quantile_token_loss.qt_weight * quantile_token_loss
+        if "tte_aware_objective" in self.cfg:
+            tte_loss = self.tte_loss(outputs)
+            log |= {"tte_loss": tte_loss.item()}
+            loss += self.cfg.tte_aware_objective.get("tte_weight", 1.0) * tte_loss
         if wandb.run is not None:
             log |= {"custom_loss": loss.item()}
             wandb.log(log)

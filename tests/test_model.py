@@ -324,6 +324,59 @@ def test_the_head_learns_the_target():
 # --------------------------------------------------------------- integration
 
 
+def test_model_init_wraps_the_backbone_when_the_objective_is_configured(
+    built_trainer, monkeypatch
+):
+    """`Trainer.model_init` is the only place the pipeline builds a model, so
+    the block has to reach it -- it used to build a plain backbone that
+    silently swallowed the `hours_to_end_time` batch column"""
+    assert not isinstance(built_trainer.model_init(), TteAwareForCausalLM)
+
+    monkeypatch.setitem(built_trainer.cfg, "tte_aware_objective", {"tte_weight": 0.25})
+    mdl = built_trainer.model_init()
+    tkzr = built_trainer.tkzr_cfg
+    assert isinstance(mdl, TteAwareForCausalLM)
+    assert mdl.config.tte_weight == 0.25
+    assert mdl.config.vocab_size == len(tkzr.lookup)
+    assert (mdl.config.bos_token_id, mdl.config.eos_token_id) == (
+        tkzr.lookup.BOS,
+        tkzr.lookup.EOS,
+    )
+
+
+def test_the_custom_loss_path_still_reaches_the_tte_head(built_trainer, monkeypatch):
+    """
+    the pairing that used to drop the objective on the floor:
+    `TrainerWithCustomLoss.compute_loss` pops `labels`, so the model's own
+    `loss + tte_weight * tte_loss` is never formed and `Loss.custom_loss` owns
+    the whole objective. With the term missing there, `tte_head` took no
+    gradient at all -- and DDP, configured with
+    `ddp_find_unused_parameters: false`, would refuse the step
+    """
+    monkeypatch.setitem(built_trainer.cfg, "tte_aware_objective", {"tte_weight": 0.5})
+    assert built_trainer.trainer.compute_loss_func is not None  # `custom_loss: true`
+
+    mdl = built_trainer.model_init()
+    n_vocab, seq_len = len(built_trainer.tkzr_cfg.lookup), 8
+    batch = built_trainer.collate_fn(
+        [
+            {
+                "input_ids": t.randint(3, n_vocab - 1, (seq_len,)),
+                "s_elapsed": t.arange(seq_len, dtype=t.float32) * 300,
+                "hours_to_end_time": t.rand(seq_len) * 100,
+            }
+            for _ in range(2)
+        ]
+    )
+    loss = built_trainer.trainer.compute_loss(mdl, batch)
+    loss.backward()
+
+    grad = mdl.tte_head.weight.grad
+    assert grad is not None and t.isfinite(grad).all()
+    assert grad.abs().max().item() > 0
+    assert all(p.grad is not None for p in mdl.parameters() if p.requires_grad)
+
+
 def test_it_consumes_what_the_trainers_collator_produces(built_trainer, monkeypatch):
     """
     the contract between `Trainer.collate_fn` and this model: with both

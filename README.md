@@ -194,6 +194,13 @@ that specifies:
     - **tokens_of_interest**: List of token labels to upweight. Supports patterns
       specified with fnmatch.
     - **toi_weight**: Weight multiplier applied to those tokens.
+- **tte_aware_objective** _(optional)_: Adds a scalar head that predicts the
+  log1p-hours remaining until the end of the record, trained jointly with the
+  next-token objective. Requires an `hours_to_end_time` column in
+  `tokens_times.parquet`, and produces a `tte_aware` model wrapping the selected
+  preset.
+    - **tte_weight**: Weight multiplier for the time-to-event term (default:
+      `1.0`).
 - **time_based_rope** _(optional)_: Enables time-aware rotary position
   embeddings.
     - **sec_per_pos_id**: Number of seconds represented by one position id

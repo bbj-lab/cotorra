@@ -15,6 +15,7 @@ from transformers import Trainer as t_Trainer
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
 from cotorra.loss import Loss
+from cotorra.model import TteAwareConfig
 
 
 class TrainerWithCustomLoss(t_Trainer):
@@ -87,10 +88,19 @@ class Trainer(Configurable):
         config = AutoConfig.from_pretrained(
             self.cfg.model.model_name, **conf_param, **self.cfg.model.model_args
         )
+        if "tte_aware_objective" in self.cfg:
+            # the block doubles as the head's own config, so the weight written
+            # in the training yaml is the one both this model and `Loss` use
+            config = TteAwareConfig(
+                text_config=config, **(self.cfg.tte_aware_objective or {})
+            )
         mdl = AutoModelForCausalLM.from_config(config)
         self.logger.info(
             "Loaded model {name} with {num} params ({dtype}).".format(
-                name=self.cfg.model.model_name,
+                name="{}{}".format(
+                    self.cfg.model.model_name,
+                    " (tte-aware)" if "tte_aware_objective" in self.cfg else "",
+                ),
                 num=sum(p.numel() for p in mdl.parameters()),
                 dtype=next(mdl.parameters()).dtype,
             )

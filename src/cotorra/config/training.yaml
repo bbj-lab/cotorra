@@ -76,6 +76,11 @@ label_weighted_loss:
   tokens_of_interest: *tois
   toi_weight: !!float 20.0
 
+# uncomment to train a joint time-to-event head; needs `hours_to_end_time` in
+# `tokens_times.parquet` and writes a `tte_aware` model wrapping the preset above
+# tte_aware_objective:
+#   tte_weight: !!float 1.0
+
 time_based_rope:
   sec_per_pos_id: !!int 300
 

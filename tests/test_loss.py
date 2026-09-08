@@ -168,6 +168,51 @@ def test_custom_loss_uses_label_weighted_without_quantile_block(outputs, labels)
     )
 
 
+def test_custom_loss_adds_the_weighted_tte_term(outputs, labels):
+    """the model hands its time-to-event term back on the output object; the
+    objective picks it up here, weighted by the training config"""
+    loss = Loss(make_cfg(tte_aware_objective={"tte_weight": 0.25}), make_tkzr_cfg())
+    out = dict(outputs) | {"tte_loss": t.tensor(4.0)}
+    expected = (
+        loss.label_weighted_loss(out, labels).item()
+        + 0.5 * loss.quantile_token_loss(out, labels).item()
+        + 0.25 * 4.0
+    )
+    assert loss.custom_loss(out, labels).item() == pytest.approx(expected, rel=1e-5)
+
+
+def test_custom_loss_defaults_the_tte_weight_to_one():
+    """matching `TteAwareConfig.tte_weight`, so an empty block still trains"""
+    loss = Loss(make_cfg(tte_aware_objective={}), make_tkzr_cfg())
+    assert loss.cfg.tte_aware_objective.get("tte_weight", 1.0) == 1.0
+
+
+def test_custom_loss_ignores_the_tte_term_when_the_block_is_absent(outputs, labels):
+    """a model may carry the head without the objective asking to train it"""
+    loss = Loss(make_cfg(), make_tkzr_cfg())
+    out = dict(outputs) | {"tte_loss": t.tensor(4.0)}
+    assert loss.custom_loss(out, labels).item() == pytest.approx(
+        loss.custom_loss(outputs, labels).item(), rel=1e-5
+    )
+
+
+def test_custom_loss_refuses_a_model_that_returns_no_tte_term(outputs, labels):
+    """configuring the objective against a plain backbone used to train
+    silently without it -- the extra kwarg is swallowed by the backbone's
+    `**kwargs` and no `tte_loss` comes back -- so say so instead"""
+    loss = Loss(make_cfg(tte_aware_objective={"tte_weight": 0.5}), make_tkzr_cfg())
+    with pytest.raises(ValueError, match="tte_loss"):
+        loss.custom_loss(outputs, labels)
+
+
+def test_custom_loss_keeps_the_tte_term_differentiable(outputs, labels):
+    """`tte_head`'s only path to a gradient on this code path"""
+    loss = Loss(make_cfg(tte_aware_objective={"tte_weight": 0.5}), make_tkzr_cfg())
+    tte = t.tensor(4.0, requires_grad=True)
+    loss.custom_loss(dict(outputs) | {"tte_loss": tte}, labels).backward()
+    assert tte.grad is not None and tte.grad.item() == pytest.approx(0.5)
+
+
 def test_custom_loss_does_not_touch_wandb_when_no_run_is_active(outputs, labels):
     import wandb
 
