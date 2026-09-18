@@ -92,13 +92,29 @@ class Extractor(Configurable):
                 + f"_past{past_suffix}"
             )
             extra["ranks"] = pad_sequence(
-                [
-                    t.as_tensor(x[:ml], dtype=t.float32)
-                    for x in batch[rank_column]
-                ],
+                [t.as_tensor(x[:ml], dtype=t.float32) for x in batch[rank_column]],
                 batch_first=True,
                 padding_value=0.0,
             ).to(self.model.device)
+            # interval_mixture_weights builds the input blend from the rank
+            # INTERVAL, so extraction must supply the same widths training
+            # did or the embeddings silently differ from what the model was
+            # trained on -- the same class of train/extract mismatch as
+            # time_based_rope. Read off the checkpoint's own config, never
+            # from extraction.yaml, so it can't disagree with the model.
+            if getattr(self.model.config, "interval_mixture_weights", False):
+                width_col = f"exact_rank_widths_past{past_suffix}"
+                assert width_col in batch, (
+                    f"{width_col} missing -- this model was trained with "
+                    "interval_mixture_weights, so extraction needs cocoa's "
+                    "exact_rank_widths column (retokenize with a cocoa build "
+                    "that emits it)"
+                )
+                extra["rank_widths"] = pad_sequence(
+                    [t.as_tensor(x[:ml], dtype=t.float32) for x in batch[width_col]],
+                    batch_first=True,
+                    padding_value=0.0,
+                ).to(self.model.device)
             input_ids = self._raw_to_collapsed_t[input_ids]
 
         if "time_based_rope" in self.cfg:

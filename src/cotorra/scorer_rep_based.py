@@ -130,10 +130,7 @@ class RepBasedScorer(Configurable):
                     "Using logistic regression classifier with cross-validation"
                 )
                 mdl = skl.linear_model.LogisticRegressionCV(
-                    n_jobs=-1,
-                    scoring="roc_auc",
-                    max_iter=10_000,
-                    l1_ratios=(0,),
+                    n_jobs=-1, scoring="roc_auc", max_iter=10_000, l1_ratios=(0,)
                 )
             case "logistic-cv-z" | "lr-cv-z":
                 self.logger.info(

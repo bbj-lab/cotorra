@@ -50,8 +50,7 @@ class Loader(Configurable):
         )
 
         tt_split = {
-            s: self.processed_data_home / f"{s}_{tt_stem}.parquet"
-            for s in self.splits
+            s: self.processed_data_home / f"{s}_{tt_stem}.parquet" for s in self.splits
         }
         if not all(s.is_file() for s in tt_split.values()) or any(
             tt_all.stat().st_mtime > s.stat().st_mtime for s in tt_split.values()
@@ -78,10 +77,45 @@ class Loader(Configurable):
             .rename_column("tokens", "input_ids")
             .select_columns(
                 ["input_ids"]
-                + (["s_elapsed"] if "time_based_rope" in self.cfg else [])
+                # s_elapsed is also what contemporaneous_shuffle uses to find
+                # blocks of simultaneous events (equal elapsed seconds), since
+                # `times` itself is not carried into the dataset
+                + (
+                    ["s_elapsed"]
+                    if "time_based_rope" in self.cfg
+                    or self.cfg.get("contemporaneous_shuffle", False)
+                    else []
+                )
                 + (
                     [self.cfg.basis_blended_tokens.get("rank_column", "exact_ranks")]
                     if "basis_blended_tokens" in self.cfg
+                    else []
+                )
+                # the decile baseline normally needs no ranks at all; under
+                # baseline_exact_ranks its numeric losses score the exact rank
+                # instead of the bin midpoint, so the column has to be carried
+                # even though no basis vocabulary exists. See Loss._bin_terms.
+                + (
+                    ["exact_ranks"]
+                    if "basis_blended_tokens" not in self.cfg
+                    and self.cfg.get("baseline_exact_ranks", False)
+                    else []
+                )
+                # interval_nll_loss scores the probability mass over the
+                # [p1, p2] rank interval rather than the density at its
+                # midpoint, so it needs the interval's width alongside the
+                # rank (cocoa's exact_rank_widths -- see that tokenizer's
+                # _add_exact_rank). Only pulled when that loss is on, so
+                # datasets tokenized before the column existed still load.
+                + (
+                    ["exact_rank_widths"]
+                    if "basis_blended_tokens" in self.cfg
+                    and (
+                        self.cfg.basis_blended_tokens.get("interval_nll_loss", False)
+                        or self.cfg.basis_blended_tokens.get(
+                            "interval_mixture_weights", False
+                        )
+                    )
                     else []
                 )
             )
@@ -99,11 +133,29 @@ class Loader(Configurable):
         # are always present regardless, so this is purely an opt-in choice
         # of which past-context a given experiment trains/extracts on.
         past_suffix = self.cfg.get("past_suffix", "")
+        _inference = (
+            ds.load_dataset("parquet", data_files=self.inference_files).rename_column(
+                f"tokens_past{past_suffix}", "input_ids"
+            )
+            if self.inference_files
+            else None
+        )
+        # exact_rank_widths_past is carried whenever the tokenization provides
+        # it, rather than gated on a config key: whether it is needed is a
+        # property of the *model* (BasisBlendedConfig.interval_mixture_weights,
+        # which Extractor reads off the checkpoint), and extraction.yaml -- the
+        # config this Loader sees -- cannot know that. Datasets tokenized before
+        # cocoa emitted the column simply lack it, and Extractor.collate_fn
+        # raises a clear error if a model that needs it meets one that lacks it.
+        _avail = (
+            set(next(iter(_inference.values())).column_names)
+            if _inference is not None
+            else set()
+        )
+        _width_col = f"exact_rank_widths_past{past_suffix}"
         self.for_inference = (
             (
-                ds.load_dataset("parquet", data_files=self.inference_files)
-                .rename_column(f"tokens_past{past_suffix}", "input_ids")
-                .select_columns(
+                _inference.select_columns(
                     ["input_ids"]
                     + (
                         [f"s_elapsed_past{past_suffix}"]
@@ -118,6 +170,11 @@ class Loader(Configurable):
                             + f"_past{past_suffix}"
                         ]
                         if "basis_blended_tokens" in self.cfg
+                        else []
+                    )
+                    + (
+                        [_width_col]
+                        if "basis_blended_tokens" in self.cfg and _width_col in _avail
                         else []
                     )
                 )
