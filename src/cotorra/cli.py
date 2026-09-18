@@ -341,7 +341,7 @@ def rep_based_score(
         Optional[str],
         typer.Option(
             "--training-home",
-            "-o",
+            "-t",
             help="Use features and labels extracted here to train the model (transfer)",
             show_default=False,
         ),
