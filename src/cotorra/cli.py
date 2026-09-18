@@ -337,6 +337,15 @@ def rep_based_score(
             show_default=False,
         ),
     ] = None,
+    training_home: Annotated[
+        Optional[str],
+        typer.Option(
+            "--training-home",
+            "-t",
+            help="Use features and labels extracted here to train the model (transfer)",
+            show_default=False,
+        ),
+    ] = None,
     estimator_type: Annotated[
         EstimatorType,
         typer.Option(
@@ -359,6 +368,7 @@ def rep_based_score(
             processed_data_home=processed_data_home,
             model_home=model_home,
             output_home=output_home,
+            training_home=training_home,
             estimator_type=estimator_type.value,
         )
         scorer.save_all(verbose=verbose)
