@@ -311,6 +311,20 @@ estimator on extracted features (run `cotorra extract` first). It:
 2. Fits the chosen estimator on the training split.
 3. Predicts outcome probabilities for the held-out split.
 
+We support two types of model transfer for rep-based scoring:
+
+1. You can apply a model trained on one dataset to a second dataset to obtain
+   train, tuning, and held-out features, and then pair these features with labels
+   from the second dataset to train supervised classifiers that can be applied to
+   the held-out set of the second set.
+
+2. You can also apply a model trained on one dataset to obtain train and tuning
+   features for that first dataset and learn supervised classifiers using the
+   labels from this first dataset. You can then apply the model to a second
+   dataset to extract features and then apply the supervised classifier to the
+   held-out features of this second set. For this second type of transfer, use
+   the `--training-home` option offered by this command.
+
 Both are driven by a YAML config (the package ships a default; see
 [`./src/cotorra/config/scoring.yaml`](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/scoring.yaml))
 that specifies:
@@ -540,6 +554,10 @@ with commands:
     │                                                     for scores,         │
     │                                                     defaults to         │
     │                                                     processed-data-home │
+    │    --training-home     -o      TEXT                 Use features and    │
+    │                                                     labels extracted    │
+    │                                                     here to train the   │
+    │                                                     model (transfer)    │
     │    --estimator         -e      [k-NN|lightGBM|logi  Estimator to use    │
     │                                stic|logistic-z|log  for rep-based       │
     │                                istic-CV|logistic-C  scoring             │
