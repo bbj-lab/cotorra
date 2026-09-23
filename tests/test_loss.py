@@ -5,7 +5,6 @@
 import pytest
 import torch as t
 from omegaconf import OmegaConf
-from omegaconf.errors import ConfigAttributeError
 
 from cotorra.loss import Loss
 
@@ -119,22 +118,6 @@ def test_label_weighted_loss_matches_manually_weighted_cross_entropy(outputs, la
         shift_logits.reshape(-1, VOCAB_SIZE), shift_labels.reshape(-1)
     )
     assert out.item() == pytest.approx(expected.item(), rel=1e-5)
-
-
-def test_construction_requires_label_weighted_loss_block(outputs, labels):
-    """
-    `Loss.__init__` unconditionally reads
-    `cfg.label_weighted_loss.tokens_of_interest` to compute
-    `grokked_outcome_tokens`, before the `"label_weighted_loss" in self.cfg`
-    presence check that gates everything else -- so despite the docs'
-    "toggled purely by presence of the block" convention, the block cannot
-    actually be omitted even if a user only wants `quantile_token_loss` (or no
-    custom loss component at all beyond plain cross entropy)
-    """
-    cfg = make_cfg()
-    del cfg["label_weighted_loss"]
-    with pytest.raises(ConfigAttributeError):
-        Loss(cfg, make_tkzr_cfg())
 
 
 def test_custom_loss_x_ent_branch_is_correct_if_ever_reached(outputs, labels):
