@@ -8,7 +8,7 @@
     ```sh
     cocoa pipeline \
         --raw-data-home /path/to/raw \
-        --processed-data-home ./processed/dev \
+        --processed-data-home processed/dev \
         --verbose
     ```
 
@@ -16,8 +16,8 @@
 
     ```sh
     cotorra tune \
-        --processed-data-home ./processed/dev \
-        --output-home ./output/dev/ \
+        --processed-data-home processed/dev \
+        --output-home output/dev/ \
         --verbose
     ```
 
@@ -25,8 +25,8 @@
 
     ```sh
     cotorra generative-score \
-        --processed-data-home ./processed/dev \
-        --model-home ./output/dev/mdl-cotorra-tuning \
+        --processed-data-home processed/dev \
+        --model-home output/dev/mdl-cotorra-tuning \
         --verbose
     ```
 
@@ -35,12 +35,12 @@
 
     ```sh
     cotorra extract \
-        --processed-data-home ./processed/dev \
-        --model-home ./output/dev/mdl-cotorra-tuning
+        --processed-data-home processed/dev \
+        --model-home output/dev/mdl-cotorra-tuning
 
     cotorra rep-based-score \
-        --processed-data-home ./processed/dev \
-        --model-home ./output/dev/mdl-cotorra-tuning \
+        --processed-data-home processed/dev \
+        --model-home output/dev/mdl-cotorra-tuning \
         --verbose
     ```
 

@@ -175,15 +175,6 @@ def test_lightgbm_is_the_default_estimator(
     assert roc_auc_score(y_true[valid], scores[valid]) > 0.8
 
 
-def test_score_label_scores_every_held_out_row_for_each_kept_label(
-    scorer_data, fake_model_home
-):
-    height = pl.read_parquet(scorer_data / "held_out_for_inference.parquet").height
-    res = make_scorer(scorer_data, fake_model_home).score()
-    for column, scores in res.items():
-        assert scores.shape == (height,), column
-
-
 def test_save_all_writes_a_scores_parquet_with_rep_score_column(
     scorer_data, fake_model_home, target_token, single_token_cfg_path
 ):

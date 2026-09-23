@@ -10,7 +10,7 @@ language and a model trained on one can be run over the rest.
    (`dsets[0]`) is the one we train on; the rest are the transfer targets.
 
     ```sh
-    config_home=./config
+    config_home=config
     dsets=(mimic-icu eicu hirid)
     ```
 
@@ -19,8 +19,8 @@ language and a model trained on one can be run over the rest.
     ```sh
     parallel --bar cocoa collate \
         --collation-config ${config_home}/collation.yaml \
-        --raw-data-home ./data-raw/{} \
-        --processed-data-home ./processed/{} \
+        --raw-data-home data-raw/{} \
+        --processed-data-home processed/{} \
         ::: "${dsets[@]}"
     ```
 

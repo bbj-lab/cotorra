@@ -43,6 +43,7 @@ class RepBasedScorer(Configurable):
         processed_data_home: pathlib.Path | str = None,
         model_home: pathlib.Path | str = None,
         output_home: pathlib.Path | str = None,
+        training_home: pathlib.Path | str = None,
         estimator_type: typing.Literal[
             "k-NN",
             "lightGBM",
@@ -59,6 +60,11 @@ class RepBasedScorer(Configurable):
             lambda x: pathlib.Path(x).expanduser().resolve(),
             (processed_data_home, model_home),
         )
+        self.training_home = (
+            pathlib.Path(training_home).expanduser().resolve()
+            if training_home is not None
+            else self.processed_data_home
+        )
         self.output_home = (
             pathlib.Path(output_home).expanduser().resolve()
             if output_home is not None
@@ -73,7 +79,11 @@ class RepBasedScorer(Configurable):
             self.features = {
                 s: np.vstack(
                     pl.scan_parquet(
-                        self.processed_data_home
+                        (
+                            self.processed_data_home
+                            if s == "held_out"
+                            else self.training_home
+                        )
                         / f"features-{s}*-{self.model_home.name}.parquet"
                     )
                     .select("features")
@@ -85,14 +95,14 @@ class RepBasedScorer(Configurable):
             }
         except FileNotFoundError as e:
             raise FileNotFoundError(
-                "Expected extracted features at: "
-                f"{self.processed_data_home / 'features-<split>-<model_name>.parquet'},"
-                " but not found."
-                " Please run `cotorra extract` first."
+                "Features not found. Please run `cotorra extract` first."
             ) from e
 
         self.labels = {
-            s: pl.scan_parquet(self.processed_data_home / f"{s}_for_inference.parquet")
+            s: pl.scan_parquet(
+                (self.processed_data_home if s == "held_out" else self.training_home)
+                / f"{s}_for_inference.parquet"
+            )
             for s in self.splits
         }
 
@@ -163,13 +173,7 @@ class RepBasedScorer(Configurable):
             case "xgboost":
                 self.logger.info("Using XGBoost classifier")
                 mdl = xgb.XGBClassifier(
-                    min_child_weight=5,
-                    max_leaves=64,
-                    n_estimators=250,
-                    n_jobs=-1,
-                    # xgboost >= 2.0 takes `eval_metric` here rather than on
-                    # `fit`, where lightGBM still wants it
-                    eval_metric="auc",
+                    min_child_weight=5, max_leaves=64, n_estimators=250, n_jobs=-1
                 )
             case _:
                 self.logger.info("Using (default) lightGBM classifier")
@@ -188,7 +192,19 @@ class RepBasedScorer(Configurable):
         mdl.fit(
             X=self.features["train"][train_valid],
             y=train_label[train_valid],
-            **fit_kwargs,
+            **(
+                {
+                    "eval_set": [
+                        (
+                            self.features["tuning"][tuning_valid],
+                            tuning_label[tuning_valid],
+                        )
+                    ],
+                    "eval_metric": "auc",
+                }
+                if str(self.estimator_type).lower() in ("lightgbm", "xgboost")
+                else {}
+            ),
         )
 
         scores = np.nan * np.ones_like(held_out_valid)
@@ -198,50 +214,9 @@ class RepBasedScorer(Configurable):
 
         return scores
 
-    def unfittable_reason(self, target_token: str) -> str | None:
-        """
-        why `target_token` cannot be fit, or `None` if it can. The winnowed
-        inference tables routinely hold labels no estimator can be trained
-        on -- a token that never made it into the tables at all, or one whose
-        rows not already past the threshold are all a single class -- so
-        `score` checks before fitting rather than letting one bad label abort
-        the whole run and lose the scores for every other one.
-        """
-        splits = ("train", "tuning")
-        if str(self.estimator_type).lower() not in EVAL_SET_ESTIMATORS:
-            splits = ("train",)
-
-        for split in splits:
-            cols = self.labels[split].collect_schema().names()
-            if missing := [
-                c
-                for c in (f"{target_token}_past", f"{target_token}_future")
-                if c not in cols
-            ]:
-                return f"{split} is missing {', '.join(missing)}"
-
-            valid, label = (
-                self.labels[split]
-                .select(~pl.col(f"{target_token}_past"), f"{target_token}_future")
-                .collect()
-                .to_numpy()
-                .T
-            )
-            n_classes = len(np.unique(label[valid]))
-            if n_classes < 2:
-                return (
-                    f"{split} has {int(valid.sum())} row(s) not already past the "
-                    f"threshold, covering {n_classes} class(es)"
-                )
-
-        return None
-
     def score(self):
         res = dict()
         for tt in tqdm.tqdm(self.grokked_outcome_tokens, position=0):
-            if (reason := self.unfittable_reason(tt)) is not None:
-                self.logger.warning(f"Skipping {tt}: {reason}")
-                continue
             res[f"{tt}_rep_score"] = self.score_label(target_token=tt)
 
         return res
