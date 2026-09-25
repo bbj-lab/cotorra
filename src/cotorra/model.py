@@ -2,7 +2,7 @@
 
 """
 defines a modelling class interoperable with huggingface with a forward method that both
-predicts the next token and the time-to-event for that token
+predicts the next token and the time-to-event as of the current one
 """
 
 import dataclasses
@@ -92,8 +92,9 @@ class TteAwarePreTrainedModel(PreTrainedModel):
 
 class TteAwareForCausalLM(TteAwarePreTrainedModel, GenerationMixin):
     """a causal lm carrying a second, scalar head that predicts the log1p-hours
-    remaining until the end of the record at the token the language-modelling head
-    is predicting; laid out as a llama-family `*ForCausalLM` is, so for those
+    remaining until the end of the record as of the token just read (where the
+    language-modelling head looks one token ahead, this one does not); laid out as
+    a llama-family `*ForCausalLM` is, so for those
     backbones -- every one cotorra ships a preset for -- dropping `tte_head.*`
     leaves a state dict the stock class loads unchanged"""
 
@@ -117,15 +118,17 @@ class TteAwareForCausalLM(TteAwarePreTrainedModel, GenerationMixin):
         self.post_init()
 
     def tte_loss_function(self, tte_pred, hours_to_end_time, **kwargs):
-        """mean squared error on the log1p-hours scale, shifted like the
-        language-modelling loss and taken only over the positions whose target is
-        usable: cocoa emits tokens recorded after the reference end time, and a
-        missing end time arrives here as a nan. Summed and then normalized rather
-        than masked-then-averaged so that a batch holding no usable target still
-        yields a differentiable 0.0, keeping `tte_head` off the list of parameters
-        distributed training considers unused"""
-        preds = tte_pred[:, :-1].to(dtype=t.float32)
-        target = hours_to_end_time[:, 1:].to(device=preds.device, dtype=t.float32)
+        """mean squared error on the log1p-hours scale, left unshifted -- position
+        i is scored against the hours remaining once token i has been read, which
+        also keeps a packed sequence from scoring one record's last token against
+        the next record's first target -- and taken only over the positions whose
+        target is usable: cocoa emits tokens recorded after the reference end time,
+        and a missing end time arrives here as a nan. Summed and then normalized
+        rather than masked-then-averaged so that a batch holding no usable target
+        still yields a differentiable 0.0, keeping `tte_head` off the list of
+        parameters distributed training considers unused"""
+        preds = tte_pred.to(dtype=t.float32)
+        target = hours_to_end_time.to(device=preds.device, dtype=t.float32)
         keep = t.isfinite(target) & (target >= 0)
         return t.nn.functional.mse_loss(
             preds[keep], t.log1p(target[keep]), reduction="sum"

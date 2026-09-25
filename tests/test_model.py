@@ -228,12 +228,13 @@ def test_the_tte_term_is_computed_without_labels(model):
 # -------------------------------------------------------- the tte loss itself
 
 
-def test_the_tte_target_is_the_next_positions_hours(model):
+def test_the_tte_target_is_the_current_positions_hours(model):
     """
-    shifted exactly like the language-modelling loss: the prediction at
-    position i is scored against the target at i+1, never against position i's
-    own. The targets here fall away down the sequence, as remaining-hours
-    always do, so scoring the wrong pairing gives a different number
+    unshifted, unlike the language-modelling loss: the prediction at position i
+    is scored against position i's own target -- the hours remaining once token
+    i has been read -- never against the one at i+1. The targets here fall away
+    down the sequence, as remaining-hours always do, so scoring the wrong
+    pairing gives a different number
     """
     with t.no_grad():  # a head that emits a constant 0, whatever the input
         model.tte_head.weight.zero_()
@@ -243,8 +244,8 @@ def test_the_tte_target_is_the_next_positions_hours(model):
 
     shifted = (t.log1p(hours[0, 1:]) ** 2).mean()
     unshifted = (t.log1p(hours[0, :]) ** 2).mean()
-    assert out.tte_loss.item() == pytest.approx(shifted.item(), rel=1e-5)
-    assert shifted.item() != pytest.approx(unshifted.item(), rel=1e-3)
+    assert out.tte_loss.item() == pytest.approx(unshifted.item(), rel=1e-5)
+    assert unshifted.item() != pytest.approx(shifted.item(), rel=1e-3)
 
 
 def test_a_zero_target_is_kept_rather_than_masked(model):
@@ -297,11 +298,11 @@ def test_only_the_usable_positions_contribute(model):
         model.tte_head.bias.zero_()
     ids = t.randint(3, VOCAB - 1, (1, 4))
     nan = float("nan")
-    # targets at positions 1..3 are what get scored; blank the middle one
+    # every position is scored; blank one, which must also leave the denominator
     masked = model(
-        input_ids=ids, hours_to_end_time=t.tensor([[0.0, 1.0, nan, 3.0]])
+        input_ids=ids, hours_to_end_time=t.tensor([[3.0, nan, 1.0, 0.0]])
     ).tte_loss
-    expected = (t.log1p(t.tensor([1.0, 3.0])) ** 2).mean()
+    expected = (t.log1p(t.tensor([3.0, 1.0, 0.0])) ** 2).mean()
     assert masked.item() == pytest.approx(expected.item(), rel=1e-5)
 
 

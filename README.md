@@ -1,15 +1,5 @@
 <p align="center">
-<img src="https://raw.githubusercontent.com/burkh4rt/cotorra/master/img/cotorra.png" width="400" style="display: block;
-margin: 0 auto; -webkit-mask-image: radial-gradient(
-    ellipse at center,
-    rgba(0,0,0,1) 50%,
-    rgba(0,0,0,0) 100%
-  );
-  mask-image: radial-gradient(
-    ellipse at center,
-    rgba(0,0,0,1) 50%,
-    rgba(0,0,0,0) 100%
-  );"/>
+<img src="https://raw.githubusercontent.com/burkh4rt/cotorra/master/img/cotorra.png" alt="friendly parrot" width="400" />
 </p>
 
 # Cotorra: a configurable trainer
@@ -194,11 +184,12 @@ that specifies:
     - **tokens_of_interest**: List of token labels to upweight. Supports patterns
       specified with fnmatch.
     - **toi_weight**: Weight multiplier applied to those tokens.
-- **tte_aware_objective** _(optional)_: Adds a scalar head that predicts the
-  log1p-hours remaining until the end of the record, trained jointly with the
-  next-token objective. Requires an `hours_to_end_time` column in
-  `tokens_times.parquet`, and produces a `tte_aware` model wrapping the selected
-  preset.
+- **tte_aware_objective** _(optional)_: Adds a scalar head that predicts, at each
+  token, the log1p-hours remaining from that token until the end of the record,
+  trained jointly with the next-token objective (the language-modelling head
+  looks one token ahead; this head does not). Requires an `hours_to_end_time`
+  column in `tokens_times.parquet`, and produces a `tte_aware` model wrapping the
+  selected preset.
     - **tte_weight**: Weight multiplier for the time-to-event term (default:
       `1.0`).
 - **time_based_rope** _(optional)_: Enables time-aware rotary position
