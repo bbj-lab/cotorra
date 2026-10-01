@@ -113,11 +113,23 @@ class Loss:
         if (tte_loss := outputs.get("tte_loss")) is None:
             raise ValueError(
                 "`tte_aware_objective` is configured but the model returned no "
-                "`tte_loss`: the term needs a `tte_aware` model (what "
-                "`Trainer.model_init` builds when the block is present) fed a "
-                "batch carrying `hours_to_end_time`"
+                "`tte_loss`: the term needs a model with a time-to-event head "
+                "(what `Trainer.model_init` builds when the block is present) fed "
+                "a batch carrying `hours_to_end_time`"
             )
         return tte_loss.to(dtype=t.float32)
+
+    def ttnt_loss(self, outputs, **kwargs):
+        """the time-to-next-token term, handed back by `MppForCausalLM` and
+        folded in here for the same reason as `tte_loss`"""
+        if (ttnt_loss := outputs.get("ttnt_loss")) is None:
+            raise ValueError(
+                "`mpp_objective` is configured but the model returned no "
+                "`ttnt_loss`: the term needs an `mpp` model (what "
+                "`Trainer.model_init` builds when the block is present) fed a "
+                "batch carrying `hours_to_next_token`"
+            )
+        return ttnt_loss.to(dtype=t.float32)
 
     def custom_loss(self, outputs, labels, **kwargs):
         loss = 0.0
@@ -134,10 +146,18 @@ class Loss:
             quantile_token_loss = self.quantile_token_loss(outputs, labels)
             log |= {"quantile_token_loss": quantile_token_loss.item()}
             loss += self.cfg.quantile_token_loss.qt_weight * quantile_token_loss
+        # each weight defaults, as `TteAwareConfig`/`MppConfig` do, to 1.0; a
+        # block left empty in the yaml parses to None
         if "tte_aware_objective" in self.cfg:
             tte_loss = self.tte_loss(outputs)
             log |= {"tte_loss": tte_loss.item()}
-            loss += self.cfg.tte_aware_objective.get("tte_weight", 1.0) * tte_loss
+            tte_weight = (self.cfg.tte_aware_objective or {}).get("tte_weight", 1.0)
+            loss += tte_weight * tte_loss
+        if "mpp_objective" in self.cfg:
+            ttnt_loss = self.ttnt_loss(outputs)
+            log |= {"ttnt_loss": ttnt_loss.item()}
+            ttnt_weight = (self.cfg.mpp_objective or {}).get("ttnt_weight", 1.0)
+            loss += ttnt_weight * ttnt_loss
         if wandb.run is not None:
             log |= {"custom_loss": loss.item()}
             wandb.log(log)

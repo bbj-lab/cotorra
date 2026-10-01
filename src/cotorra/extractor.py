@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModelForCausalLM
 
-import cotorra.model  # noqa: F401 -- registers `tte_aware` with the auto classes
+import cotorra.model  # noqa: F401 -- registers `tte_aware`/`mpp` with the auto classes
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
 

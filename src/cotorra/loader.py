@@ -44,17 +44,32 @@ class Loader(Configurable):
             s: self.processed_data_home / f"{s}_tokens_times.parquet"
             for s in self.splits
         }
-        if not all(s.is_file() for s in tt_split.values()) or any(
-            tt_all.stat().st_mtime > s.stat().st_mtime for s in tt_split.values()
-        ):  # pull out training and tuning sets if not already done
-            # or if tokens have been updated
+        if (
+            not all(s.is_file() for s in tt_split.values())
+            or any(
+                tt_all.stat().st_mtime > s.stat().st_mtime for s in tt_split.values()
+            )
+            or any(
+                "hours_to_next_token" not in pl.read_parquet_schema(s)
+                for s in tt_split.values()
+            )
+        ):  # pull out training and tuning sets if not already done,
+            # if tokens have been updated, or if the caches predate a derived column
             self.subject_splits = pl.scan_parquet(
                 self.processed_data_home / "subject_splits.parquet"
             )
             self.tokens_times = pl.scan_parquet(tt_all).with_columns(
                 s_elapsed=pl.col("times").list.eval(
                     (pl.element() - pl.element().first()).dt.total_seconds()
-                )
+                ),
+                # the target of an `mpp` model's time-to-next-token head; a
+                # record's last token has no successor and gets a nan
+                hours_to_next_token=pl.col("times").list.eval(
+                    (pl.element().shift(-1) - pl.element())
+                    .dt.total_seconds()
+                    .truediv(3600)
+                    .fill_null(float("nan"))
+                ),
             )
             to_split = self.tokens_times.join(self.subject_splits, on="subject_id")
             for s in self.splits:
@@ -71,6 +86,7 @@ class Loader(Configurable):
                 ["input_ids"]
                 + (["s_elapsed"] if "time_based_rope" in self.cfg else [])
                 + (["hours_to_end_time"] if "tte_aware_objective" in self.cfg else [])
+                + (["hours_to_next_token"] if "mpp_objective" in self.cfg else [])
             )
         )
 

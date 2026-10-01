@@ -15,7 +15,7 @@ from transformers import Trainer as t_Trainer
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
 from cotorra.loss import Loss
-from cotorra.model import TteAwareConfig
+from cotorra.model import MppConfig, TteAwareConfig
 
 
 class TrainerWithCustomLoss(t_Trainer):
@@ -49,6 +49,12 @@ class Trainer(Configurable):
         **kwargs,
     ):
         super().__init__(training_cfg, **kwargs)
+        if "tte_weight" in (self.cfg.get("mpp_objective") or {}):
+            raise ValueError(
+                "`mpp_objective` configures only the time-to-next-token head; to "
+                "train a time-to-event head alongside it, add a "
+                "`tte_aware_objective` block, which is where its `tte_weight` goes"
+            )
 
         self.processed_data_home, self.output_home = map(
             lambda p: pathlib.Path(p).expanduser().resolve(),
@@ -88,9 +94,20 @@ class Trainer(Configurable):
         config = AutoConfig.from_pretrained(
             self.cfg.model.model_name, **conf_param, **self.cfg.model.model_args
         )
-        if "tte_aware_objective" in self.cfg:
-            # the block doubles as the head's own config, so the weight written
-            # in the training yaml is the one both this model and `Loss` use
+        # each block doubles as its head's own config, so the weights written in
+        # the training yaml are the ones both this model and `Loss` use
+        if "mpp_objective" in self.cfg:
+            config = MppConfig(
+                text_config=config,
+                **(self.cfg.mpp_objective or {}),
+                # the time-to-event head is built only when its objective is set
+                **(
+                    {"tte_weight": 1.0, **(self.cfg.tte_aware_objective or {})}
+                    if "tte_aware_objective" in self.cfg
+                    else {}
+                ),
+            )
+        elif "tte_aware_objective" in self.cfg:
             config = TteAwareConfig(
                 text_config=config, **(self.cfg.tte_aware_objective or {})
             )
@@ -99,7 +116,9 @@ class Trainer(Configurable):
             "Loaded model {name} with {num} params ({dtype}).".format(
                 name="{}{}".format(
                     self.cfg.model.model_name,
-                    " (tte-aware)" if "tte_aware_objective" in self.cfg else "",
+                    f" ({config.model_type})"
+                    if isinstance(config, TteAwareConfig)
+                    else "",
                 ),
                 num=sum(p.numel() for p in mdl.parameters()),
                 dtype=next(mdl.parameters()).dtype,
@@ -121,6 +140,10 @@ class Trainer(Configurable):
         if "tte_aware_objective" in self.cfg:
             f_set["hours_to_end_time"] = t.stack(
                 [x["hours_to_end_time"] for x in batch]
+            )
+        if "mpp_objective" in self.cfg:
+            f_set["hours_to_next_token"] = t.stack(
+                [x["hours_to_next_token"] for x in batch]
             )
         return f_set
 

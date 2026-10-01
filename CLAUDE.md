@@ -29,9 +29,14 @@ train / tune   →  extract  →  rep-based-score
   `save_pretrained` format) + `mdl-<run_name>-training.yaml` under
   `--output-home`.
 - **extract** — run a trained model over inference contexts, write hidden-state
-  feature tables (`features-<split>-<model_name>.parquet`).
+  feature tables to `--output-home` (default: `--processed-data-home`) as
+  `features[-all]-<split>[-<i>-of-<n>]-<model_name>.parquet` (`-all` with
+  `--all-times`; the shard suffix once a split exceeds `extract.shard_size`).
 - **rep-based-score** — fit a lightweight sklearn/boosting estimator on extracted
-  features (requires `extract` first).
+  features (requires `extract` first). It globs `features-<split>*-…` from
+  `--processed-data-home`, so features extracted to another `--output-home`
+  aren't found; `--training-home` (transfer) fits on another directory's
+  train/tuning features and labels and scores this one's `held_out`.
 - **generative-score** — Monte-Carlo sample trajectories to compute
   MC/SCOPE/REACH scores (does not need `extract`).
 
@@ -42,39 +47,70 @@ Each pipeline stage is a class that subclasses `Configurable`
 wrapper that instantiates the class and calls one method; the real logic lives in
 the classes.
 
-| Module                                                   | Class                              | Role                                                         |
-| -------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------ |
-| [configurable.py](src/cotorra/configurable.py)           | `Configurable`                     | base: loads/merges config, holds a `Logger`                  |
-| [loader.py](src/cotorra/loader.py)                       | `Loader`                           | splits `tokens_times.parquet` by subject, builds HF datasets |
-| [trainer.py](src/cotorra/trainer.py)                     | `Trainer`, `TrainerWithCustomLoss` | model init + HF Trainer                                      |
-| [tuner.py](src/cotorra/tuner.py)                         | `Tuner`                            | `Trainer` + Optuna hyperparameter search                     |
-| [loss.py](src/cotorra/loss.py)                           | `Loss`                             | custom losses (quantile-token, label-weighted)               |
-| [extractor.py](src/cotorra/extractor.py)                 | `Extractor`                        | hidden-state extraction                                      |
-| [scorer_rep_based.py](src/cotorra/scorer_rep_based.py)   | `RepBasedScorer`, `EstimatorType`  | estimator-on-features scoring                                |
-| [scorer_generative.py](src/cotorra/scorer_generative.py) | `GenerativeScorer`                 | SCOPE/REACH generative scoring                               |
-| [logger.py](src/cotorra/logger.py)                       | `Logger`                           | rich logging + bootstrap-CI eval summaries                   |
-| [util.py](src/cotorra/util.py)                           | —                                  | batching helpers, `bootstrap_ci`                             |
+| Module                                                   | Class                                   | Role                                                         |
+| -------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------ |
+| [configurable.py](src/cotorra/configurable.py)           | `Configurable`                          | base: loads/merges config, holds a `Logger`                  |
+| [loader.py](src/cotorra/loader.py)                       | `Loader`                                | splits `tokens_times.parquet` by subject, builds HF datasets |
+| [trainer.py](src/cotorra/trainer.py)                     | `Trainer`, `TrainerWithCustomLoss`      | model init + HF Trainer                                      |
+| [tuner.py](src/cotorra/tuner.py)                         | `Tuner`                                 | `Trainer` + Optuna hyperparameter search                     |
+| [loss.py](src/cotorra/loss.py)                           | `Loss`                                  | custom losses (quantile-token, label-weighted) + time terms  |
+| [model.py](src/cotorra/model.py)                         | `TteAwareForCausalLM`, `MppForCausalLM` | causal LMs with time-to-event / time-to-next-token heads     |
+| [extractor.py](src/cotorra/extractor.py)                 | `Extractor`                             | hidden-state extraction                                      |
+| [scorer_rep_based.py](src/cotorra/scorer_rep_based.py)   | `RepBasedScorer`, `EstimatorType`       | estimator-on-features scoring                                |
+| [scorer_generative.py](src/cotorra/scorer_generative.py) | `GenerativeScorer`                      | SCOPE/REACH generative scoring                               |
+| [logger.py](src/cotorra/logger.py)                       | `Logger`                                | rich logging + bootstrap-CI eval summaries                   |
+| [util.py](src/cotorra/util.py)                           | —                                       | batching helpers, `bootstrap_ci`                             |
 
 Inheritance matters: `Tuner` extends `Trainer`, which extends `Configurable`;
 `Loss` and `Logger` stand alone. Changing `Trainer.__init__` or `collate_fn`
 affects tuning too.
 
+In [model.py](src/cotorra/model.py), `MppConfig` subclasses `TteAwareConfig` (so
+`isinstance(cfg, TteAwareConfig)` holds for both), but `MppForCausalLM` is a
+_sibling_ of `TteAwareForCausalLM` under `TteAwarePreTrainedModel`, because its
+time-to-event head is optional. `Trainer.model_init` picks the class from the
+`tte_aware_objective`/`mpp_objective` blocks. Importing `cotorra.model` registers
+both with the HF auto classes, so anything that loads a saved `mdl-<run_name>/`
+(as `Extractor` does) has to import it first.
+
 ### Configuration model (important)
 
-`Configurable.__init__` merges three layers via OmegaConf, later overriding
+`Configurable.__init__` merges two layers via OmegaConf, the later overriding the
 earlier:
 
-1. the class's packaged default YAML (`default_file`, in
-   [src/cotorra/config/](src/cotorra/config/)),
-2. a user config file passed via the relevant CLI flag (`--training-config`,
-   etc.),
-3. keyword args passed to the constructor (only non-`None` values).
+1. a user config file passed via the relevant CLI flag (`--training-config`,
+   etc.) or, only when none is passed, the class's packaged default YAML
+   (`default_file`, in [src/cotorra/config/](src/cotorra/config/)),
+2. keyword args passed to the constructor (only non-`None` values).
 
-So CLI flags reach config by being threaded as kwargs to the constructor. The
-merged result is `self.cfg` (an OmegaConf object). Read optional keys defensively
-with `self.cfg.get(...)` or `"key" in self.cfg` — several features
-(`time_based_rope`, `quantile_token_loss`, `label_weighted_loss`) are toggled
-purely by _presence_ of their config block, not a boolean.
+A passed config file _replaces_ the packaged default rather than merging into it,
+so a key the file omits is absent from `self.cfg`, not filled in from the
+default. CLI flags reach config by being threaded as kwargs to the constructor.
+The merged result is `self.cfg` (an OmegaConf object). Read optional keys
+defensively with `self.cfg.get(...)` or `"key" in self.cfg` — several features
+(`time_based_rope`, `quantile_token_loss`, `label_weighted_loss`,
+`tte_aware_objective`, `mpp_objective`) are toggled purely by _presence_ of their
+config block, not a boolean.
+
+**Configs must stay backwards-compatible.** An old config, written before a key
+existed and so missing it, must run exactly as it did before. Since nothing fills
+in a missing key, the fallback in the code decides what happens, not the packaged
+YAML:
+
+- a new feature stays off when its block is absent (the presence toggle does this
+  for free);
+- a new key inside an existing block falls back to the old behavior, e.g.
+  `(self.cfg.block or {}).get("key", <old value>)` (`or {}` because a block left
+  empty in the YAML parses to `None`);
+- an existing key keeps its meaning and default, and an optional key never
+  becomes required (`5748e3a` fixed `Loss` requiring `label_weighted_loss`);
+- a new block added to a packaged YAML ships commented out, as
+  `tte_aware_objective`/`mpp_objective` do, so runs without a config file are
+  unchanged too.
+
+The same goes for the model configs saved with checkpoints (`TteAwareConfig`,
+`MppConfig`): a new field needs a default under which older checkpoints load and
+behave as before.
 
 The three packaged config files
 ([training.yaml](src/cotorra/config/training.yaml),
@@ -124,34 +160,43 @@ Stages read from `--processed-data-home`. Expected files (produced by cocoa's
 `pipeline`/`winnow`):
 
 - `tokens_times.parquet` — `subject_id`, `tokens` (list[u32]), `times`
-  (list[datetime]); training only.
+  (list[datetime]), plus `hours_to_end_time` (list[float], written under cocoa's
+  `include_hours_to_end_time`) when training with `tte_aware_objective`. Only
+  training reads its rows, but `Loader` asserts the file exists and `Extractor`
+  builds a `Loader`, so `extract` needs it too.
 - `subject_splits.parquet` — `subject_id` → `split` ∈ {`train`, `tuning`,
   `held_out`}.
 - `tokenizer.yaml` — must contain a `lookup:` map (token label → int id), incl.
-  `BOS`, `EOS`.
+  `BOS`, `EOS`; `quantile_token_loss` also reads `cfg.n_bins`.
 - `{train,tuning,held_out}_for_inference.parquet` — for extract/score; include
   `tokens_past`, optional `s_elapsed_past`, and `<TOKEN>_past` / `<TOKEN>_future`
-  label columns.
+  label columns. `Trainer`'s `Loader` loads these too when present, so a training
+  config with `tte_aware_objective` needs `hours_to_end_time_past` in them.
 
-`Loader` derives per-split `{split}_tokens_times.parquet` caches and regenerates
-them when `tokens_times.parquet` is newer. Token-set selectors
-(`tokens_of_interest`, `target_tokens`) support **fnmatch patterns** (e.g.
-`LABEL//*`), resolved against the tokenizer vocab.
+`Loader` derives per-split `{split}_tokens_times.parquet` caches, adding
+`s_elapsed` and `hours_to_next_token` (the `mpp` target, nan on each record's
+last token), and regenerates them when `tokens_times.parquet` is newer or a cache
+predates a derived column. Token-set selectors (`tokens_of_interest`,
+`target_tokens`) support **fnmatch patterns** (e.g. `LABEL//*`), resolved against
+the tokenizer vocab.
 
 ## Gotchas
 
 - **Install requires the PyTorch CUDA index.** Use the two-index `pip install`
   from the README; a plain `pip install cotorra` will fail to resolve torch
   correctly. Development install is `pip install -e ".[gen]"`.
-- **`generative-score` needs the `[gen]` extra** (`quick-sco-re`, `sglang`),
-  which is installed from git and only available from source. Note it's commented
-  out in [pyproject.toml](pyproject.toml)'s `optional-dependencies`;
-  `GenerativeScorer` imports `quick_sco_re` at module load, so
-  [cli.py](src/cotorra/cli.py) imports it _lazily_ inside the command. Preserve
-  that laziness so the base install works without these heavy/optional deps.
+- **`generative-score` needs the `[gen]` extra** (`quick-sco-re`, `sglang`). It's
+  declared in [pyproject.toml](pyproject.toml)'s `optional-dependencies`, but
+  `quick-sco-re` comes from git, so only a source install gets it (the built
+  26.9.0 wheel carries no `gen` extra). `GenerativeScorer` imports `quick_sco_re`
+  at module load, so [cli.py](src/cotorra/cli.py) imports it _lazily_ inside the
+  command. Preserve that laziness so the base install works without these
+  heavy/optional deps.
 - **`time_based_rope` must match between training and extraction.** If a model
   was trained with time-based RoPE, the extraction config must enable it too
-  (same `sec_per_pos_id`), or position ids won't line up.
+  (same `sec_per_pos_id`), or position ids won't line up. `generative-score`
+  can't honor it at all: `GenerativeScorer` hands SGLang only `tokens_past`, and
+  SGLang assigns sequential positions.
 - **`remove_unused_columns: false`** in `training_args` is required — otherwise
   HF drops the `s_elapsed` column that time-based RoPE needs.
 - **`--resume-from-checkpoint` is safe to pass unconditionally**: `Trainer.train`
@@ -175,5 +220,7 @@ git tag -s vXX.X.X -m "message"
 ```
 
 `docs/recipes/` and top-level `recipes/` are kept in sync (the docs include the
-recipe markdown). The end-to-end dev workflow (cocoa → tune → score) is in
+recipe markdown). `docs/index.md` likewise includes `README.md`, so README edits
+change the docs home page, and `docs/api/` renders docstrings via mkdocstrings.
+The end-to-end dev workflow (cocoa → tune → score) is in
 [recipes/development-workflow.md](recipes/development-workflow.md).

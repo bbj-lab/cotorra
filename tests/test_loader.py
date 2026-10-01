@@ -2,11 +2,13 @@
 
 """tests for cotorra.loader.Loader"""
 
+import math
 import shutil
 import time
 
 import polars as pl
 import pytest
+import torch as t
 from helpers import base_training_cfg, write_cfg
 
 from cotorra.loader import Loader
@@ -160,3 +162,119 @@ def test_for_inference_is_none_when_no_inference_files_exist(
     assert loader.inference_files == {}
     assert loader.for_inference is None
     assert len(loader.get_train_data()) > 0
+
+
+# --------------------------------------------- the time-to-next-token target
+
+
+@pytest.fixture(scope="module")
+def tte_home(processed, tmp_path_factory):
+    """
+    `processed` plus the `hours_to_end_time` column a `tte_aware_objective`
+    reads, which cocoa writes only under `include_hours_to_end_time` (off by
+    default, and so in the shared fixture). The inference files are dropped
+    rather than given a matching `hours_to_end_time_past`: only the training
+    side is under test here
+    """
+    home = tmp_path_factory.mktemp("loader-tte") / "processed"
+    shutil.copytree(processed, home)
+    for f in home.glob("*_for_inference.parquet"):
+        f.unlink()
+    tt = home / "tokens_times.parquet"
+    pl.read_parquet(tt).with_columns(
+        hours_to_end_time=pl.col("times").list.eval(
+            (pl.element().last() - pl.element()).dt.total_seconds().truediv(3600)
+        )
+    ).write_parquet(tt)
+    return home
+
+
+@pytest.fixture(scope="module")
+def mpp_loader(processed, tmp_path_factory) -> Loader:
+    """`mpp_objective` alone, on data cocoa tokenized without end times: the
+    time-to-next-token target is derived, so it needs nothing they provide"""
+    cfg_path = write_cfg(
+        tmp_path_factory.mktemp("loader-mpp-cfg") / "training.yaml",
+        base_training_cfg(mpp_objective={}),
+    )
+    return Loader(training_cfg=cfg_path, processed_data_home=processed)
+
+
+@pytest.fixture(scope="module")
+def mpp_tte_loader(tte_home, tmp_path_factory) -> Loader:
+    cfg_path = write_cfg(
+        tmp_path_factory.mktemp("loader-mpp-tte-cfg") / "training.yaml",
+        base_training_cfg(mpp_objective={}, tte_aware_objective={}),
+    )
+    return Loader(training_cfg=cfg_path, processed_data_home=tte_home)
+
+
+def test_split_caches_carry_the_hours_to_each_next_token(loader, processed):
+    """
+    what an `mpp` model's time-to-next-token head trains on: the gap from each
+    token to the one after it in the same record, derived for every run so the
+    caches don't depend on the config; a record's last token has no successor
+    and gets a nan
+    """
+    for s in loader.splits:
+        cached = pl.read_parquet(processed / f"{s}_tokens_times.parquet")
+        for times, hours in cached.select("times", "hours_to_next_token").iter_rows():
+            expected = [
+                (b - a).total_seconds() / 3600 for a, b in zip(times, times[1:])
+            ]
+            assert hours[:-1] == pytest.approx(expected)
+            assert math.isnan(hours[-1])
+
+
+def test_split_caches_that_predate_the_derived_column_are_regenerated(
+    processed, tmp_path_factory
+):
+    """
+    a cache written before `hours_to_next_token` was derived is still newer
+    than `tokens_times`, so the mtime check alone would keep it and starve an
+    `mpp` run of its target
+    """
+    home = tmp_path_factory.mktemp("loader-predates") / "processed"
+    shutil.copytree(processed, home)
+    cfg_path = write_cfg(home.parent / "training.yaml", base_training_cfg())
+    Loader(training_cfg=cfg_path, processed_data_home=home)
+
+    cache = home / "train_tokens_times.parquet"
+    pl.read_parquet(cache).drop("hours_to_next_token").write_parquet(cache)
+    assert cache.stat().st_mtime > (home / "tokens_times.parquet").stat().st_mtime
+
+    Loader(training_cfg=cfg_path, processed_data_home=home)
+    assert "hours_to_next_token" in pl.read_parquet_schema(cache)
+
+
+def test_each_time_target_is_loaded_only_for_its_objective(
+    loader, mpp_loader, mpp_tte_loader
+):
+    for s in loader.splits:
+        assert loader.dataset[s].column_names == ["input_ids", "s_elapsed"]
+        assert mpp_loader.dataset[s].column_names == [
+            "input_ids",
+            "s_elapsed",
+            "hours_to_next_token",
+        ]
+        assert mpp_tte_loader.dataset[s].column_names == [
+            "input_ids",
+            "s_elapsed",
+            "hours_to_end_time",
+            "hours_to_next_token",
+        ]
+
+
+def test_packing_keeps_the_gap_across_a_record_boundary_masked(mpp_loader):
+    """
+    the nan on each record's last token -- its EOS -- survives packing and
+    torch formatting, so the head is never scored on the jump from one
+    record's end to the next one's start; every other token has a real gap
+    """
+    eos = mpp_loader.tokenizer_info.lookup.EOS
+    train = mpp_loader.get_train_data()
+    ids = t.cat([eg["input_ids"] for eg in train])
+    hours = t.cat([eg["hours_to_next_token"] for eg in train])
+    assert (ids == eos).any()
+    assert hours[ids == eos].isnan().all()
+    assert (hours[ids != eos] >= 0).all()

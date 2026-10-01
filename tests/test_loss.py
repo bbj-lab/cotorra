@@ -196,6 +196,70 @@ def test_custom_loss_keeps_the_tte_term_differentiable(outputs, labels):
     assert tte.grad is not None and tte.grad.item() == pytest.approx(0.5)
 
 
+def test_custom_loss_adds_the_weighted_ttnt_term_for_an_mpp_objective(outputs, labels):
+    """on its own: a tte term the model hands back too is left out unless
+    `tte_aware_objective` asks for it"""
+    loss = Loss(make_cfg(mpp_objective={"ttnt_weight": 0.125}), make_tkzr_cfg())
+    out = dict(outputs) | {"tte_loss": t.tensor(4.0), "ttnt_loss": t.tensor(8.0)}
+    expected = (
+        loss.label_weighted_loss(out, labels).item()
+        + 0.5 * loss.quantile_token_loss(out, labels).item()
+        + 0.125 * 8.0
+    )
+    assert loss.custom_loss(out, labels).item() == pytest.approx(expected, rel=1e-5)
+
+
+def test_custom_loss_adds_both_time_terms_when_both_objectives_are_set(outputs, labels):
+    """each weighted by its own block"""
+    cfg = make_cfg(
+        tte_aware_objective={"tte_weight": 0.25}, mpp_objective={"ttnt_weight": 0.125}
+    )
+    loss = Loss(cfg, make_tkzr_cfg())
+    out = dict(outputs) | {"tte_loss": t.tensor(4.0), "ttnt_loss": t.tensor(8.0)}
+    expected = (
+        loss.label_weighted_loss(out, labels).item()
+        + 0.5 * loss.quantile_token_loss(out, labels).item()
+        + 0.25 * 4.0
+        + 0.125 * 8.0
+    )
+    assert loss.custom_loss(out, labels).item() == pytest.approx(expected, rel=1e-5)
+
+
+@pytest.mark.parametrize(
+    "objective", ["tte_aware_objective", "mpp_objective"], ids=["tte_aware", "mpp"]
+)
+@pytest.mark.parametrize("block", [{}, None], ids=["empty", "null"])
+def test_custom_loss_defaults_the_time_weights_to_one(
+    outputs, labels, objective, block
+):
+    """matching `TteAwareConfig`/`MppConfig`, so a block left empty -- which
+    yaml parses to None -- still trains, and adds only its own term"""
+    loss = Loss(make_cfg(**{objective: block}), make_tkzr_cfg())
+    out = dict(outputs) | {"tte_loss": t.tensor(4.0), "ttnt_loss": t.tensor(8.0)}
+    expected = (
+        loss.label_weighted_loss(out, labels).item()
+        + 0.5 * loss.quantile_token_loss(out, labels).item()
+        + (4.0 if objective == "tte_aware_objective" else 8.0)
+    )
+    assert loss.custom_loss(out, labels).item() == pytest.approx(expected, rel=1e-5)
+
+
+def test_custom_loss_refuses_a_model_that_returns_no_ttnt_term(outputs, labels):
+    """a `tte_aware` model trained under `mpp_objective` returns a tte term
+    but no ttnt one"""
+    loss = Loss(make_cfg(mpp_objective={}), make_tkzr_cfg())
+    with pytest.raises(ValueError, match="ttnt_loss"):
+        loss.custom_loss(dict(outputs) | {"tte_loss": t.tensor(4.0)}, labels)
+
+
+def test_custom_loss_keeps_the_ttnt_term_differentiable(outputs, labels):
+    """`ttnt_head`'s only path to a gradient on this code path"""
+    loss = Loss(make_cfg(mpp_objective={"ttnt_weight": 0.25}), make_tkzr_cfg())
+    ttnt = t.tensor(8.0, requires_grad=True)
+    loss.custom_loss(dict(outputs) | {"ttnt_loss": ttnt}, labels).backward()
+    assert ttnt.grad is not None and ttnt.grad.item() == pytest.approx(0.25)
+
+
 def test_custom_loss_does_not_touch_wandb_when_no_run_is_active(outputs, labels):
     import wandb
 

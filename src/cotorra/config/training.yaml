@@ -78,8 +78,14 @@ label_weighted_loss:
 
 # uncomment to train a joint time-to-event head; needs `hours_to_end_time` in
 # `tokens_times.parquet` and writes a `tte_aware` model wrapping the preset above
+# (unless `mpp_objective` is uncommented too, which adds the head to that model)
 # tte_aware_objective:
 #   tte_weight: !!float 1.0
+
+# uncomment to train a joint time-to-next-token head (a marked point process), its target
+# derived from `times`; writes an `mpp` model wrapping the preset above
+# mpp_objective:
+#   ttnt_weight: !!float 1.0
 
 time_based_rope:
   sec_per_pos_id: !!int 300
