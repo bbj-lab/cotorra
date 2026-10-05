@@ -80,7 +80,8 @@ class Trainer(Configurable):
             Loss(self.cfg, self.tkzr_cfg).custom_loss if self.cfg.custom_loss else None
         )
         self.run_name = self.cfg.get("run_name", self.cfg.wandb.get("run_name", ""))
-        self.loader = Loader(training_cfg, self.processed_data_home)
+        # the merged config, not the file it came from, so overrides reach it too
+        self.loader = Loader(self.cfg, self.processed_data_home)
 
         self.trainer = TrainerWithCustomLoss(
             model_init=self.model_init,

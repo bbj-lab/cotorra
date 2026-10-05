@@ -133,7 +133,9 @@ The `cocoa winnow` command provides these.
 
 Each command below is driven by a YAML config. The package ships a default for
 each command under `src/cotorra/config/`, which you can override by passing a
-config file via the appropriate CLI flag.
+config file via the appropriate CLI flag, and whose individual keys you can
+change on the command line (see
+[Overriding config keys](#overriding-config-keys)).
 
 ## (1) Training
 
@@ -150,7 +152,7 @@ predict the next token in each subject's timeline. It:
    reflect elapsed time rather than token index.
 5. Optionally trains secondary heads alongside next-token prediction: time to
    event, time to next token, and discharge disposition, in any combination.
-5. Trains the model — optionally with hyperparameter tuning (`cotorra tune`) —
+6. Trains the model — optionally with hyperparameter tuning (`cotorra tune`) —
    and saves it.
 
 Training is driven by a YAML config (the package ships a default; see
@@ -220,9 +222,9 @@ that specifies:
       Needed to sample realistic times when
       [generating](#generating-time-token-pairs). Left unset, the head predicts
       log1p-hours by squared error.
-- **disposition_objective** _(optional)_: Trains a supervised head that
-  predicts, at each token, the record's discharge disposition, read off its
-  `DSCG//*` token, by cross-entropy.
+- **disposition_objective** _(optional)_: Trains a supervised head that predicts,
+  at each token, the record's discharge disposition, read off its `DSCG//*`
+  token, by cross-entropy.
     - **weight**: Weight on the term (default: `1.0`).
     - **classes**: The dispositions to predict among, as token labels or fnmatch
       patterns (default: `["DSCG//*"]`). A record whose disposition matches none
@@ -281,18 +283,18 @@ combination of three secondary heads, each with its own config block:
 | `tnt_objective`         | time to next token (TNT) | hours until the next token        | derived from `times`            |
 | `disposition_objective` | discharge disposition    | how the record ends               | the record's `DSCG//*` token    |
 
-With any of them set, training writes a `cotorra` model: the selected preset
-plus those heads, each trained jointly with next-token prediction.
+With any of them set, training writes a `cotorra` model: the selected preset plus
+those heads, each trained jointly with next-token prediction.
 
 The TNT head turns the model into a marked point process: the language-modelling
 head predicts _what_ the next token is, and the TNT head _when_ it arrives. It
-comes in two kinds. By default it predicts a single value per token
-(log1p-hours, by squared error). With `mixture_components` set, it predicts a
-distribution over the gap instead, given which token comes next, which is what
+comes in two kinds. By default it predicts a single value per token (log1p-hours,
+by squared error). With `mixture_components` set, it predicts a distribution over
+the gap instead, given which token comes next, which is what
 [generating](#generating-time-token-pairs) needs.
 
-The disposition head is supervised. At each token it predicts how the record
-will end, for example the chance that the patient dies before discharge
+The disposition head is supervised. At each token it predicts how the record will
+end, for example the chance that the patient dies before discharge
 (`DSCG//expired`). Its target comes from the record's own `DSCG//*` token: every
 token before it is scored against that disposition, and the tokens from it on
 aren't, since by then the disposition is known. A record whose disposition
@@ -348,10 +350,10 @@ To train one or more:
     `mdl-<run_name>/` as a `cotorra` model.
 
 4. **Use the trained model.** Importing `cotorra.model` registers the `cotorra`
-   model type, so `AutoModelForCausalLM.from_pretrained` loads it. The time
-   heads predict non-negative values on the log1p-hours scale, so `expm1`
-   converts them back to hours, never fewer than 0; the disposition head gives
-   logits over its classes:
+   model type, so `AutoModelForCausalLM.from_pretrained` loads it. The time heads
+   predict non-negative values on the log1p-hours scale, so `expm1` converts them
+   back to hours, never fewer than 0; the disposition head gives logits over its
+   classes:
 
     ```python
     import torch as t
@@ -617,11 +619,15 @@ with commands:
 - `cotorra train`
 
     ```
-    Usage: cotorra train [OPTIONS]
+    Usage: cotorra train [OPTIONS] [OVERRIDES]...
 
     Train a model on tokenized data. For tokenization, consult the cocoa
     package.
 
+    ╭─ Arguments ─────────────────────────────────────────────────────────────╮
+    │   [overrides]...      TEXT  Config overrides: key=value sets a key,     │
+    │                             adding it if need be, and ~key deletes one  │
+    ╰─────────────────────────────────────────────────────────────────────────╯
     ╭─ Options ───────────────────────────────────────────────────────────────╮
     │    --training-config         -t      PATH  Training configuration file  │
     │                                            (overrides default)          │
@@ -642,10 +648,14 @@ with commands:
 - `cotorra tune`
 
     ```
-    Usage: cotorra tune [OPTIONS]
+    Usage: cotorra tune [OPTIONS] [OVERRIDES]...
 
     Run hyperparameter tuning while training a model.
 
+    ╭─ Arguments ─────────────────────────────────────────────────────────────╮
+    │   [overrides]...      TEXT  Config overrides: key=value sets a key,     │
+    │                             adding it if need be, and ~key deletes one  │
+    ╰─────────────────────────────────────────────────────────────────────────╯
     ╭─ Options ───────────────────────────────────────────────────────────────╮
     │    --training-config      -t      PATH  Training configuration file     │
     │                                         (overrides default)             │
@@ -663,10 +673,14 @@ with commands:
 - `cotorra extract`
 
     ```
-    Usage: cotorra extract [OPTIONS]
+    Usage: cotorra extract [OPTIONS] [OVERRIDES]...
 
     Extract representations from a trained model.
 
+    ╭─ Arguments ─────────────────────────────────────────────────────────────╮
+    │   [overrides]...      TEXT  Config overrides: key=value sets a key,     │
+    │                             adding it if need be, and ~key deletes one  │
+    ╰─────────────────────────────────────────────────────────────────────────╯
     ╭─ Options ───────────────────────────────────────────────────────────────╮
     │    --extraction-config    -e      PATH  Extraction configuration file   │
     │                                         (overrides default)             │
@@ -688,11 +702,15 @@ with commands:
 - `cotorra generative-score`
 
     ```
-    Usage: cotorra generative-score [OPTIONS]
+    Usage: cotorra generative-score [OPTIONS] [OVERRIDES]...
 
     Generate SCORE/REACH metrics from a trained model and save them to
     parquet.
 
+    ╭─ Arguments ─────────────────────────────────────────────────────────────╮
+    │   [overrides]...      TEXT  Config overrides: key=value sets a key,     │
+    │                             adding it if need be, and ~key deletes one  │
+    ╰─────────────────────────────────────────────────────────────────────────╯
     ╭─ Options ───────────────────────────────────────────────────────────────╮
     │    --scoring-config       -s      PATH  Scoring configuration file      │
     │                                         (overrides default)             │
@@ -711,11 +729,15 @@ with commands:
 - `cotorra rep-based-score` (note: you need to run `extract` first)
 
     ```
-    Usage: cotorra rep-based-score [OPTIONS]
+    Usage: cotorra rep-based-score [OPTIONS] [OVERRIDES]...
 
     Generate rep-based scores for the token-based outcomes of interest. Note:
     this requires that features have already been extracted and saved
 
+    ╭─ Arguments ─────────────────────────────────────────────────────────────╮
+    │   [overrides]...      TEXT  Config overrides: key=value sets a key,     │
+    │                             adding it if need be, and ~key deletes one  │
+    ╰─────────────────────────────────────────────────────────────────────────╯
     ╭─ Options ───────────────────────────────────────────────────────────────╮
     │    --scoring-config    -s      PATH                 Scoring             │
     │                                                     configuration file  │
@@ -731,7 +753,7 @@ with commands:
     │                                                     for scores,         │
     │                                                     defaults to         │
     │                                                     processed-data-home │
-    │    --training-home     -o      TEXT                 Use features and    │
+    │    --training-home     -t      TEXT                 Use features and    │
     │                                                     labels extracted    │
     │                                                     here to train the   │
     │                                                     model (transfer)    │
@@ -744,6 +766,50 @@ with commands:
     │                                                     and exit.           │
     ╰─────────────────────────────────────────────────────────────────────────╯
     ```
+
+### Overriding config keys
+
+To change a few keys without writing a new config file, list them after a
+command's options, as dotted paths into its config:
+
+```sh
+cotorra train -t my-training.yaml -p processed/mimic -o output \
+    training_args.learning_rate=1e-4 n_epochs=2 \
+    tnt_objective.mixture_components=8 '~time_based_rope' \
+    'model=${model_presets.qwen_3}' model.model_args.hidden_size=256
+```
+
+The syntax borrows from
+[Hydra's](https://hydra.cc/docs/advanced/override_grammar/basic/):
+
+- `key=value` sets a key, adding it if it isn't there, e.g. to train a secondary
+  head whose block is commented out. Keys aren't checked against the config, so a
+  misspelled one is added quietly and does nothing. A leading `+` or `++`, as
+  Hydra marks an addition, is accepted and ignored.
+- `~key` deletes a key.
+
+Overrides apply in order to the config file passed (or to the packaged default
+when none is), and training saves the result with the model, as
+`mdl-<run_name>-training.yaml`. Values are read as YAML: `1e-4` is a float,
+`[a, b]` a list (lists are replaced whole), and `{weight: 2.0}` a block, merged
+into any block already there.
+
+A few things to know:
+
+- Setting a key to `null` doesn't turn its feature off. Blocks such as
+  `time_based_rope`, `balanced_toi_loss` and the `*_objective` heads switch on
+  when present, even when empty: `tte_objective=` trains the TTE head with its
+  defaults. Delete a block with `~` to switch it off.
+- YAML anchors make copies, not links. The packaged configs copy `run_name`,
+  `max_seq_len` and `tokens_of_interest` into other blocks, so `run_name=foo`
+  renames the model to `mdl-foo` but leaves `wandb.run_name` and
+  `training_args.run_name` as they were. Override each copy you mean to change.
+- `${...}` interpolations resolve after the overrides, so with the packaged
+  `model_presets`, `'model=${model_presets.qwen_3}'` selects another preset, and
+  a later `model.model_args` override edits that selection.
+- Quote anything containing `$`, which the shell would otherwise expand, and, in
+  zsh, anything starting with `~`, which zsh reads as a directory name and fails
+  on.
 
 [^1]:
     L. Gersony, "The Quiet Victory of Chicago’s Monk Parakeets," _The Chicago

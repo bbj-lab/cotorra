@@ -9,7 +9,7 @@ import pathlib
 import datasets as ds
 import numpy as np
 import polars as pl
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from cotorra.configurable import Configurable
 from cotorra.model import HEADS, head_options
@@ -47,7 +47,7 @@ class Loader(Configurable):
 
     def __init__(
         self,
-        training_cfg: pathlib.Path | str = None,
+        training_cfg: pathlib.Path | str | DictConfig = None,
         processed_data_home: pathlib.Path = None,
     ):
         super().__init__(training_cfg)

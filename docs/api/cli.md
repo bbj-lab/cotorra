@@ -23,6 +23,11 @@ scoring). Most also take `--output-home` / `-o` and `--verbose` / `-v`; the
 extraction and scoring commands additionally require `--model-home` / `-m`, the
 trained model to run.
 
+To change individual config keys for one run, list them after the command's
+options, as in
+`cotorra train -p ./processed/mimic -o ./models n_epochs=2 '~time_based_rope'`;
+see [Overriding config keys](../index.md#overriding-config-keys) for the syntax.
+
 Run any command with `-h` / `--help` to see its full set of options:
 
 ```sh

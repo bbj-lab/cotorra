@@ -7,6 +7,7 @@ import shutil
 import polars as pl
 import pytest
 from helpers import base_scoring_cfg, base_training_cfg, write_cfg
+from omegaconf import OmegaConf
 from typer.testing import CliRunner
 
 from cotorra.cli import app
@@ -34,6 +35,29 @@ def test_each_command_has_help(command):
 def test_each_command_requires_processed_data_home(command):
     result = runner.invoke(app, [command])
     assert result.exit_code != 0
+
+
+@pytest.mark.parametrize("command", COMMANDS)
+def test_each_command_takes_config_overrides(command):
+    result = runner.invoke(app, [command, "-h"])
+    assert result.exit_code == 0
+    assert "OVERRIDES" in result.output
+
+
+@pytest.mark.parametrize("command", COMMANDS)
+def test_each_command_hands_its_overrides_to_its_config(command, tmp_path):
+    """an unreadable override fails as the config loads, before any data is read"""
+    if command == "generative-score":
+        pytest.importorskip("quick_sco_re", reason="requires the [gen] extra")
+    second = "-o" if command in ("train", "tune") else "-m"
+    result = runner.invoke(
+        app,
+        # fmt: off
+        [command, "-p", str(tmp_path), second, str(tmp_path), "no_such_key"],
+        # fmt: on
+    )
+    assert isinstance(result.exception, ValueError), result.output
+    assert "no_such_key" in str(result.exception)
 
 
 def test_rep_based_score_rejects_an_unknown_estimator(processed, fake_model_home):
@@ -71,6 +95,35 @@ def test_train_writes_a_model_and_reports_its_path(processed, tmp_path):
     assert result.exit_code == 0, result.output
     assert (out / "mdl-test-run").is_dir()
     assert (out / "mdl-test-run-training.yaml").is_file()
+
+
+@pytest.mark.slow
+def test_train_saves_its_overrides_with_the_model(processed, tmp_path):
+    cfg_path = write_cfg(tmp_path / "training.yaml", base_training_cfg())
+    out = tmp_path / "output"
+    out.mkdir()
+
+    result = runner.invoke(
+        app,
+        # fmt: off
+        [
+            "train",
+            "-t",
+            str(cfg_path),
+            "-p",
+            str(processed),
+            "-o",
+            str(out),
+            "run_name=overridden",
+            "training_args.learning_rate=1e-3",
+        ],
+        # fmt: on
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (out / "mdl-overridden").is_dir()
+    saved = OmegaConf.load(out / "mdl-overridden-training.yaml")
+    assert saved.training_args.learning_rate == pytest.approx(1e-3)
 
 
 @pytest.mark.slow

@@ -79,6 +79,22 @@ def test_collate_fn_omits_position_ids_without_time_based_rope(
     assert extractor.collate_fn(sample_batch)["position_ids"] is None
 
 
+def test_overrides_reach_the_loader_as_well_as_the_extractor(
+    extraction_cfg_path, processed, fake_model_home, tmp_path_factory
+):
+    """the loader gets the extractor's merged config, not the file it came from"""
+    extractor = Extractor(
+        extraction_cfg=extraction_cfg_path,
+        processed_data_home=processed,
+        model_home=fake_model_home,
+        output_home=tmp_path_factory.mktemp("extract-override-output"),
+        overrides=["~time_based_rope"],
+    )
+    assert extractor.loader.cfg == extractor.cfg
+    for ds_ in extractor.loader.for_inference.values():
+        assert "s_elapsed_past" not in ds_.column_names
+
+
 def test_extract_final_pools_the_hidden_state_at_the_last_real_token(
     extractor, sample_batch
 ):

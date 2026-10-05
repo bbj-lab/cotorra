@@ -27,6 +27,16 @@ app = typer.Typer(
 )
 console = Console()
 
+# trailing every command: edits to its config, applied by `apply_overrides`
+Overrides = Annotated[
+    Optional[list[str]],
+    typer.Argument(
+        help="Config overrides: key=value sets a key, adding it if need be, and "
+        "~key deletes one",
+        show_default=False,
+    ),
+]
+
 
 @app.command()
 def train(
@@ -63,6 +73,7 @@ def train(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
     ] = False,
+    overrides: Overrides = None,
 ):
     """
     Train a model on tokenized data. For tokenization, consult the cocoa package.
@@ -73,6 +84,7 @@ def train(
             training_cfg=training_config,
             processed_data_home=processed_data_home,
             output_home=output_home,
+            overrides=overrides,
         )
         trainer.train(resume_from_checkpoint=resume_from_checkpoint, verbose=verbose)
         t1 = time.perf_counter()
@@ -112,6 +124,7 @@ def tune(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
     ] = False,
+    overrides: Overrides = None,
 ):
     """
     Run hyperparameter tuning while training a model.
@@ -122,6 +135,7 @@ def tune(
             training_cfg=training_config,
             processed_data_home=processed_data_home,
             output_home=output_home,
+            overrides=overrides,
         )
         tuner.train(verbose=verbose)
         t1 = time.perf_counter()
@@ -170,6 +184,7 @@ def extract(
             is_flag=True,
         ),
     ] = False,
+    overrides: Overrides = None,
 ):
     """
     Extract representations from a trained model.
@@ -181,6 +196,7 @@ def extract(
             processed_data_home=processed_data_home,
             model_home=model_home,
             output_home=output_home,
+            overrides=overrides,
         )
         extractor.extract(all_times=all_times)
         t1 = time.perf_counter()
@@ -221,6 +237,7 @@ def generative_score(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
     ] = False,
+    overrides: Overrides = None,
 ):
     """
     Generate SCORE/REACH metrics from a trained model and save them to parquet.
@@ -234,6 +251,7 @@ def generative_score(
             processed_data_home=processed_data_home,
             model_home=model_home,
             output_home=output_home,
+            overrides=overrides,
         )
         scorer.save_all(verbose=verbose)
         t1 = time.perf_counter()
@@ -289,6 +307,7 @@ def rep_based_score(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
     ] = False,
+    overrides: Overrides = None,
 ):
     """
     Generate rep-based scores for the token-based outcomes of interest.
@@ -304,6 +323,7 @@ def rep_based_score(
             output_home=output_home,
             training_home=training_home,
             estimator_type=estimator_type.value,
+            overrides=overrides,
         )
         scorer.save_all(verbose=verbose)
         t1 = time.perf_counter()

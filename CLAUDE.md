@@ -103,22 +103,34 @@ gives it.
 
 ### Configuration model (important)
 
-`Configurable.__init__` merges two layers via OmegaConf, the later overriding the
-earlier:
+`Configurable.__init__` builds `self.cfg` (an OmegaConf object) in three layers,
+each overriding the one before:
 
 1. a user config file passed via the relevant CLI flag (`--training-config`,
    etc.) or, only when none is passed, the class's packaged default YAML
-   (`default_file`, in [src/cotorra/config/](src/cotorra/config/)),
-2. keyword args passed to the constructor (only non-`None` values).
+   (`default_file`, in [src/cotorra/config/](src/cotorra/config/)); a
+   `DictConfig` passed instead is copied as is,
+2. `overrides`: the `key=value` arguments trailing a CLI command, applied by
+   `apply_overrides` (`key=value` sets a key, adding it if absent, so a typo
+   adds a stray key rather than failing; `~key` deletes one; a Hydra-style
+   leading `+`/`++` is ignored),
+3. keyword args passed to the constructor (only non-`None` values).
 
 A passed config file _replaces_ the packaged default rather than merging into it,
 so a key the file omits is absent from `self.cfg`, not filled in from the
-default. CLI flags reach config by being threaded as kwargs to the constructor.
-The merged result is `self.cfg` (an OmegaConf object). Read optional keys
-defensively with `self.cfg.get(...)` or `"key" in self.cfg` — several features
-(`time_based_rope`, `quantile_token_loss`, `balanced_toi_loss`, and the
+default, though an override can still add it. The CLI passes `overrides=` to
+each class, which forwards it to `Configurable` through `**kwargs`. Read optional
+keys defensively with `self.cfg.get(...)` or `"key" in self.cfg` — several
+features (`time_based_rope`, `quantile_token_loss`, `balanced_toi_loss`, and the
 `*_objective` blocks) are toggled purely by _presence_ of their config block, not
-a boolean.
+a boolean, so an override setting one to `null` leaves it on and `~key` is what
+turns it off.
+
+`Trainer` and `Extractor` hand their `Loader` their merged `self.cfg`, not the
+config file's path: the `Loader` does the chunking (`max_seq_len`), the epoch
+repeats (`n_epochs`) and the column selection (`time_based_rope`, the heads), so
+reloading the file would silently drop overrides and kwargs. Any new class built
+from another's config should be handed `self.cfg` the same way.
 
 **Configs must stay backwards-compatible.** An old config, written before a key
 existed and so missing it, must run exactly as it did before. The rule covers

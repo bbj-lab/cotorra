@@ -84,13 +84,12 @@ def test_model_init_builds_a_fresh_model_each_call(built_trainer):
     assert first.config.vocab_size == second.config.vocab_size
 
 
-def test_constructor_kwargs_do_not_reach_the_loader(processed, tmp_path_factory):
+def test_constructor_kwargs_reach_the_loader(processed, tmp_path_factory):
     """
-    `Trainer.__init__` hands `Loader` the config *file* rather than its own
-    merged `self.cfg`, so a `max_seq_len` (or any other loader-relevant)
-    override passed as a keyword argument silently applies to the trainer but
-    not to the data it trains on -- pinning the current behavior so a fix is
-    a deliberate, visible change
+    `Trainer.__init__` hands `Loader` its own merged `self.cfg`, so a
+    `max_seq_len` (or any other loader-relevant) override passed as a keyword
+    argument applies to the data it trains on too. It used to hand over the
+    config *file*, and the override silently applied to the trainer alone
     """
     cfg_path = write_cfg(
         tmp_path_factory.mktemp("kwarg-split") / "training.yaml",
@@ -105,8 +104,8 @@ def test_constructor_kwargs_do_not_reach_the_loader(processed, tmp_path_factory)
     )
 
     assert trainer.cfg.max_seq_len == 8
-    assert trainer.loader.cfg.max_seq_len == 16
-    assert trainer.trainer.train_dataset[0]["input_ids"].shape == (16,)
+    assert trainer.loader.cfg.max_seq_len == 8
+    assert trainer.trainer.train_dataset[0]["input_ids"].shape == (8,)
 
 
 @pytest.mark.slow
@@ -248,6 +247,27 @@ def test_a_config_without_it_draws_no_deprecation_warning(processed, tmp_path):
             processed_data_home=processed,
             output_home=tmp_path / "out",
         )
+
+
+def test_overrides_reach_the_loader_as_well_as_the_trainer(
+    processed, session_training_cfg_path, tmp_path
+):
+    """
+    the loader does the chunking and picks the columns the config asks for, so
+    it gets the trainer's merged config rather than re-reading the file, which
+    would miss the overrides: a shorter `max_seq_len` would go unused, and the
+    collate function would look for no `s_elapsed` the loader still kept
+    """
+    trainer = Trainer(
+        training_cfg=session_training_cfg_path,
+        processed_data_home=processed,
+        output_home=tmp_path / "out",
+        overrides=["max_seq_len=8", "~time_based_rope"],
+    )
+    assert trainer.loader.cfg == trainer.cfg
+    assert len(trainer.trainer.train_dataset[0]["input_ids"]) == 8
+    assert "s_elapsed" not in trainer.loader.dataset["train"].column_names
+    assert "position_ids" not in trainer.collate_fn([trainer.trainer.train_dataset[0]])
 
 
 def test_every_objective_trains_on_what_cocoa_and_the_loader_produce(
