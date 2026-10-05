@@ -70,23 +70,24 @@ wandb:
   run_name: *run_name
 
 custom_loss: !!bool true
-quantile_token_loss:
-  qt_weight: !!float 0.5
-label_weighted_loss:
+quantile_token_loss: # teaches the model that a code's quantile bins are ordered
+  qt_weight: !!float 50.0
+balanced_toi_loss: # emphasizes the tokens of interest without making them likelier
   tokens_of_interest: *tois
-  toi_weight: !!float 20.0
+  bce_weight: !!float 20.0
 
-# uncomment to train a joint time-to-event head; needs `hours_to_end_time` in
-# `tokens_times.parquet` and writes a `tte_aware` model wrapping the preset above
-# (unless `mpp_objective` is uncommented too, which adds the head to that model)
-# tte_aware_objective:
-#   tte_weight: !!float 1.0
+# uncomment any of these to train a secondary head alongside next-token prediction; they are
+# independent, and any combination writes a `cotorra` model wrapping the preset above
+# tte_objective: # hours to the record's end; needs `hours_to_end_time` in `tokens_times.parquet`
+#   weight: !!float 1.0
+# tnt_objective: # hours to the next token (a marked point process), derived from `times`
+#   weight: !!float 1.0
+#   mixture_components: !!int 8 # a distribution over the gap given the next token, for generation
+# disposition_objective: # the record's discharge disposition, read off its timeline
+#   weight: !!float 1.0
+#   classes: ["DSCG//*"] # fnmatch patterns; a record whose disposition matches none goes unscored
 
-# uncomment to train a joint time-to-next-token head (a marked point process), its target
-# derived from `times`; writes an `mpp` model wrapping the preset above
-# mpp_objective:
-#   ttnt_weight: !!float 1.0
-
+# note: this option is currently incompatible with generative inference
 time_based_rope:
   sec_per_pos_id: !!int 300
 

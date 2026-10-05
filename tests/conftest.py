@@ -124,6 +124,23 @@ def processed(tmp_path_factory, raw_data) -> pathlib.Path:
 
 
 @pytest.fixture(scope="session")
+def processed_with_end_times(processed, tmp_path_factory) -> pathlib.Path:
+    """
+    `processed` re-tokenized with cocoa's `include_hours_to_end_time` and
+    re-winnowed, so `tokens_times.parquet` carries cocoa's own
+    `hours_to_end_time` and the inference tables its `hours_to_end_time_past`
+    -- the data a `tte_objective` trains on
+    """
+    import shutil
+
+    home = tmp_path_factory.mktemp("processed-end-times") / "processed"
+    shutil.copytree(processed, home)
+    Tokenizer(processed_data_home=home, include_hours_to_end_time=True).save_all()
+    Winnower(processed_data_home=home).save_all()
+    return home
+
+
+@pytest.fixture(scope="session")
 def tokenizer_cfg(processed):
     return OmegaConf.load(processed / "tokenizer.yaml")
 

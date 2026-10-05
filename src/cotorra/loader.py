@@ -12,7 +12,30 @@ import polars as pl
 from omegaconf import OmegaConf
 
 from cotorra.configurable import Configurable
+from cotorra.model import HEADS, head_options
 from cotorra.util import batched_iter
+
+
+def disposition_targets(input_ids, class_of: dict[int, int]) -> np.ndarray:
+    """
+    each token's target for a disposition head: the class of its record's last
+    disposition token -- `class_of` maps each such token's id to its class -- for
+    every token before it, and -100, unscored, from it on, the disposition no
+    longer being to come. A record with none of those tokens goes unscored
+    """
+    ids = np.asarray(input_ids)
+    hits = np.flatnonzero(np.isin(ids, list(class_of)))
+    target = np.full(len(ids), -100, dtype=np.int64)
+    if len(hits):
+        target[: hits[-1]] = class_of[int(ids[hits[-1]])]
+    return target
+
+
+def label_dispositions(batch: dict, class_of: dict[int, int]) -> dict:
+    """`disposition_targets` for a batch of records, as `datasets.map` takes it"""
+    return {
+        "disposition": [disposition_targets(x, class_of) for x in batch["input_ids"]]
+    }
 
 
 class Loader(Configurable):
@@ -34,6 +57,7 @@ class Loader(Configurable):
             self.processed_data_home / "tokenizer.yaml"
         )
         self.splits: tuple = ("train", "tuning", "held_out")
+        self.heads = head_options(self.cfg, self.tokenizer_info.lookup)
 
         tt_all = self.processed_data_home / "tokens_times.parquet"
         assert tt_all.is_file(), FileNotFoundError(
@@ -62,8 +86,8 @@ class Loader(Configurable):
                 s_elapsed=pl.col("times").list.eval(
                     (pl.element() - pl.element().first()).dt.total_seconds()
                 ),
-                # the target of an `mpp` model's time-to-next-token head; a
-                # record's last token has no successor and gets a nan
+                # the target of a time-to-next-token head; a record's last
+                # token has no successor and gets a nan
                 hours_to_next_token=pl.col("times").list.eval(
                     (pl.element().shift(-1) - pl.element())
                     .dt.total_seconds()
@@ -77,17 +101,24 @@ class Loader(Configurable):
                     tt_split[s]
                 )
 
-        self.dataset = (
-            ds.load_dataset(
-                "parquet", data_files={s: str(tt_split[s]) for s in self.splits}
+        dataset = ds.load_dataset(
+            "parquet", data_files={s: str(tt_split[s]) for s in self.splits}
+        ).rename_column("tokens", "input_ids")
+        if "disposition" in self.heads:
+            # labeled per record, before packing splits records across chunks;
+            # computed here rather than cached with the splits, since the classes
+            # come from the config
+            lookup = self.tokenizer_info.lookup
+            classes = self.heads["disposition"]["classes"]
+            dataset = dataset.map(
+                label_dispositions,
+                batched=True,
+                fn_kwargs={"class_of": {lookup[c]: i for i, c in enumerate(classes)}},
             )
-            .rename_column("tokens", "input_ids")
-            .select_columns(
-                ["input_ids"]
-                + (["s_elapsed"] if "time_based_rope" in self.cfg else [])
-                + (["hours_to_end_time"] if "tte_aware_objective" in self.cfg else [])
-                + (["hours_to_next_token"] if "mpp_objective" in self.cfg else [])
-            )
+        self.dataset = dataset.select_columns(
+            ["input_ids"]
+            + (["s_elapsed"] if "time_based_rope" in self.cfg else [])
+            + [HEADS[name].target for name in self.heads]
         )
 
         self.inference_files = {
@@ -103,11 +134,7 @@ class Loader(Configurable):
                 .select_columns(
                     ["input_ids"]
                     + (["s_elapsed_past"] if "time_based_rope" in self.cfg else [])
-                    + (
-                        ["hours_to_end_time_past"]
-                        if "tte_aware_objective" in self.cfg
-                        else []
-                    )
+                    + (["hours_to_end_time_past"] if "tte" in self.heads else [])
                 )
             )
             if self.inference_files

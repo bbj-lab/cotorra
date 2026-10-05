@@ -144,10 +144,12 @@ predict the next token in each subject's timeline. It:
    subject splits.
 2. Initializes a HuggingFace causal LM from a preset (or a custom architecture
    config).
-3. Optionally applies custom losses that upweight quantile-boundary tokens or
-   tokens of clinical interest.
+3. Optionally applies custom losses that teach the ordering of quantile bins or
+   emphasize tokens of clinical interest.
 4. Optionally uses time-aware rotary position embeddings so that position ids
    reflect elapsed time rather than token index.
+5. Optionally trains secondary heads alongside next-token prediction: time to
+   event, time to next token, and discharge disposition, in any combination.
 5. Trains the model — optionally with hyperparameter tuning (`cotorra tune`) —
    and saves it.
 
@@ -176,37 +178,65 @@ that specifies:
     - **run_name**: Name for the current run.
 - **custom_loss**: Boolean flag to enable custom loss functions (default:
   `false`).
-- **quantile_token_loss** _(optional)_: Upweights loss on quantile boundary
-  tokens.
-    - **qt_weight**: Weight multiplier for quantile tokens.
-- **label_weighted_loss** _(optional)_: Upweights loss on specific tokens of
-  clinical interest.
-    - **tokens_of_interest**: List of token labels to upweight. Supports patterns
+- **quantile_token_loss** _(optional)_: Teaches the model that a code's quantile
+  bins are ordered. Cross-entropy alone counts predicting `Q9` for a true `Q3` as
+  no worse than predicting `Q4`. For each quantile token, this adds the squared
+  error between the bin the model expects (the probability-weighted midpoint of
+  the code's bins on a 0–1 quantile scale) and the bin that came, averaged over
+  quantile tokens. It only moves probability among a code's bins, never making
+  the code itself likelier, and like cross-entropy it's minimized by the true
+  probabilities. Works with fused (`LAB//sodium_Q3`) and unfused (`LAB//sodium`
+  then `Q3`) tokenizations.
+    - **qt_weight**: Weight on the term (the bundled config uses `50.0`).
+- **balanced_toi_loss** _(optional)_: Upweights getting specific tokens of
+  clinical interest right, by adding a binary cross-entropy term on whether the
+  next token is one of them (scored with the total probability the model puts on
+  them). Like cross-entropy, it's minimized by the true probabilities, so it
+  doesn't make those tokens likelier.
+    - **tokens_of_interest**: List of token labels in the set. Supports patterns
       specified with fnmatch.
-    - **toi_weight**: Weight multiplier applied to those tokens.
-- **tte_aware_objective** _(optional)_: Adds a scalar head that predicts, at each
-  token, the log1p-hours remaining from that token until the end of the record,
-  trained jointly with the next-token objective (the language-modelling head
-  looks one token ahead; this head does not). Requires an `hours_to_end_time`
-  column in `tokens_times.parquet`, and produces a `tte_aware` model wrapping the
-  selected preset (or, alongside `mpp_objective`, adds this head to the `mpp`
-  model).
-    - **tte_weight**: Weight multiplier for the time-to-event term (default:
-      `1.0`).
-- **mpp_objective** _(optional)_: Adds a scalar head that predicts, at each
-  token, the log1p-hours until the next token, trained jointly with the
-  next-token objective (like the language-modelling head, it looks one token
-  ahead; its target is derived from `times`, and a record's last token is left
-  out). Produces an `mpp` (marked point process) model wrapping the selected
-  preset, which also carries the time-to-event head when `tte_aware_objective` is
-  set too. See
-  [Training a marked point process model](#training-a-marked-point-process-model).
-    - **ttnt_weight**: Weight multiplier for the time-to-next-token term
-      (default: `1.0`).
+    - **bce_weight**: Weight multiplier for the term (default: `1.0`; the bundled
+      config uses `20.0`).
+
+    _Note:_ it replaces `label_weighted_loss`, which is deprecated: configs using
+    it still train as before, but with a warning, since weighting the
+    cross-entropy by its target makes the model predict those tokens more often.
+
+- **tte_objective** _(optional)_: Trains a time-to-event (TTE) head that
+  predicts, at each token, the log1p-hours remaining until the end of the record
+  (a token recorded after the end time counts as 0 hours remaining). Requires an
+  `hours_to_end_time` column in `tokens_times.parquet`. See
+  [Training secondary heads](#training-secondary-heads).
+    - **weight**: Weight on the term (default: `1.0`).
+- **tnt_objective** _(optional)_: Trains a time-to-next-token (TNT) head that
+  predicts, at each token, the log1p-hours until the next token, making the model
+  a marked point process. Its target is derived from `times`, and a record's last
+  token is left out.
+    - **weight**: Weight on the term (default: `1.0`).
+    - **mixture_components** _(optional)_: Makes the head predict a distribution
+      rather than a single value: the chance that the next token shares this
+      one's timestamp, plus a mixture of this many log-normals over the positive
+      gap, conditioned on which token comes next and trained by likelihood.
+      Needed to sample realistic times when
+      [generating](#generating-time-token-pairs). Left unset, the head predicts
+      log1p-hours by squared error.
+- **disposition_objective** _(optional)_: Trains a supervised head that
+  predicts, at each token, the record's discharge disposition, read off its
+  `DSCG//*` token, by cross-entropy.
+    - **weight**: Weight on the term (default: `1.0`).
+    - **classes**: The dispositions to predict among, as token labels or fnmatch
+      patterns (default: `["DSCG//*"]`). A record whose disposition matches none
+      of them isn't scored.
 - **time_based_rope** _(optional)_: Enables time-aware rotary position
   embeddings.
     - **sec_per_pos_id**: Number of seconds represented by one position id
       increment.
+
+    _Note:_ SGLang (behind `generative-score`) and vLLM number positions by token
+    index and can't take time-based ones, so they run a model trained with this
+    on positions it never saw; only `cotorra.generator`'s slower PyTorch loop
+    generates from it faithfully.
+
 - **training_args**: Arguments passed to HuggingFace's
   [`TrainingArguments`](https://huggingface.co/docs/transformers/en/main_classes/trainer#transformers.TrainingArguments).
 - **tuning_args**: Arguments passed to HuggingFace's
@@ -240,46 +270,60 @@ individual `model_args` entries as needed.
 > of checkpointing.
 <!-- prettier-ignore-end -->
 
-### Training a marked point process model
+### Training secondary heads
 
-An `mpp` model gives the selected preset a head that predicts the hours from each
-token until the next one. Paired with the language-modelling head, which predicts
-_what_ the next token is, this models each timeline as a marked point process.
-The model can also carry the time-to-event head, which predicts the hours until
-the end of the record. Each head has its own config block:
+Every model learns to predict the next token. Alongside that, it can train any
+combination of three secondary heads, each with its own config block:
 
-- `mpp_objective` alone trains the time-to-next-token head (and needs no end
-  times from cocoa);
-- `mpp_objective` together with `tte_aware_objective` trains both time heads.
+| block                   | head                     | predicts, at each token           | target                          |
+| ----------------------- | ------------------------ | --------------------------------- | ------------------------------- |
+| `tte_objective`         | time to event (TTE)      | hours until the record's end time | `hours_to_end_time`, from cocoa |
+| `tnt_objective`         | time to next token (TNT) | hours until the next token        | derived from `times`            |
+| `disposition_objective` | discharge disposition    | how the record ends               | the record's `DSCG//*` token    |
 
-To train one:
+With any of them set, training writes a `cotorra` model: the selected preset
+plus those heads, each trained jointly with next-token prediction.
+
+The TNT head turns the model into a marked point process: the language-modelling
+head predicts _what_ the next token is, and the TNT head _when_ it arrives. It
+comes in two kinds. By default it predicts a single value per token
+(log1p-hours, by squared error). With `mixture_components` set, it predicts a
+distribution over the gap instead, given which token comes next, which is what
+[generating](#generating-time-token-pairs) needs.
+
+The disposition head is supervised. At each token it predicts how the record
+will end, for example the chance that the patient dies before discharge
+(`DSCG//expired`). Its target comes from the record's own `DSCG//*` token: every
+token before it is scored against that disposition, and the tokens from it on
+aren't, since by then the disposition is known. A record whose disposition
+matches none of `classes` isn't scored at all. `DSCG//*` includes
+`DSCG//missing`; to leave it out, list the classes you want instead.
+
+To train one or more:
 
 1. **Configure training.** A config passed with `--training-config` replaces the
    shipped default rather than merging into it, so start from a full copy of
    [training.yaml](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/training.yaml)
-   and add (or uncomment) the `mpp_objective` block:
+   and add (or uncomment) the blocks for the heads you want:
 
     ```yaml
-    mpp_objective:
-        ttnt_weight: !!float 1.0 # time-to-next-token term
-    ```
-
-    To train the time-to-event head as well, add its block alongside. Its weight
-    goes there; training refuses a `tte_weight` under `mpp_objective`.
-
-    ```yaml
-    tte_aware_objective:
-        tte_weight: !!float 1.0 # time-to-event term
+    tte_objective:
+        weight: !!float 1.0
+    tnt_objective:
+        weight: !!float 1.0
+        mixture_components: !!int 8 # optional: a distribution over the gap
+    disposition_objective:
+        weight: !!float 1.0
+        classes: ["DSCG//*"] # optional: fnmatch patterns
     ```
 
     Each weight defaults to `1.0`, so empty blocks work too. With
-    `custom_loss: true` (as shipped), the weighted time terms are added to the
-    custom next-token loss; otherwise the model adds them to HuggingFace's
-    standard loss itself.
+    `custom_loss: true` (as shipped), the weighted terms are added to the custom
+    next-token loss; otherwise the model adds them to HuggingFace's standard loss
+    itself.
 
-2. **Tokenize with end times (time-to-event head only).** The time-to-event head
-   trains on an `hours_to_end_time` column, which cocoa writes only when asked.
-   Copy cocoa's
+2. **Tokenize with end times (TTE head only).** The TTE head trains on an
+   `hours_to_end_time` column, which cocoa writes only when asked. Copy cocoa's
    [default tokenization config](https://github.com/bbj-lab/cocoa/blob/master/src/cocoa/config/tokenization.yaml),
    set `include_hours_to_end_time: !!bool true`, and rerun tokenization and
    winnowing. Winnowing carries the column into the `*_for_inference.parquet`
@@ -290,8 +334,8 @@ To train one:
     cocoa winnow -p processed/
     ```
 
-    Skip this step when training the time-to-next-token head alone: cotorra
-    derives its target from the `times` column of `tokens_times.parquet`.
+    Skip this step for the other heads: cotorra derives their targets from
+    `tokens_times.parquet`.
 
 3. **Train** as usual:
 
@@ -299,18 +343,21 @@ To train one:
     cotorra train -t training.yaml -p processed/ -o output/
     ```
 
-    The startup log reports the model as `<model_name> (mpp)`, and the run writes
-    `mdl-<run_name>/` as an `mpp` model.
+    The startup log names the heads, e.g.
+    `<model_name> (with tte, tnt, disposition heads)`, and the run writes
+    `mdl-<run_name>/` as a `cotorra` model.
 
-4. **Use the trained model.** Importing `cotorra.model` registers the `mpp` model
-   type, so `AutoModelForCausalLM.from_pretrained` loads it. The time heads
-   predict on the log1p-hours scale; `expm1` converts back to hours:
+4. **Use the trained model.** Importing `cotorra.model` registers the `cotorra`
+   model type, so `AutoModelForCausalLM.from_pretrained` loads it. The time
+   heads predict non-negative values on the log1p-hours scale, so `expm1`
+   converts them back to hours, never fewer than 0; the disposition head gives
+   logits over its classes:
 
     ```python
     import torch as t
     from transformers import AutoModelForCausalLM
 
-    import cotorra.model  # noqa: F401 -- registers `mpp` with the auto classes
+    import cotorra.model  # noqa: F401 -- registers the `cotorra` model type
 
     model = AutoModelForCausalLM.from_pretrained("output/mdl-<run_name>").eval()
     input_ids = t.tensor([[1, 5, 7, 9]])
@@ -321,18 +368,85 @@ To train one:
     with t.inference_mode():
         out = model(input_ids=input_ids, position_ids=position_ids)
     next_token_logits = out.logits[:, -1]
-    hours_to_next_token = out.ttnt_pred.expm1()  # (batch, seq_len)
-    if out.tte_pred is not None:  # trained with `tte_aware_objective` too
+    if "tte" in model.heads:
         hours_to_end_time = out.tte_pred.expm1()  # (batch, seq_len)
+    if "tnt" in model.heads:  # a point head; a mixture head leaves it None
+        hours_to_next_token = out.tnt_pred.expm1()  # (batch, seq_len)
+    if "disposition" in model.heads:
+        classes = model.heads["disposition"].classes  # ["DSCG//expired", ...]
+        p_disposition = out.disposition_pred.softmax(-1)  # (batch, seq_len, n)
+        p_expired = p_disposition[..., classes.index("DSCG//expired")]
     ```
 
     Pass `position_ids` only if the model was trained with `time_based_rope`,
-    built the way training builds them (above). Position `i`'s
-    `hours_to_next_token` is the predicted wait from token `i` to token `i + 1`.
+    built the way training builds them (above). Each head's prediction at
+    position `i` is made having read tokens up to `i`: the TTE head's is the
+    hours from token `i` to the end of the record, the TNT head's the wait from
+    token `i` to token `i + 1`, and the disposition head's the chance of each way
+    the record could end. Read at a prompt's last token (an inference table's
+    `tokens_past`), they condition on everything so far.
 
-    The other stages don't use the time heads yet: `cotorra extract` reads hidden
-    states from an `mpp` model as from any other, and `generative-score` hasn't
-    been tested with `tte_aware` or `mpp` models.
+    A mixture TNT head leaves `out.tnt_pred` empty, since its prediction depends
+    on which token comes next; `model.tnt_distribution(hidden_states, next_ids)`
+    gives the distribution, with `sample()`, `log_prob(hours)` and
+    `point_estimate()`.
+
+5. **Generate (time, token) pairs** with a TNT head. See
+   [Generating (time, token) pairs](#generating-time-token-pairs) below.
+
+    The other stages don't use the secondary heads yet: `cotorra extract` reads
+    hidden states from a `cotorra` model as from any other, and
+    `generative-score` hasn't been tested with one.
+
+### Generating (time, token) pairs
+
+`cotorra.generator.generate` continues each prompt one (time, token) pair at a
+time. It samples the next token, then the hours until it (given that token, for a
+mixture head), and feeds the pair back in: the token as input, and the time
+through the token's time-based RoPE position, exactly as training builds it. So
+each new pair is conditioned on every time and token generated before it:
+
+```python
+import polars as pl
+import torch as t
+from omegaconf import OmegaConf
+from transformers import AutoModelForCausalLM
+
+from cotorra.generator import generate  # importing it registers `cotorra` too
+
+model = AutoModelForCausalLM.from_pretrained("output/mdl-<run_name>").eval()
+cfg = OmegaConf.load("output/mdl-<run_name>-training.yaml")
+prompts = pl.read_parquet("processed/held_out_for_inference.parquet", n_rows=8)
+
+trajectories = generate(
+    model,
+    [t.tensor(x) for x in prompts["tokens_past"]],
+    [t.tensor(x) for x in prompts["s_elapsed_past"]],
+    sec_per_pos_id=cfg.time_based_rope.sec_per_pos_id,  # None without it
+    max_new_tokens=512,
+    max_hours=24,  # stop 24 hours past each prompt's last token
+)
+for traj in trajectories:
+    print(traj.tokens, traj.s_elapsed)  # new tokens; seconds since record start
+```
+
+- **`sec_per_pos_id`** has to match what the model was trained with under
+  `time_based_rope`; the saved model doesn't record it, but
+  `mdl-<run_name>-training.yaml` does. For a model trained without time-based
+  RoPE pass `None`: generation still produces times, but the model never sees
+  them.
+- **Stopping:** a row ends at its first `EOS` (kept), after `max_new_tokens`, or
+  at the first token falling past `max_hours` (dropped).
+- **Sampling:** `do_sample=False` decodes greedily (the likeliest token and the
+  time head's point estimate); pass a `torch.Generator` as `generator` for
+  reproducible draws. For Monte-Carlo estimates, repeat each prompt as many times
+  as you want draws.
+- **Use a mixture head.** A point head has only one value to give and ignores
+  which token was sampled, so its times are deterministic and blur the
+  same-timestamp tokens of an event into a small positive gap.
+- **Batching:** prompts are left-padded into one batch, so chunk large cohorts.
+  This runs in PyTorch rather than SGLang (which can't take time-based
+  positions), so expect it to be slower than `generative-score`.
 
 ### Outputs
 

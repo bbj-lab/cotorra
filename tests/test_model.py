@@ -1,15 +1,64 @@
 #!/usr/bin/env python3
 
-"""tests for cotorra.model's TteAwareForCausalLM and MppForCausalLM and their configs"""
+"""tests for cotorra.model: the secondary heads, CotorraConfig and CotorraForCausalLM"""
+
+import itertools
+import math
 
 import pytest
 import torch as t
 from helpers import TINY_MODEL_ARGS, base_training_cfg, write_cfg
+from omegaconf import OmegaConf
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from cotorra.model import MppConfig, MppForCausalLM, TteAwareConfig, TteAwareForCausalLM
+from cotorra.loss import Loss
+from cotorra.model import (
+    HEADS,
+    CotorraConfig,
+    CotorraForCausalLM,
+    DispositionHead,
+    Log1pHoursHead,
+    TntMixtureHead,
+    TntPointHead,
+    TteHead,
+    ZeroInflatedLogNormalMixture,
+    head_options,
+)
 
 VOCAB = 64
+NAN = float("nan")
+K = 3  # mixture components, wherever a time-to-next-token head is a mixture
+CLASSES = ["DSCG//expired", "DSCG//home", "DSCG//hospice"]
+
+# each head's options, as `head_options` resolves them, weighted apart so a
+# test can tell which term is which
+OPTIONS = {
+    "tte": {"weight": 0.5},
+    "tnt": {"weight": 0.25},
+    "disposition": {"weight": 0.125, "classes": CLASSES},
+}
+
+# usable targets for each head, and targets it leaves wholly unscored
+TARGETS = {
+    "tte": lambda n, length: t.rand(n, length) * 200,
+    "tnt": lambda n, length: t.rand(n, length) * 5,
+    "disposition": lambda n, length: t.randint(0, len(CLASSES), (n, length)),
+}
+UNSCORED = {
+    "tte": lambda n, length: t.full((n, length), NAN),
+    "tnt": lambda n, length: t.full((n, length), NAN),
+    "disposition": lambda n, length: t.full((n, length), -100),
+}
+
+# every combination of heads, each with a time-to-next-token head built both
+# ways where it carries one
+COMBOS = [c for r in range(1, len(HEADS) + 1) for c in itertools.combinations(HEADS, r)]
+VARIANTS = [(c, False) for c in COMBOS] + [(c, True) for c in COMBOS if "tnt" in c]
+
+
+def variant_id(variant) -> str:
+    names, mixture = variant
+    return "+".join(names) + ("(mixture)" if mixture else "")
 
 
 def backbone_cfg(**overrides) -> AutoConfig:
@@ -19,31 +68,56 @@ def backbone_cfg(**overrides) -> AutoConfig:
     )
 
 
-def tte_model(**cfg_overrides) -> TteAwareForCausalLM:
+def options(*names, mixture=False) -> dict:
+    heads = {name: dict(OPTIONS[name]) for name in names}
+    if mixture:
+        heads["tnt"]["mixture_components"] = K
+    return heads
+
+
+def build(*names, mixture=False, **backbone) -> CotorraForCausalLM:
     """
     built through `from_config` rather than by calling the class, which is what
     `Trainer.model_init` does and what puts the heads under the config's dtype
     """
-    return AutoModelForCausalLM.from_config(
-        TteAwareConfig(text_config=backbone_cfg(), **cfg_overrides)
-    )
-
-
-def mpp_model(**cfg_overrides) -> MppForCausalLM:
-    """`tte_model`'s counterpart for the marked-point-process variant"""
-    return AutoModelForCausalLM.from_config(
-        MppConfig(text_config=backbone_cfg(), **cfg_overrides)
-    )
-
-
-@pytest.fixture(params=[TteAwareConfig, MppConfig], ids=["tte_aware", "mpp"])
-def model(request) -> TteAwareForCausalLM:
-    """either model: an `mpp` one carries the time-to-event head too, and every
-    test of that head has to hold for it unchanged"""
     t.manual_seed(0)
     return AutoModelForCausalLM.from_config(
-        request.param(text_config=backbone_cfg(), tte_weight=0.5)
+        CotorraConfig(
+            text_config=backbone_cfg(**backbone), heads=options(*names, mixture=mixture)
+        )
     )
+
+
+def targets(names, n=2, length=7, fill=TARGETS) -> dict:
+    """each named head's target, under the batch key it reads"""
+    return {HEADS[name].target: fill[name](n, length) for name in names}
+
+
+def emit(head: Log1pHoursHead, log1p_hours: float):
+    """make a point head emit a constant prediction, set through the softplus
+    that keeps it non-negative: its exact inverse for a positive value, and a
+    bias far enough below zero for 0 that softplus underflows to it"""
+    with t.no_grad():
+        head.linear.weight.zero_()
+        head.linear.bias.fill_(
+            math.log(math.expm1(log1p_hours)) if log1p_hours > 0 else -50.0
+        )
+
+
+def is_mixture(model: CotorraForCausalLM) -> bool:
+    return "tnt" in model.heads and isinstance(model.heads["tnt"], TntMixtureHead)
+
+
+def ids(n=2, length=7) -> t.Tensor:
+    return t.randint(3, VOCAB - 1, (n, length))
+
+
+@pytest.fixture(params=VARIANTS, ids=[variant_id(v) for v in VARIANTS])
+def model(request) -> CotorraForCausalLM:
+    """every combination of heads: whatever holds of one head has to hold
+    whichever others it is built alongside"""
+    names, mixture = request.param
+    return build(*names, mixture=mixture)
 
 
 # ---------------------------------------------------------------- the config
@@ -53,14 +127,14 @@ def test_config_requires_a_backbone():
     """the wrapper is meaningless without something to wrap, so it says so
     rather than failing later inside `AutoModel.from_config(None)`"""
     with pytest.raises(ValueError, match="text_config"):
-        TteAwareConfig()
+        CotorraConfig()
 
 
 def test_config_mirrors_common_keys_off_the_backbone():
     """cotorra's own stages read `vocab_size`/`eos_token_id`/... straight off
     `model.config`, so they have to be present at the top level too"""
     bb = backbone_cfg(bos_token_id=11, eos_token_id=22, tie_word_embeddings=True)
-    cfg = TteAwareConfig(text_config=bb)
+    cfg = CotorraConfig(text_config=bb)
     assert (cfg.vocab_size, cfg.hidden_size) == (bb.vocab_size, bb.hidden_size)
     assert (cfg.bos_token_id, cfg.eos_token_id) == (11, 22)
     assert cfg.tie_word_embeddings is True
@@ -68,34 +142,118 @@ def test_config_mirrors_common_keys_off_the_backbone():
 
 
 def test_config_keeps_an_explicitly_passed_value_over_the_mirror():
-    cfg = TteAwareConfig(text_config=backbone_cfg(eos_token_id=22), eos_token_id=33)
+    cfg = CotorraConfig(text_config=backbone_cfg(eos_token_id=22), eos_token_id=33)
     assert cfg.eos_token_id == 33
 
 
 def test_config_accepts_a_backbone_given_as_a_plain_dict():
     """what `from_pretrained` hands back: `text_config` arrives as json"""
-    cfg = TteAwareConfig(text_config={"model_type": "llama", "vocab_size": VOCAB})
+    cfg = CotorraConfig(text_config={"model_type": "llama", "vocab_size": VOCAB})
     assert type(cfg.text_config).__name__ == "LlamaConfig"
     assert cfg.vocab_size == VOCAB
 
 
-def test_config_serializes_despite_having_no_default_constructor():
+def test_config_serializes_its_heads_despite_having_no_default_constructor():
     """
     `has_no_defaults_at_init` is what stops `to_diff_dict` (and so
     `save_pretrained`) from calling the no-argument constructor that
     `test_config_requires_a_backbone` pins as raising
     """
-    cfg = TteAwareConfig(text_config=backbone_cfg(), tte_weight=0.25)
-    assert cfg.to_diff_dict()["tte_weight"] == 0.25
-    assert '"tte_weight": 0.25' in cfg.to_json_string()
-    assert '"tte_weight": 0.25' in cfg.to_json_string(use_diff=False)
+    heads = options(*HEADS, mixture=True)
+    cfg = CotorraConfig(text_config=backbone_cfg(), heads=heads)
+    assert cfg.to_diff_dict()["heads"] == heads
+    for js in (cfg.to_json_string(), cfg.to_json_string(use_diff=False)):
+        assert '"mixture_components": 3' in js and '"DSCG//hospice"' in js
 
 
-def test_tte_weight_defaults_to_one():
-    assert TteAwareConfig(text_config=backbone_cfg()).tte_weight == 1.0
+def test_config_refuses_a_head_it_does_not_know():
+    with pytest.raises(ValueError, match="mpp"):
+        CotorraConfig(text_config=backbone_cfg(), heads={"mpp": {}})
+
+
+# ------------------------------------------------- reading the training config
+
+LOOKUP = OmegaConf.create(
+    {"BOS": 0, "EOS": 1, "DSCG//home": 2, "LAB//na_Q3": 3, "DSCG//expired": 4}
+)
+
+
+def test_head_options_reads_one_block_per_objective():
+    """any combination of blocks; each weight defaults to 1.0, so a block left
+    empty -- which yaml parses to None -- still asks for its head"""
+    cfg = OmegaConf.create(
+        {
+            "tte_objective": None,
+            "tnt_objective": {"weight": 0.25, "mixture_components": 8},
+            "custom_loss": True,
+        }
+    )
+    assert head_options(cfg, LOOKUP) == {
+        "tte": {"weight": 1.0},
+        "tnt": {"weight": 0.25, "mixture_components": 8},
+    }
+    assert head_options(OmegaConf.create({}), LOOKUP) == {}
+
+
+def test_head_options_refuses_an_objective_naming_no_head():
+    """the blocks a config written for an earlier layout would carry: left
+    alone, they would train a plain backbone without a word"""
+    cfg = OmegaConf.create({"mpp_objective": {"tnt_weight": 1.0}})
+    with pytest.raises(ValueError, match="mpp_objective"):
+        head_options(cfg, LOOKUP)
+
+
+@pytest.mark.parametrize(
+    "classes, expected",
+    [
+        (None, ["DSCG//home", "DSCG//expired"]),
+        (["DSCG//expired", "DSCG//home"], ["DSCG//home", "DSCG//expired"]),
+        ("DSCG//exp*", ["DSCG//expired"]),
+    ],
+    ids=["default", "listed", "one-pattern"],
+)
+def test_disposition_classes_resolve_to_tokens_in_id_order(classes, expected):
+    """fnmatch patterns, `DSCG//*` by default, resolved against the vocabulary
+    so the checkpoint names its classes outright"""
+    block = {} if classes is None else {"classes": classes}
+    cfg = OmegaConf.create({"disposition_objective": block})
+    assert head_options(cfg, LOOKUP)["disposition"]["classes"] == expected
+
+
+def test_disposition_classes_matching_nothing_are_refused():
+    cfg = OmegaConf.create({"disposition_objective": {"classes": ["DISCH//*"]}})
+    with pytest.raises(ValueError, match="matched no token"):
+        head_options(cfg, LOOKUP)
 
 
 # ------------------------------------------------------- dtype and structure
+
+
+@pytest.mark.parametrize("variant", VARIANTS, ids=[variant_id(v) for v in VARIANTS])
+def test_only_the_heads_asked_for_are_built(variant):
+    """rather than built and left untrained, which would cost parameters and
+    which `ddp_find_unused_parameters: false` would refuse"""
+    names, mixture = variant
+    mdl = build(*names, mixture=mixture)
+    assert list(mdl.heads) == list(names)
+    kinds = {
+        "tte": TteHead,
+        "tnt": TntMixtureHead if mixture else TntPointHead,
+        "disposition": DispositionHead,
+    }
+    assert all(type(mdl.heads[name]) is kinds[name] for name in names)
+    assert {k.split(".")[1] for k in mdl.state_dict() if k.startswith("heads.")} == (
+        set(names)
+    )
+
+
+def test_a_component_count_below_one_is_refused():
+    with pytest.raises(ValueError, match="must be positive"):
+        AutoModelForCausalLM.from_config(
+            CotorraConfig(
+                text_config=backbone_cfg(), heads={"tnt": {"mixture_components": 0}}
+            )
+        )
 
 
 @pytest.mark.parametrize("dtype", ["bfloat16", "float32"])
@@ -108,50 +266,60 @@ def test_every_module_is_built_under_the_backbones_dtype(dtype):
     quietly built in float32 -- and calling the class directly leaves the
     heads in float32 against a bfloat16 trunk, which is a hard error on matmul
     """
-    bb = backbone_cfg(dtype=dtype)
-    stock = AutoModelForCausalLM.from_config(bb)
-    mdl = AutoModelForCausalLM.from_config(TteAwareConfig(text_config=bb))
-    expected = next(stock.parameters()).dtype
-    assert expected == getattr(t, dtype)
-    assert next(mdl.model.parameters()).dtype == expected
-    assert mdl.lm_head.weight.dtype == expected
-    assert mdl.tte_head.weight.dtype == expected
+    stock = AutoModelForCausalLM.from_config(backbone_cfg(dtype=dtype))
+    assert next(stock.parameters()).dtype == getattr(t, dtype)
+    for mixture in (False, True):
+        mdl = build(*HEADS, mixture=mixture, dtype=dtype)
+        assert {p.dtype for p in mdl.parameters()} == {getattr(t, dtype)}
 
 
-def test_state_dict_matches_the_stock_class_once_the_tte_head_is_dropped():
+@pytest.mark.parametrize("mixture", [False, True], ids=["point", "mixture"])
+def test_the_heads_are_initialized_as_huggingface_does(mixture):
+    """a zero bias and a normal weight of `initializer_range` spread, rather
+    than torch's uniform default (spread ~0.1 at this width): `post_init` has
+    to run after every head exists"""
+    mdl = build(*HEADS, mixture=mixture)
+    layers = [m for m in mdl.heads.modules() if isinstance(m, t.nn.Linear)]
+    assert len(layers) == (4 if mixture else 3)
+    for layer in layers:
+        assert t.equal(layer.bias, t.zeros_like(layer.bias))
+        assert layer.weight.std().item() == pytest.approx(
+            backbone_cfg().initializer_range, rel=0.5
+        )
+
+
+@pytest.mark.parametrize("mixture", [False, True], ids=["point", "mixture"])
+def test_state_dict_matches_the_stock_class_once_the_heads_are_dropped(mixture):
     """
-    the head is laid out as a llama-family `*ForCausalLM` is, so a checkpoint
-    can be handed to anything that only knows the stock architecture (sglang,
-    which `generative-score` serves through, resolves `architectures[0]`
-    against its own registry and has never heard of `tte_aware`)
+    the heads sit under `heads.*` and the rest is laid out as a llama-family
+    `*ForCausalLM` is, so a checkpoint can be handed to anything that only
+    knows the stock architecture (sglang, which `generative-score` serves
+    through, resolves `architectures[0]` against its own registry and has never
+    heard of `cotorra`)
     """
-    bb = backbone_cfg()
-    mdl, stock = tte_model(), AutoModelForCausalLM.from_config(bb)
-    weights = {k: v for k, v in mdl.state_dict().items() if k != "tte_head.weight"}
-    weights.pop("tte_head.bias")
+    mdl, stock = (
+        build(*HEADS, mixture=mixture),
+        AutoModelForCausalLM.from_config(backbone_cfg()),
+    )
+    weights = {k: v for k, v in mdl.state_dict().items() if not k.startswith("heads.")}
     assert set(weights) == set(stock.state_dict())
 
     missing, unexpected = stock.load_state_dict(weights, strict=False)
     assert (list(missing), list(unexpected)) == ([], [])
-    ids = t.randint(3, VOCAB - 1, (1, 5))
+    x = ids(1, 5)
     mdl.eval()
     stock.eval()
-    assert t.equal(mdl(input_ids=ids).logits, stock(input_ids=ids).logits)
+    assert t.equal(mdl(input_ids=x).logits, stock(input_ids=x).logits)
 
 
 def test_word_embeddings_are_tied_when_the_backbone_asks_for_it():
-    mdl = AutoModelForCausalLM.from_config(
-        TteAwareConfig(text_config=backbone_cfg(tie_word_embeddings=True))
-    )
+    mdl = build("tte", tie_word_embeddings=True)
     assert mdl.all_tied_weights_keys == {"lm_head.weight": "model.embed_tokens.weight"}
     assert mdl.lm_head.weight.data_ptr() == mdl.model.embed_tokens.weight.data_ptr()
 
 
 def test_untied_when_the_backbone_says_not_to():
-    mdl = AutoModelForCausalLM.from_config(
-        TteAwareConfig(text_config=backbone_cfg(tie_word_embeddings=False))
-    )
-    assert mdl.all_tied_weights_keys == {}
+    assert build("tte", tie_word_embeddings=False).all_tied_weights_keys == {}
 
 
 def test_tying_follows_a_backbone_that_names_its_embedding_differently():
@@ -168,78 +336,158 @@ def test_tying_follows_a_backbone_that_names_its_embedding_differently():
         num_attention_heads=2,
         tie_word_embeddings=True,
     )
-    mdl = AutoModelForCausalLM.from_config(TteAwareConfig(text_config=bb))
+    mdl = AutoModelForCausalLM.from_config(
+        CotorraConfig(text_config=bb, heads=options("tte"))
+    )
     assert mdl.all_tied_weights_keys == {"lm_head.weight": "model.wte.weight"}
     assert mdl.lm_head.weight.data_ptr() == mdl.model.wte.weight.data_ptr()
 
 
-def test_a_saved_model_reloads_through_the_auto_class(tmp_path):
+def test_a_saved_model_reloads_through_the_auto_class(model, tmp_path):
     """
     `Extractor` and `GenerativeScorer` only ever see `mdl-<run_name>/`, which
     they open with `AutoModelForCausalLM.from_pretrained`; importing
-    `cotorra.model` is what registers the pair that makes that resolve
+    `cotorra.model` is what registers the pair that makes that resolve, and the
+    heads come back as they were saved, disposition classes included
     """
-    mdl = tte_model(tte_weight=0.25)
-    mdl.save_pretrained(tmp_path)
+    model.save_pretrained(tmp_path)
     reloaded = AutoModelForCausalLM.from_pretrained(tmp_path)
 
-    assert type(reloaded) is TteAwareForCausalLM
-    assert reloaded.config.tte_weight == 0.25
+    assert type(reloaded) is CotorraForCausalLM
+    assert reloaded.config.heads == model.config.heads
     assert type(reloaded.config.text_config).__name__ == "LlamaConfig"
-    ids = t.randint(3, VOCAB - 1, (2, 6))
-    mdl.eval()
+    if "disposition" in reloaded.heads:
+        assert reloaded.heads["disposition"].classes == CLASSES
+    x = ids(2, 6)
+    model.eval()
     reloaded.eval()
-    assert t.equal(reloaded(input_ids=ids).logits, mdl(input_ids=ids).logits)
-    assert t.equal(reloaded(input_ids=ids).tte_pred, mdl(input_ids=ids).tte_pred)
+    before, after = model(input_ids=x), reloaded(input_ids=x)
+    assert t.equal(before.logits, after.logits)
+    for name in model.heads:
+        a, b = getattr(before, f"{name}_pred"), getattr(after, f"{name}_pred")
+        assert (a is None and b is None) or t.equal(a, b), name
+    if is_mixture(model):
+        with t.no_grad():
+            hidden = model.model(input_ids=x).last_hidden_state
+            dists = [m.tnt_distribution(hidden, x) for m in (model, reloaded)]
+        assert t.equal(dists[0].zero_logit, dists[1].zero_logit)
 
 
 # ------------------------------------------------------------------- forward
 
 
-def test_forward_returns_both_heads(model):
-    ids = t.randint(3, VOCAB - 1, (2, 7))
-    out = model(input_ids=ids)
+def test_forward_returns_a_prediction_from_each_head_it_carries(model):
+    out = model(input_ids=ids(2, 7))
     assert out.logits.shape == (2, 7, VOCAB)
-    assert out.tte_pred.shape == (2, 7)
-    assert (out.loss, out.tte_loss) == (None, None)
+    expected = {
+        "tte": (2, 7),
+        "tnt": None if is_mixture(model) else (2, 7),
+        "disposition": (2, 7, len(CLASSES)),
+    }
+    for name in HEADS:
+        pred = getattr(out, f"{name}_pred")
+        shape = expected[name] if name in model.heads else None
+        assert (pred is None) if shape is None else (pred.shape == shape), name
+        assert out.get(f"{name}_loss") is None
+    assert out.loss is None
 
 
 def test_forward_exposes_hidden_states_for_the_extractor(model):
     """`Extractor.extract_final` reads `.hidden_states[-1]`"""
-    out = model(input_ids=t.randint(3, VOCAB - 1, (2, 7)), output_hidden_states=True)
+    out = model(input_ids=ids(2, 7), output_hidden_states=True)
     assert len(out.hidden_states) == TINY_MODEL_ARGS["num_hidden_layers"] + 1
     assert out.hidden_states[-1].shape == (2, 7, TINY_MODEL_ARGS["hidden_size"])
 
 
-def test_loss_is_the_language_modelling_term_plus_the_weighted_tte_term(model):
-    ids = t.randint(3, VOCAB - 1, (2, 7))
-    hours = t.rand(2, 7) * 200
-    both = model(input_ids=ids, labels=ids, hours_to_end_time=hours)
-    lm_only = model(input_ids=ids, labels=ids)
+def test_the_loss_adds_each_heads_weighted_term(model):
+    x = ids(2, 7)
+    full = model(input_ids=x, labels=x, **targets(model.heads))
+    lm_only = model(input_ids=x, labels=x)
 
-    assert lm_only.tte_loss is None
-    assert both.loss.item() == pytest.approx(
-        lm_only.loss.item() + 0.5 * both.tte_loss.item(), rel=1e-5
+    expected = lm_only.loss.item() + sum(
+        head.weight * getattr(full, f"{name}_loss").item()
+        for name, head in model.heads.items()
     )
+    assert full.loss.item() == pytest.approx(expected, rel=1e-5)
 
 
-def test_the_tte_term_is_computed_without_labels(model):
+def test_each_head_is_scored_without_labels(model):
     """
     on cotorra's default `custom_loss: true`, `TrainerWithCustomLoss` pops
-    `labels` before calling the model, so the tte term has to be reachable
+    `labels` before calling the model, so every head's term has to be reachable
     from the returned output for `Loss.custom_loss` to fold it in
     """
-    out = model(
-        input_ids=t.randint(3, VOCAB - 1, (2, 7)), hours_to_end_time=t.rand(2, 7) * 50
-    )
+    out = model(input_ids=ids(2, 7), **targets(model.heads))
     assert out.loss is None
-    assert out.get("tte_loss") is not None and t.isfinite(out.tte_loss)
+    for name in model.heads:
+        assert t.isfinite(getattr(out, f"{name}_loss")), name
 
 
-# -------------------------------------------------------- the tte loss itself
+def test_each_head_reads_only_its_own_target(model):
+    """blanking one head's target leaves it nothing to score, and leaves every
+    other head's term exactly as it was"""
+    x, full = ids(2, 6), targets(model.heads, 2, 6)
+    base = model(input_ids=x, **full)
+    for name, head in model.heads.items():
+        out = model(input_ids=x, **full | {head.target: UNSCORED[name](2, 6)})
+        assert (
+            getattr(out, f"{name}_loss").item()
+            == 0.0
+            != getattr(base, f"{name}_loss").item()
+        )
+        for other in model.heads:
+            if other != name:
+                assert t.equal(
+                    getattr(out, f"{other}_loss"), getattr(base, f"{other}_loss")
+                )
 
 
-def test_the_tte_target_is_the_current_positions_hours(model):
+@pytest.mark.parametrize("name", list(HEADS))
+def test_a_target_for_a_head_the_model_lacks_is_refused(name):
+    """rather than swallowed by the backbone's `**kwargs`, which would quietly
+    train one head fewer than the caller expects"""
+    mdl = build(*(other for other in HEADS if other != name))
+    with pytest.raises(ValueError, match=f"got `{HEADS[name].target}`"):
+        mdl(input_ids=ids(2, 7), **targets([name]))
+
+
+def test_a_batch_with_nothing_to_score_still_reaches_every_parameter(model):
+    """
+    summed-then-normalized rather than masked-then-averaged, so each zero is
+    differentiable: a bare `0.0` would leave its head with no gradient at all,
+    which `ddp_find_unused_parameters: false` reports as an error
+    """
+    x = ids(2, 6)
+    out = model(input_ids=x, labels=x, **targets(model.heads, 2, 6, fill=UNSCORED))
+    for name in model.heads:
+        assert getattr(out, f"{name}_loss").item() == 0.0
+        assert getattr(out, f"{name}_loss").requires_grad
+    out.loss.backward()
+    assert all(p.grad is not None for p in model.parameters() if p.requires_grad)
+    assert all(t.isfinite(p.grad).all() for p in model.heads.parameters())
+
+
+def test_logits_to_keep_trims_what_is_returned_but_not_what_is_scored(model):
+    """generation asks for the last position alone; training never trims, but
+    a target still scores every position whatever comes back"""
+    x, tg = ids(2, 6), targets(model.heads, 2, 6)
+    whole, last = model(input_ids=x, **tg), model(input_ids=x, logits_to_keep=1, **tg)
+    assert last.logits.shape == (2, 1, VOCAB)
+    for name in model.heads:
+        assert t.allclose(getattr(last, f"{name}_loss"), getattr(whole, f"{name}_loss"))
+        if (pred := getattr(whole, f"{name}_pred")) is not None:
+            assert t.equal(getattr(last, f"{name}_pred"), pred[:, -1:])
+
+
+# ------------------------------------------------------- the time-to-event head
+
+
+@pytest.fixture
+def tte() -> CotorraForCausalLM:
+    return build("tte")
+
+
+def test_the_tte_target_is_the_current_positions_hours(tte):
     """
     unshifted, unlike the language-modelling loss: the prediction at position i
     is scored against position i's own target -- the hours remaining once token
@@ -247,11 +495,9 @@ def test_the_tte_target_is_the_current_positions_hours(model):
     down the sequence, as remaining-hours always do, so scoring the wrong
     pairing gives a different number
     """
-    with t.no_grad():  # a head that emits a constant 0, whatever the input
-        model.tte_head.weight.zero_()
-        model.tte_head.bias.zero_()
+    emit(tte.heads["tte"], 0.0)  # a constant 0, whatever the input
     hours = t.tensor([[7.0, 3.0, 1.0, 0.0]])
-    out = model(input_ids=t.randint(3, VOCAB - 1, (1, 4)), hours_to_end_time=hours)
+    out = tte(input_ids=ids(1, 4), hours_to_end_time=hours)
 
     shifted = (t.log1p(hours[0, 1:]) ** 2).mean()
     unshifted = (t.log1p(hours[0, :]) ** 2).mean()
@@ -259,73 +505,83 @@ def test_the_tte_target_is_the_current_positions_hours(model):
     assert unshifted.item() != pytest.approx(shifted.item(), rel=1e-3)
 
 
-def test_a_zero_target_is_kept_rather_than_masked(model):
+def test_a_zero_target_is_kept_rather_than_masked(tte):
     """the last token of a record has nothing left to wait for, and `log1p(0)`
     is exactly 0 -- a real target, not a missing one"""
-    with t.no_grad():
-        model.tte_head.weight.zero_()
-        model.tte_head.bias.zero_()
-    out = model(
-        input_ids=t.randint(3, VOCAB - 1, (2, 6)), hours_to_end_time=t.zeros(2, 6)
-    )
+    emit(tte.heads["tte"], 0.0)
+    out = tte(input_ids=ids(2, 6), hours_to_end_time=t.zeros(2, 6))
     assert out.tte_loss.item() == pytest.approx(0.0, abs=1e-6)
 
 
 @pytest.mark.parametrize(
     "hours",
     [
-        pytest.param(t.full((2, 6), float("nan")), id="missing-end-time"),
+        pytest.param(t.full((2, 6), NAN), id="missing-end-time"),
         pytest.param(t.full((2, 6), float("inf")), id="infinite"),
-        pytest.param(t.full((2, 6), -3.0), id="recorded-after-the-end-time"),
     ],
 )
-def test_unusable_targets_are_masked_out(model, hours):
-    ids = t.randint(3, VOCAB - 1, (2, 6))
-    out = model(input_ids=ids, labels=ids, hours_to_end_time=hours)
+def test_unusable_targets_are_masked_out(tte, hours):
+    x = ids(2, 6)
+    out = tte(input_ids=x, labels=x, hours_to_end_time=hours)
     assert out.tte_loss.item() == 0.0
     assert t.isfinite(out.loss)
 
 
-def test_a_fully_masked_batch_still_carries_a_gradient(model):
-    """
-    summed-then-normalized rather than masked-then-averaged, so the zero is
-    differentiable: a bare `0.0` would leave `tte_head` with no gradient at
-    all, which `ddp_find_unused_parameters: false` reports as an error
-    """
-    ids = t.randint(3, VOCAB - 1, (2, 6))
-    out = model(
-        input_ids=ids, labels=ids, hours_to_end_time=t.full((2, 6), float("nan"))
-    )
-    assert out.tte_loss.requires_grad
-    out.loss.backward()
-    assert model.tte_head.weight.grad is not None
-    assert t.isfinite(model.tte_head.weight.grad).all()
-
-
-def test_only_the_usable_positions_contribute(model):
+def test_only_the_usable_positions_contribute(tte):
     """a half-masked batch scores the same as the usable half on its own"""
-    with t.no_grad():
-        model.tte_head.weight.zero_()
-        model.tte_head.bias.zero_()
-    ids = t.randint(3, VOCAB - 1, (1, 4))
-    nan = float("nan")
-    # every position is scored; blank one, which must also leave the denominator
-    masked = model(
-        input_ids=ids, hours_to_end_time=t.tensor([[3.0, nan, 1.0, 0.0]])
+    emit(tte.heads["tte"], 0.0)
+    masked = tte(
+        input_ids=ids(1, 4), hours_to_end_time=t.tensor([[3.0, NAN, 1.0, 0.0]])
     ).tte_loss
     expected = (t.log1p(t.tensor([3.0, 1.0, 0.0])) ** 2).mean()
     assert masked.item() == pytest.approx(expected.item(), rel=1e-5)
 
 
-def test_the_head_learns_the_target():
-    t.manual_seed(0)
-    mdl = tte_model()
-    ids = t.randint(3, VOCAB - 1, (4, 8))
-    hours = t.rand(4, 8) * 200
+def test_a_target_past_the_end_time_counts_as_zero_hours(tte):
+    """
+    a token recorded after the reference end time is scored against 0 hours
+    remaining rather than left out, while a missing end time (a nan) stays
+    masked. A head emitting a constant 1 tells the two apart: a masked target
+    adds nothing, a clipped one adds (1 - log1p(0))^2 = 1
+    """
+    emit(tte.heads["tte"], 1.0)
+    out = tte(input_ids=ids(1, 4), hours_to_end_time=t.tensor([[2.0, -3.0, NAN, -0.5]]))
+    first = (1 - math.log1p(2.0)) ** 2
+    assert out.tte_loss.item() == pytest.approx((first + 1 + 1) / 3, rel=1e-5)
+
+
+@pytest.mark.parametrize("bias", [-50.0, -5.0, 0.0, 5.0])
+def test_the_point_heads_never_predict_negative_hours(bias):
+    """even a head whose raw output is pushed far below zero, on inputs with
+    wide random weights"""
+    mdl = build("tte", "tnt")
+    with t.no_grad():
+        for head in mdl.heads.values():
+            head.linear.weight.normal_(std=5.0)
+            head.linear.bias.fill_(bias)
+    out = mdl(input_ids=ids(4, 9))
+    for pred in (out.tte_pred, out.tnt_pred):
+        assert (pred >= 0).all() and (pred.expm1() >= 0).all()
+
+
+def test_a_point_head_below_zero_still_learns(tte):
+    """why a softplus rather than a clamp: a clamped head whose raw output fell
+    below zero would get no gradient, and stay predicting 0 for good"""
+    with t.no_grad():
+        tte.heads["tte"].linear.bias.fill_(-5.0)
+    out = tte(input_ids=ids(2, 6), hours_to_end_time=t.full((2, 6), 10.0))
+    out.tte_loss.backward()
+    assert tte.heads["tte"].linear.bias.grad.abs().item() > 0
+
+
+@pytest.mark.parametrize("name", ["tte", "tnt"])
+def test_a_point_head_learns_its_target(name):
+    mdl = build(name)
+    x, tg = ids(4, 8), targets([name], 4, 8)
     opt = t.optim.AdamW(mdl.parameters(), lr=1e-2)
     first = None
     for _ in range(40):
-        loss = mdl(input_ids=ids, hours_to_end_time=hours).tte_loss
+        loss = getattr(mdl(input_ids=x, **tg), f"{name}_loss")
         first = loss.item() if first is None else first
         opt.zero_grad()
         loss.backward()
@@ -333,402 +589,283 @@ def test_the_head_learns_the_target():
     assert loss.item() < first / 2
 
 
-# --------------------------------------------------------------- integration
+# ---------------------------------------------- the time-to-next-token heads
 
 
-def test_model_init_wraps_the_backbone_when_the_objective_is_configured(
-    built_trainer, monkeypatch
-):
-    """`Trainer.model_init` is the only place the pipeline builds a model, so
-    the block has to reach it -- it used to build a plain backbone that
-    silently swallowed the `hours_to_end_time` batch column"""
-    assert not isinstance(built_trainer.model_init(), TteAwareForCausalLM)
-
-    monkeypatch.setitem(built_trainer.cfg, "tte_aware_objective", {"tte_weight": 0.25})
-    mdl = built_trainer.model_init()
-    tkzr = built_trainer.tkzr_cfg
-    assert type(mdl) is TteAwareForCausalLM
-    assert mdl.config.tte_weight == 0.25
-    assert mdl.config.vocab_size == len(tkzr.lookup)
-    assert (mdl.config.bos_token_id, mdl.config.eos_token_id) == (
-        tkzr.lookup.BOS,
-        tkzr.lookup.EOS,
-    )
-
-
-def test_the_custom_loss_path_still_reaches_the_tte_head(built_trainer, monkeypatch):
-    """
-    the pairing that used to drop the objective on the floor:
-    `TrainerWithCustomLoss.compute_loss` pops `labels`, so the model's own
-    `loss + tte_weight * tte_loss` is never formed and `Loss.custom_loss` owns
-    the whole objective. With the term missing there, `tte_head` took no
-    gradient at all -- and DDP, configured with
-    `ddp_find_unused_parameters: false`, would refuse the step
-    """
-    monkeypatch.setitem(built_trainer.cfg, "tte_aware_objective", {"tte_weight": 0.5})
-    assert built_trainer.trainer.compute_loss_func is not None  # `custom_loss: true`
-
-    mdl = built_trainer.model_init()
-    n_vocab, seq_len = len(built_trainer.tkzr_cfg.lookup), 8
-    batch = built_trainer.collate_fn(
-        [
-            {
-                "input_ids": t.randint(3, n_vocab - 1, (seq_len,)),
-                "s_elapsed": t.arange(seq_len, dtype=t.float32) * 300,
-                "hours_to_end_time": t.rand(seq_len) * 100,
-            }
-            for _ in range(2)
-        ]
-    )
-    loss = built_trainer.trainer.compute_loss(mdl, batch)
-    loss.backward()
-
-    grad = mdl.tte_head.weight.grad
-    assert grad is not None and t.isfinite(grad).all()
-    assert grad.abs().max().item() > 0
-    assert all(p.grad is not None for p in mdl.parameters() if p.requires_grad)
-
-
-def test_it_consumes_what_the_trainers_collator_produces(built_trainer, monkeypatch):
-    """
-    the contract between `Trainer.collate_fn` and this model: with both
-    optional blocks configured the batch carries float `position_ids` (time
-    based rope) alongside `hours_to_end_time`, and nothing else is needed
-    """
-    monkeypatch.setitem(built_trainer.cfg, "tte_aware_objective", {"tte_weight": 0.5})
-    batch = [
-        {
-            "input_ids": t.arange(4),
-            "s_elapsed": t.tensor([0.0, 300.0, 600.0, 900.0]),
-            "hours_to_end_time": t.tensor([3.0, 2.0, 1.0, 0.0]),
-        },
-        {
-            "input_ids": t.arange(4, 8),
-            "s_elapsed": t.tensor([0.0, 150.0, 300.0, 450.0]),
-            "hours_to_end_time": t.tensor([1.5, 1.0, 0.5, 0.0]),
-        },
-    ]
-    collated = built_trainer.collate_fn(batch)
-    assert set(collated) == {"input_ids", "labels", "position_ids", "hours_to_end_time"}
-
-    tkzr = built_trainer.tkzr_cfg
-    mdl = AutoModelForCausalLM.from_config(
-        TteAwareConfig(
-            text_config=AutoConfig.for_model(
-                "llama", vocab_size=len(tkzr.lookup), **TINY_MODEL_ARGS
-            )
-        )
-    )
-    out = mdl(**collated)
-    assert out.logits.shape == (2, 4, len(tkzr.lookup))
-    assert out.tte_pred.shape == (2, 4)
-    assert t.isfinite(out.loss) and t.isfinite(out.tte_loss)
-
-
-@pytest.mark.slow
-def test_a_real_training_step_updates_both_heads(built_trainer, monkeypatch, tmp_path):
-    """the model driven by cotorra's own `TrainerWithCustomLoss`, on both the
-    stock-loss and `custom_loss` paths"""
-    from transformers import TrainingArguments
-
-    from cotorra.trainer import TrainerWithCustomLoss
-
-    def custom_loss(outputs, labels, **kwargs):
-        logits = outputs.get("logits")
-        loss = t.nn.CrossEntropyLoss()(
-            logits[:, :-1].reshape(-1, logits.size(-1)).float(),
-            labels[:, 1:].reshape(-1),
-        )
-        return loss + 0.5 * outputs.get("tte_loss")
-
-    monkeypatch.setitem(built_trainer.cfg, "tte_aware_objective", {"tte_weight": 0.5})
-    n_vocab = len(built_trainer.tkzr_cfg.lookup)
-    seq_len = built_trainer.cfg.max_seq_len
-    dataset = [
-        {
-            "input_ids": t.randint(3, n_vocab - 1, (seq_len,)),
-            "s_elapsed": t.arange(seq_len, dtype=t.float32) * 300,
-            "hours_to_end_time": t.rand(seq_len) * 100,
-        }
-        for _ in range(8)
-    ]
-
-    for compute_loss_func in (None, custom_loss):
-        t.manual_seed(0)
-        model = AutoModelForCausalLM.from_config(
-            TteAwareConfig(
-                text_config=AutoConfig.for_model(
-                    "llama", vocab_size=n_vocab, **TINY_MODEL_ARGS
-                ),
-                tte_weight=0.5,
-            )
-        )
-        before = model.tte_head.weight.detach().cpu().clone()
-        trainer = TrainerWithCustomLoss(
-            model=model,
-            data_collator=built_trainer.collate_fn,
-            compute_loss_func=compute_loss_func,
-            train_dataset=dataset,
-            args=TrainingArguments(
-                output_dir=str(tmp_path),
-                **{**built_trainer.cfg.training_args, "learning_rate": 1e-2},
-            ),
-        )
-        trainer.train()
-        moved = (model.tte_head.weight.detach().cpu() - before).abs().max().item()
-        assert moved > 0, f"tte_head never updated with {compute_loss_func=}"
-
-
-# ------------------------------------------------------------- the mpp model
-
-NAN = float("nan")
-
-
-@pytest.fixture(params=[None, 0.5], ids=["ttnt_only", "with_tte"])
-def mpp(request) -> MppForCausalLM:
-    """an `mpp` model without and with its optional time-to-event head; every
-    test of the time-to-next-token head has to hold for both"""
-    t.manual_seed(0)
-    return mpp_model(tte_weight=request.param, ttnt_weight=0.25)
-
-
-@pytest.fixture
-def ttnt_only() -> MppForCausalLM:
-    t.manual_seed(0)
-    return mpp_model(ttnt_weight=0.25)
-
-
-@pytest.fixture
-def mpp_with_tte() -> MppForCausalLM:
-    t.manual_seed(0)
-    return mpp_model(tte_weight=0.5, ttnt_weight=0.25)
-
-
-def test_mpp_config_is_a_tte_aware_config_under_its_own_model_type():
-    """everything the wrapper does for its backbone carries over; the model
-    type -- what the auto classes resolve a checkpoint by -- differs"""
-    cfg = MppConfig(text_config=backbone_cfg(bos_token_id=11, eos_token_id=22))
-    assert isinstance(cfg, TteAwareConfig)
-    assert cfg.model_type == "mpp"
-    assert (cfg.vocab_size, cfg.bos_token_id, cfg.eos_token_id) == (VOCAB, 11, 22)
-    with pytest.raises(ValueError, match="`mpp` config"):
-        MppConfig()
-
-
-def test_an_mpp_config_leaves_the_tte_head_out_unless_asked():
-    cfg = MppConfig(text_config=backbone_cfg())
-    assert (cfg.tte_weight, cfg.ttnt_weight) == (None, 1.0)
-
-
-@pytest.mark.parametrize("tte_weight", [None, 0.5], ids=["ttnt_only", "with_tte"])
-def test_mpp_config_serializes_both_weights(tte_weight):
-    """an unset `tte_weight` included, so a reloaded model gets the same heads"""
-    cfg = MppConfig(text_config=backbone_cfg(), tte_weight=tte_weight, ttnt_weight=0.25)
-    written = "null" if tte_weight is None else "0.5"
-    for js in (cfg.to_json_string(), cfg.to_json_string(use_diff=False)):
-        assert f'"tte_weight": {written}' in js
-        assert '"ttnt_weight": 0.25' in js
-
-
-@pytest.mark.parametrize("dtype", ["bfloat16", "float32"])
-def test_the_mpp_heads_are_built_under_the_backbones_dtype(dtype):
-    mdl = AutoModelForCausalLM.from_config(
-        MppConfig(text_config=backbone_cfg(dtype=dtype), tte_weight=1.0)
-    )
-    for module in (mdl.model, mdl.lm_head, mdl.tte_head, mdl.ttnt_head):
-        assert next(module.parameters()).dtype == getattr(t, dtype)
-
-
-def test_without_a_tte_weight_the_tte_head_is_left_out(ttnt_only):
-    """rather than built and left untrained, which would cost parameters and
-    which `ddp_find_unused_parameters: false` would refuse"""
-    assert ttnt_only.tte_head is None
-    assert not any(k.startswith("tte_head.") for k in ttnt_only.state_dict())
-
-
-def test_the_scalar_heads_are_initialized_as_huggingface_does(mpp):
-    """a zero bias and a normal weight of `initializer_range` spread, rather
-    than torch's uniform default (spread ~0.1 at this width): `post_init` has
-    to run after every head exists"""
-    for head in (h for h in (mpp.tte_head, mpp.ttnt_head) if h is not None):
-        assert t.equal(head.bias, t.zeros_like(head.bias))
-        assert head.weight.std().item() == pytest.approx(
-            backbone_cfg().initializer_range, rel=0.5
-        )
-
-
-def test_mpp_state_dict_matches_the_stock_class_once_the_scalar_heads_are_dropped(mpp):
-    stock = AutoModelForCausalLM.from_config(backbone_cfg())
-    weights = {
-        k: v
-        for k, v in mpp.state_dict().items()
-        if not k.startswith(("tte_head.", "ttnt_head."))
-    }
-    assert set(weights) == set(stock.state_dict())
-
-    missing, unexpected = stock.load_state_dict(weights, strict=False)
-    assert (list(missing), list(unexpected)) == ([], [])
-    ids = t.randint(3, VOCAB - 1, (1, 5))
-    mpp.eval()
-    stock.eval()
-    assert t.equal(mpp(input_ids=ids).logits, stock(input_ids=ids).logits)
-
-
-def test_mpp_word_embeddings_are_tied_when_the_backbone_asks_for_it():
-    mdl = AutoModelForCausalLM.from_config(
-        MppConfig(text_config=backbone_cfg(tie_word_embeddings=True))
-    )
-    assert mdl.all_tied_weights_keys == {"lm_head.weight": "model.embed_tokens.weight"}
-    assert mdl.lm_head.weight.data_ptr() == mdl.model.embed_tokens.weight.data_ptr()
-
-
-def test_a_saved_mpp_model_reloads_through_the_auto_class(mpp, tmp_path):
-    """to the `mpp` class, carrying the heads it was saved with"""
-    mpp.save_pretrained(tmp_path)
-    reloaded = AutoModelForCausalLM.from_pretrained(tmp_path)
-
-    assert type(reloaded) is MppForCausalLM
-    assert reloaded.config.tte_weight == mpp.config.tte_weight
-    assert reloaded.config.ttnt_weight == 0.25
-    assert (reloaded.tte_head is None) == (mpp.tte_head is None)
-    ids = t.randint(3, VOCAB - 1, (2, 6))
-    mpp.eval()
-    reloaded.eval()
-    before, after = mpp(input_ids=ids), reloaded(input_ids=ids)
-    for field in ("logits", "tte_pred", "ttnt_pred"):
-        a, b = getattr(before, field), getattr(after, field)
-        assert (a is None and b is None) or t.equal(a, b), field
-
-
-def test_mpp_forward_returns_each_head_it_carries(mpp):
-    out = mpp(input_ids=t.randint(3, VOCAB - 1, (2, 7)))
-    assert out.logits.shape == (2, 7, VOCAB)
-    assert out.ttnt_pred.shape == (2, 7)
-    if mpp.tte_head is None:
-        assert out.tte_pred is None
-    else:
-        assert out.tte_pred.shape == (2, 7)
-    assert (out.loss, out.tte_loss, out.ttnt_loss) == (None, None, None)
-
-
-def test_mpp_loss_is_the_language_modelling_term_plus_the_weighted_ttnt_term(ttnt_only):
-    ids = t.randint(3, VOCAB - 1, (2, 7))
-    full = ttnt_only(input_ids=ids, labels=ids, hours_to_next_token=t.rand(2, 7) * 5)
-    lm_only = ttnt_only(input_ids=ids, labels=ids)
-
-    assert (full.tte_loss, lm_only.ttnt_loss) == (None, None)
-    assert full.loss.item() == pytest.approx(
-        lm_only.loss.item() + 0.25 * full.ttnt_loss.item(), rel=1e-5
-    )
-
-
-def test_with_a_tte_head_the_loss_adds_both_weighted_terms(mpp_with_tte):
-    ids = t.randint(3, VOCAB - 1, (2, 7))
-    full = mpp_with_tte(
-        input_ids=ids,
-        labels=ids,
-        hours_to_end_time=t.rand(2, 7) * 200,
-        hours_to_next_token=t.rand(2, 7) * 5,
-    )
-    lm_only = mpp_with_tte(input_ids=ids, labels=ids)
-
-    assert full.loss.item() == pytest.approx(
-        lm_only.loss.item() + 0.5 * full.tte_loss.item() + 0.25 * full.ttnt_loss.item(),
-        rel=1e-5,
-    )
-
-
-def test_a_tte_target_without_a_tte_head_is_refused(ttnt_only):
-    """rather than dropped, which would quietly train one head fewer than the
-    caller expects"""
-    with pytest.raises(ValueError, match="without a time-to-event head"):
-        ttnt_only(
-            input_ids=t.randint(3, VOCAB - 1, (2, 7)),
-            hours_to_end_time=t.rand(2, 7) * 200,
-        )
-
-
-def test_the_ttnt_term_is_computed_without_labels(mpp):
-    """reachable from the returned output, as the tte term is, for
-    `Loss.custom_loss` to fold in"""
-    out = mpp(
-        input_ids=t.randint(3, VOCAB - 1, (2, 7)), hours_to_next_token=t.rand(2, 7)
-    )
-    assert (out.loss, out.tte_loss) == (None, None)
-    assert out.get("ttnt_loss") is not None and t.isfinite(out.ttnt_loss)
-
-
-def test_the_ttnt_target_is_the_current_positions_gap(mpp_with_tte):
+def test_the_tnt_target_is_the_current_positions_gap():
     """
     unshifted: position i's target already holds the hours from token i to
     token i+1, so it is scored against the prediction made at i. The trailing
     nan is a record's last token, which has no successor. The tte head is set
-    to a constant 3 to show the term reads `ttnt_head`, not its sibling
+    to a constant 3 to show the term reads the tnt head, not its sibling
     """
-    with t.no_grad():
-        mpp_with_tte.ttnt_head.weight.zero_()
-        mpp_with_tte.ttnt_head.bias.zero_()
-        mpp_with_tte.tte_head.weight.zero_()
-        mpp_with_tte.tte_head.bias.fill_(3.0)
-    hours = t.tensor([[2.0, 0.0, 5.0, NAN]])
-    out = mpp_with_tte(
-        input_ids=t.randint(3, VOCAB - 1, (1, 4)), hours_to_next_token=hours
-    )
+    mdl = build("tte", "tnt")
+    emit(mdl.heads["tnt"], 0.0)
+    emit(mdl.heads["tte"], 3.0)
+    out = mdl(input_ids=ids(1, 4), hours_to_next_token=t.tensor([[2.0, 0.0, 5.0, NAN]]))
 
     unshifted = (t.log1p(t.tensor([2.0, 0.0, 5.0])) ** 2).mean()
     shifted = (t.log1p(t.tensor([0.0, 5.0])) ** 2).mean()
-    assert out.ttnt_loss.item() == pytest.approx(unshifted.item(), rel=1e-5)
+    assert out.tnt_loss.item() == pytest.approx(unshifted.item(), rel=1e-5)
     assert unshifted.item() != pytest.approx(shifted.item(), rel=1e-3)
 
 
-def test_each_time_head_reads_only_its_own_target(mpp_with_tte):
-    ids = t.randint(3, VOCAB - 1, (2, 6))
-    to_end, to_next = t.rand(2, 6) * 100, t.rand(2, 6) * 5
-    both = mpp_with_tte(
-        input_ids=ids, hours_to_end_time=to_end, hours_to_next_token=to_next
-    )
-    blanked = mpp_with_tte(
-        input_ids=ids, hours_to_end_time=to_end, hours_to_next_token=t.full((2, 6), NAN)
-    )
-    assert t.equal(blanked.tte_loss, both.tte_loss)
-    assert blanked.ttnt_loss.item() == 0.0 < both.ttnt_loss.item()
+def test_a_point_head_gives_its_prediction_whatever_comes_next():
+    """all a point head has to give generation -- the reason to train a mixture
+    head for it -- greedy or not"""
+    mdl = build("tnt").eval()
+    hidden = t.randn(3, 32)
+    expected = mdl.heads["tnt"].predict(hidden).expm1()
+    for nxt in (t.tensor([4, 5, 6]), t.tensor([40, 50, 60])):
+        for do_sample in (True, False):
+            hours = mdl.sample_hours_to_next_token(hidden, nxt, do_sample=do_sample)
+            assert t.equal(hours, expected)
 
 
-def test_a_fully_masked_ttnt_batch_still_carries_a_gradient(mpp):
-    """a batch of one-token records has no gap to score anywhere; every
-    parameter still needs a gradient for `ddp_find_unused_parameters: false`"""
-    ids = t.randint(3, VOCAB - 1, (2, 6))
-    targets = {"hours_to_next_token": t.full((2, 6), NAN)}
-    if mpp.tte_head is not None:
-        targets["hours_to_end_time"] = t.rand(2, 6) * 100
-    out = mpp(input_ids=ids, labels=ids, **targets)
-    assert out.ttnt_loss.item() == 0.0 and out.ttnt_loss.requires_grad
-    out.loss.backward()
-    assert all(p.grad is not None for p in mpp.parameters() if p.requires_grad)
-    assert t.isfinite(mpp.ttnt_head.weight.grad).all()
+def test_a_point_head_has_no_distribution_to_give():
+    with pytest.raises(ValueError, match="point estimate"):
+        build("tnt").tnt_distribution(t.zeros(1, 32), t.tensor([3]))
 
 
-def test_the_ttnt_head_learns_the_target():
+def test_without_a_tnt_head_there_are_no_times_to_sample():
+    with pytest.raises(ValueError, match="no time-to-next-token head"):
+        build("tte").sample_hours_to_next_token(t.zeros(1, 32), t.tensor([3]))
+
+
+@pytest.fixture
+def mixture() -> CotorraForCausalLM:
+    return build("tnt", mixture=True)
+
+
+def raw_params(zero_logit, weights, means, raw_scales) -> t.Tensor:
+    """a `TntMixtureHead`'s raw output laid out by hand"""
+    return t.tensor([zero_logit, *weights, *means, *raw_scales])
+
+
+def test_the_mixture_log_prob_matches_its_definition():
+    """zero-inflated: log p0 at an exact zero; otherwise log(1 - p0) plus the
+    gaussian mixture's density at the log-hours"""
     t.manual_seed(0)
-    mdl = mpp_model()
-    ids = t.randint(3, VOCAB - 1, (4, 8))
-    hours = t.rand(4, 8) * 5
+    params = t.randn(4, 1 + 3 * K)
+    hours = t.tensor([0.0, 0.25, 3.0, 100.0])
+    dist = ZeroInflatedLogNormalMixture(params)
+
+    zero_logit, w, mu, raw = params.split([1, K, K, K], dim=-1)
+    gaussians = t.distributions.MixtureSameFamily(
+        t.distributions.Categorical(logits=w),
+        t.distributions.Normal(mu, t.nn.functional.softplus(raw) + 1e-3),
+    )
+    p0 = zero_logit.squeeze(-1).sigmoid()
+    expected = t.where(
+        hours == 0,
+        p0.log(),
+        (1 - p0).log() + gaussians.log_prob(hours.clamp(min=1e-6).log()),
+    )
+    assert t.allclose(dist.log_prob(hours), expected, atol=1e-5)
+
+
+def test_mixture_samples_follow_the_distribution():
+    """a single component, so the positive draws' log-hours are N(mu, sigma)"""
+    p0, mu, sigma = 0.3, math.log(2.0), 0.5
+    raw_scale = math.log(math.expm1(sigma - 1e-3))  # softplus^-1
+    params = raw_params(math.log(p0 / (1 - p0)), [0.0], [mu], [raw_scale])
+    dist = ZeroInflatedLogNormalMixture(params.expand(20_000, -1))
+    draws = dist.sample(t.Generator().manual_seed(0))
+
+    assert (draws >= 0).all()
+    assert (draws == 0).float().mean().item() == pytest.approx(p0, abs=0.02)
+    log_positive = draws[draws > 0].log()
+    assert log_positive.mean().item() == pytest.approx(mu, abs=0.02)
+    assert log_positive.std().item() == pytest.approx(sigma, abs=0.02)
+
+
+def test_sampling_is_reproducible_under_a_generator():
+    dist = ZeroInflatedLogNormalMixture(t.randn(50, 1 + 3 * K))
+    a = dist.sample(t.Generator().manual_seed(7))
+    b = dist.sample(t.Generator().manual_seed(7))
+    assert t.equal(a, b)
+
+
+@pytest.mark.parametrize(
+    "zero_logit, expected", [(1.0, 0.0), (-1.0, 2.0)], ids=["zero", "positive"]
+)
+def test_the_point_estimate_is_zero_when_likelier_else_the_geometric_mean(
+    zero_logit, expected
+):
+    params = raw_params(
+        zero_logit, [0.0, 0.0], [math.log(1.0), math.log(4.0)], [0.0, 0.0]
+    )
+    point = ZeroInflatedLogNormalMixture(params).point_estimate()
+    assert point.item() == pytest.approx(expected, rel=1e-5)
+
+
+def test_the_mixture_head_emits_the_parameters_of_k_components(mixture):
+    assert mixture.heads["tnt"].proj[2].out_features == 1 + 3 * K
+
+
+def test_the_next_token_is_heard_at_the_hidden_states_scale(mixture):
+    """the next token's embedding is normalized before it meets the hidden
+    state, so the head reads it the same whatever its raw scale; left at an
+    init's ~0.02 against the backbone's normed ~1, it went all but unheard"""
+    hidden = t.randn(3, 32)
+    embeds = mixture.get_input_embeddings()(t.tensor([4, 9, 17]))
+    head = mixture.heads["tnt"]
+    quiet, loud = (head.distribution(hidden, c * embeds) for c in (1.0, 100.0))
+    # not exactly equal: layer norm's eps is a few percent of the variance of
+    # embeddings at init scale; unnormalized, the gap is ~1e-2
+    assert t.allclose(quiet.zero_logit, loud.zero_logit, atol=1e-3)
+    assert t.allclose(quiet.means, loud.means, atol=1e-3)
+
+
+def test_the_mixture_distribution_conditions_on_the_next_token(mixture):
+    """position i's gap depends on which token i+1 is, and on nothing later"""
+    x = ids(1, 6)
+    hidden = mixture.model(input_ids=x).last_hidden_state[:, :-1]
+    base = mixture.tnt_distribution(hidden, x[:, 1:])
+
+    swapped = x.clone()
+    swapped[0, 3] = (x[0, 3] + 1 - 3) % (VOCAB - 4) + 3  # token 3 changes
+    hidden2 = mixture.model(input_ids=swapped).last_hidden_state[:, :-1]
+    other = mixture.tnt_distribution(hidden2, swapped[:, 1:])
+    # position 2 conditions on token 3, so it moves; positions before it don't
+    assert not t.allclose(other.zero_logit[0, 2], base.zero_logit[0, 2])
+    assert t.equal(other.zero_logit[0, :2], base.zero_logit[0, :2])
+
+
+def test_the_mixture_loss_is_the_mean_nll_over_usable_targets(mixture):
+    x = ids(2, 6)
+    hours = t.tensor([[0.0, 0.5, NAN, 2.0, 0.0, NAN], [1.0, -1.0, 0.0, 0.0, 3.0, 4.0]])
+    out = mixture(input_ids=x, hours_to_next_token=hours)
+
+    hidden = mixture.model(input_ids=x).last_hidden_state
+    lp = mixture.tnt_distribution(hidden[:, :-1], x[:, 1:]).log_prob(
+        hours[:, :-1].nan_to_num(0.0).clamp(min=0)
+    )
+    usable = t.isfinite(hours[:, :-1]) & (hours[:, :-1] >= 0)
+    assert out.tnt_loss.item() == pytest.approx(-lp[usable].mean().item(), rel=1e-5)
+
+
+def test_the_last_position_is_left_out_having_no_next_token(mixture):
+    """in a packed chunk the true next token lies past the chunk's end"""
+    x = ids(1, 5)
+    a = mixture(input_ids=x, hours_to_next_token=t.tensor([[1.0, 0, 2, 0, 5.0]]))
+    b = mixture(input_ids=x, hours_to_next_token=t.tensor([[1.0, 0, 2, 0, 99.0]]))
+    assert t.equal(a.tnt_loss, b.tnt_loss)
+
+
+def test_scoring_needs_the_input_ids_the_head_conditions_on(mixture):
+    embeds = mixture.get_input_embeddings()(ids(1, 4))
+    with pytest.raises(ValueError, match="needs `input_ids`"):
+        mixture(inputs_embeds=embeds, hours_to_next_token=t.rand(1, 4))
+
+
+def test_the_mixture_head_learns_gaps_that_depend_on_the_next_token():
+    """
+    tokens 20-29 play the quantile tokens that complete an event, arriving at
+    once; 3-19 the events, ~2 hours apart. The sequence is random, so only the
+    next token tells the two apart -- what a point head can't see
+    """
+    mdl = build("tnt", mixture=True)
+    events, quantiles = t.arange(3, 20), t.arange(20, 30)
+
+    def batch(n=16, length=12):
+        is_q = t.rand(n, length) < 0.5
+        x = t.where(
+            is_q,
+            quantiles[t.randint(0, 10, (n, length))],
+            events[t.randint(0, 17, (n, length))],
+        )
+        to_next = t.where(
+            is_q[:, 1:], 0.0, (0.3 * t.randn(n, length - 1) + math.log(2.0)).exp()
+        )
+        return x, t.cat([to_next, t.full((n, 1), NAN)], dim=1)
+
     opt = t.optim.AdamW(mdl.parameters(), lr=1e-2)
+    for _ in range(100):
+        x, hours = batch()
+        loss = mdl(input_ids=x, hours_to_next_token=hours).tnt_loss
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+    mdl.eval()
+    with t.no_grad():
+        hidden = mdl.model(input_ids=batch(n=1)[0]).last_hidden_state[:, -1]
+        to_quantile = mdl.tnt_distribution(hidden, quantiles[:1])
+        to_event = mdl.tnt_distribution(hidden, events[:1])
+    assert to_quantile.zero_logit.sigmoid().item() > 0.95
+    assert to_event.zero_logit.sigmoid().item() < 0.05
+    assert to_event.point_estimate().item() == pytest.approx(2.0, rel=0.25)
+
+
+# ------------------------------------------------------- the disposition head
+
+
+@pytest.fixture
+def disposition() -> CotorraForCausalLM:
+    return build("disposition")
+
+
+def test_disposition_logits_span_the_classes(disposition):
+    out = disposition(input_ids=ids(2, 7))
+    assert disposition.heads["disposition"].classes == CLASSES
+    assert out.disposition_pred.shape == (2, 7, len(CLASSES))
+
+
+def test_the_disposition_loss_is_cross_entropy_over_the_scored_positions(disposition):
+    """unshifted, like the time heads: position i is scored against its own
+    target, and the -100s -- from the disposition token on, and records ending
+    in none of the classes -- leave the mean"""
+    x = ids(2, 5)
+    target = t.tensor([[2, 2, 2, -100, -100], [0, 0, 0, 0, -100]])
+    out = disposition(input_ids=x, disposition=target)
+
+    logits = out.disposition_pred.float()
+    scored = target != -100
+    expected = t.nn.functional.cross_entropy(logits[scored], target[scored])
+    assert out.disposition_loss.item() == pytest.approx(expected.item(), rel=1e-5)
+
+
+def test_the_disposition_head_learns_how_records_end(disposition):
+    """each record's tokens come from a range its disposition picks, so every
+    position has what it needs to tell -- and the head has to learn to"""
+
+    def batch(n=16, length=10):
+        cls = t.randint(0, len(CLASSES), (n, 1))
+        x = 10 + 15 * cls + t.randint(0, 15, (n, length))
+        return x, cls.expand(n, length)
+
+    opt = t.optim.AdamW(disposition.parameters(), lr=1e-2)
     first = None
-    for _ in range(40):
-        loss = mdl(input_ids=ids, hours_to_next_token=hours).ttnt_loss
+    for _ in range(60):
+        x, target = batch()
+        loss = disposition(input_ids=x, disposition=target).disposition_loss
         first = loss.item() if first is None else first
         opt.zero_grad()
         loss.backward()
         opt.step()
-    assert loss.item() < first / 2
+
+    x, target = batch()
+    with t.no_grad():
+        pred = disposition(input_ids=x).disposition_pred.argmax(dim=-1)
+    assert loss.item() < first / 4
+    assert (pred == target).float().mean().item() > 0.9
 
 
-# --------------------------------------------------------- mpp integration
+# --------------------------------------------------------------- integration
+
+# one variant of each head on its own, and all three at once
+TRAINER_VARIANTS = [
+    (("tte",), False),
+    (("tnt",), False),
+    (("tnt",), True),
+    (("disposition",), False),
+    (tuple(HEADS), True),
+]
 
 
-def mpp_batch(n_vocab: int, seq_len: int = 8, n: int = 2) -> list[dict]:
-    """rows as `Loader.get_train_data` yields them with both time objectives
+def rows(n_vocab: int, n_classes: int, seq_len: int = 8, n: int = 2) -> list[dict]:
+    """rows as `Loader.get_train_data` yields them with every objective
     configured; the collator picks out the ones its config asks for"""
     return [
         {
@@ -736,33 +873,55 @@ def mpp_batch(n_vocab: int, seq_len: int = 8, n: int = 2) -> list[dict]:
             "s_elapsed": t.arange(seq_len, dtype=t.float32) * 300,
             "hours_to_end_time": t.rand(seq_len) * 100,
             "hours_to_next_token": t.rand(seq_len),
+            "disposition": t.randint(0, n_classes, (seq_len,)).index_fill(
+                0, t.tensor([seq_len - 1]), -100
+            ),
         }
         for _ in range(n)
     ]
 
 
-@pytest.fixture(params=[False, True], ids=["ttnt_only", "with_tte"])
-def mpp_trainer(request, built_trainer, monkeypatch):
-    """`built_trainer` configured for an `mpp` model, without and with the
-    time-to-event objective alongside"""
-    monkeypatch.setitem(built_trainer.cfg, "mpp_objective", {"ttnt_weight": 0.25})
-    if request.param:
-        monkeypatch.setitem(
-            built_trainer.cfg, "tte_aware_objective", {"tte_weight": 0.5}
-        )
+@pytest.fixture(params=TRAINER_VARIANTS, ids=[variant_id(v) for v in TRAINER_VARIANTS])
+def configured(request, built_trainer, monkeypatch):
+    """`built_trainer` with the variant's objectives in its config, and what
+    `Trainer.__init__` reads off them derived again"""
+    names, mixture = request.param
+    for name in names:
+        block = {"weight": OPTIONS[name]["weight"]}
+        if name == "tnt" and mixture:
+            block["mixture_components"] = K
+        monkeypatch.setitem(built_trainer.cfg, f"{name}_objective", block)
+    lookup = built_trainer.tkzr_cfg.lookup
+    monkeypatch.setattr(
+        built_trainer, "head_options", head_options(built_trainer.cfg, lookup)
+    )
+    loss = Loss(built_trainer.cfg, built_trainer.tkzr_cfg).custom_loss
+    monkeypatch.setattr(built_trainer, "loss", loss)
+    monkeypatch.setattr(built_trainer.trainer, "compute_loss_func", loss)
     return built_trainer
 
 
-def test_model_init_builds_an_mpp_model_from_its_objective(mpp_trainer):
-    """with a time-to-event head exactly when `tte_aware_objective` is set
-    too, weighted as that block says"""
-    mdl = mpp_trainer.model_init()
-    tkzr = mpp_trainer.tkzr_cfg
-    tte = "tte_aware_objective" in mpp_trainer.cfg
-    assert type(mdl) is MppForCausalLM
-    assert (mdl.tte_head is not None) == tte
-    assert mdl.config.tte_weight == (0.5 if tte else None)
-    assert mdl.config.ttnt_weight == 0.25
+def n_classes(trainer) -> int:
+    return len(trainer.head_options.get("disposition", {}).get("classes", [None]))
+
+
+def test_model_init_builds_a_plain_backbone_without_objectives(built_trainer):
+    assert built_trainer.head_options == {}
+    assert not isinstance(built_trainer.model_init(), CotorraForCausalLM)
+
+
+def test_model_init_builds_the_heads_the_objectives_ask_for(configured):
+    """`Trainer.model_init` is the only place the pipeline builds a model, so
+    the blocks have to reach it, each head weighted as its block says"""
+    mdl = configured.model_init()
+    tkzr = configured.tkzr_cfg
+    assert type(mdl) is CotorraForCausalLM
+    assert mdl.config.heads == configured.head_options
+    assert all(mdl.heads[name].weight == OPTIONS[name]["weight"] for name in mdl.heads)
+    if "disposition" in mdl.heads:
+        assert mdl.heads["disposition"].classes == sorted(
+            (k for k in tkzr.lookup if k.startswith("DSCG//")), key=tkzr.lookup.get
+        )
     assert mdl.config.vocab_size == len(tkzr.lookup)
     assert (mdl.config.bos_token_id, mdl.config.eos_token_id) == (
         tkzr.lookup.BOS,
@@ -770,26 +929,27 @@ def test_model_init_builds_an_mpp_model_from_its_objective(mpp_trainer):
     )
 
 
-@pytest.mark.parametrize("tte", [False, True], ids=["ttnt_only", "with_tte"])
-def test_empty_blocks_still_build_their_heads(built_trainer, monkeypatch, tte):
+def test_empty_blocks_still_build_their_heads(built_trainer, monkeypatch):
     """a block left empty in the yaml parses to None; every weight defaults to
-    1.0"""
-    monkeypatch.setitem(built_trainer.cfg, "mpp_objective", None)
-    if tte:
-        monkeypatch.setitem(built_trainer.cfg, "tte_aware_objective", None)
+    1.0 and the disposition classes to every `DSCG//*` token"""
+    for name in HEADS:
+        monkeypatch.setitem(built_trainer.cfg, f"{name}_objective", None)
+    opts = head_options(built_trainer.cfg, built_trainer.tkzr_cfg.lookup)
+    monkeypatch.setattr(built_trainer, "head_options", opts)
     mdl = built_trainer.model_init()
-    assert type(mdl) is MppForCausalLM
-    assert mdl.config.tte_weight == (1.0 if tte else None)
-    assert mdl.config.ttnt_weight == 1.0
+    assert list(mdl.heads) == list(HEADS)
+    assert all(head.weight == 1.0 for head in mdl.heads.values())
+    assert isinstance(mdl.heads["tnt"], TntPointHead)
+    assert all(c.startswith("DSCG//") for c in mdl.heads["disposition"].classes)
 
 
-def test_a_tte_weight_under_mpp_objective_is_refused(processed, tmp_path):
-    """that weight belongs under `tte_aware_objective`; left where it is, it
-    would build a time-to-event head that nothing loads a target for"""
+def test_an_objective_naming_no_head_is_refused(processed, tmp_path):
+    """an `mpp_objective` left over from an earlier layout would otherwise
+    train a plain backbone without a word"""
     from cotorra.trainer import Trainer
 
-    cfg = base_training_cfg(mpp_objective={"tte_weight": 1.0, "ttnt_weight": 1.0})
-    with pytest.raises(ValueError, match="add a `tte_aware_objective` block"):
+    cfg = base_training_cfg(mpp_objective={"tnt_weight": 1.0})
+    with pytest.raises(ValueError, match="mpp_objective"):
         Trainer(
             training_cfg=write_cfg(tmp_path / "training.yaml", cfg),
             processed_data_home=processed,
@@ -797,70 +957,79 @@ def test_a_tte_weight_under_mpp_objective_is_refused(processed, tmp_path):
         )
 
 
-def test_an_mpp_model_consumes_what_the_trainers_collator_produces(mpp_trainer):
-    tte = "tte_aware_objective" in mpp_trainer.cfg
-    n_vocab = len(mpp_trainer.tkzr_cfg.lookup)
-    collated = mpp_trainer.collate_fn(mpp_batch(n_vocab, seq_len=4))
-    assert set(collated) == {
-        "input_ids",
-        "labels",
-        "position_ids",
-        "hours_to_next_token",
-    } | ({"hours_to_end_time"} if tte else set())
+def test_the_model_consumes_what_the_trainers_collator_produces(configured):
+    """
+    the contract between `Trainer.collate_fn` and the model: the batch carries
+    float `position_ids` (time-based rope) and each configured head's target,
+    and nothing else is needed
+    """
+    n_vocab = len(configured.tkzr_cfg.lookup)
+    collated = configured.collate_fn(rows(n_vocab, n_classes(configured), 4))
+    assert set(collated) == {"input_ids", "labels", "position_ids"} | {
+        HEADS[name].target for name in configured.head_options
+    }
 
-    out = mpp_trainer.model_init()(**collated)
-    assert out.ttnt_pred.shape == (2, 4)
-    terms = [out.loss, out.ttnt_loss] + ([out.tte_loss] if tte else [])
-    assert all(t.isfinite(x) for x in terms)
+    out = configured.model_init()(**collated)
+    assert out.logits.shape == (2, 4, n_vocab)
+    assert t.isfinite(out.loss)
+    assert all(
+        t.isfinite(getattr(out, f"{name}_loss")) for name in configured.head_options
+    )
 
 
-def test_the_custom_loss_path_reaches_every_head(mpp_trainer):
-    """`Loss.custom_loss` owns the whole objective on this path, so it is the
-    one that has to fold in each time term"""
-    assert mpp_trainer.trainer.compute_loss_func is not None  # `custom_loss: true`
+def test_the_custom_loss_path_reaches_every_head(configured):
+    """
+    `TrainerWithCustomLoss.compute_loss` pops `labels`, so the model's own
+    weighted sum is never formed and `Loss.custom_loss` owns the whole
+    objective; a head whose term it dropped would take no gradient at all --
+    and DDP, configured with `ddp_find_unused_parameters: false`, would refuse
+    the step
+    """
+    assert configured.trainer.compute_loss_func is not None  # `custom_loss: true`
+    mdl = configured.model_init()
+    n_vocab = len(configured.tkzr_cfg.lookup)
+    batch = configured.collate_fn(rows(n_vocab, n_classes(configured)))
+    configured.trainer.compute_loss(mdl, batch).backward()
 
-    mdl = mpp_trainer.model_init()
-    batch = mpp_trainer.collate_fn(mpp_batch(len(mpp_trainer.tkzr_cfg.lookup)))
-    mpp_trainer.trainer.compute_loss(mdl, batch).backward()
-
-    for head in (h for h in (mdl.tte_head, mdl.ttnt_head) if h is not None):
-        assert t.isfinite(head.weight.grad).all()
-        assert head.weight.grad.abs().max().item() > 0
+    for name, head in mdl.heads.items():
+        grads = [p.grad for p in head.parameters()]
+        assert all(g is not None and t.isfinite(g).all() for g in grads), name
+        assert max(g.abs().max().item() for g in grads) > 0, name
     assert all(p.grad is not None for p in mdl.parameters() if p.requires_grad)
 
 
 @pytest.mark.slow
-def test_a_real_training_step_updates_every_head(mpp_trainer, tmp_path):
-    """on both the stock-loss and cotorra's own `custom_loss` paths"""
+def test_a_real_training_step_updates_every_head(configured, tmp_path):
+    """the model driven by cotorra's own `TrainerWithCustomLoss`, on both the
+    stock-loss and `custom_loss` paths"""
     from transformers import TrainingArguments
 
     from cotorra.trainer import TrainerWithCustomLoss
 
-    n_vocab = len(mpp_trainer.tkzr_cfg.lookup)
-    dataset = mpp_batch(n_vocab, seq_len=mpp_trainer.cfg.max_seq_len, n=8)
+    n_vocab = len(configured.tkzr_cfg.lookup)
+    dataset = rows(n_vocab, n_classes(configured), configured.cfg.max_seq_len, n=8)
 
-    for compute_loss_func in (None, mpp_trainer.loss):
+    for compute_loss_func in (None, configured.loss):
         t.manual_seed(0)
-        model = mpp_trainer.model_init()
+        model = configured.model_init()
         before = {
-            name: head.weight.detach().cpu().clone()
-            for name, head in (
-                ("tte_head", model.tte_head),
-                ("ttnt_head", model.ttnt_head),
-            )
-            if head is not None
+            name: [p.detach().cpu().clone() for p in head.parameters()]
+            for name, head in model.heads.items()
         }
         trainer = TrainerWithCustomLoss(
             model=model,
-            data_collator=mpp_trainer.collate_fn,
+            data_collator=configured.collate_fn,
             compute_loss_func=compute_loss_func,
             train_dataset=dataset,
             args=TrainingArguments(
                 output_dir=str(tmp_path),
-                **{**mpp_trainer.cfg.training_args, "learning_rate": 1e-2},
+                **{**configured.cfg.training_args, "learning_rate": 1e-2},
             ),
         )
         trainer.train()
-        for name, weight in before.items():
-            moved = (getattr(model, name).weight.detach().cpu() - weight).abs().max()
-            assert moved.item() > 0, f"{name} never updated with {compute_loss_func=}"
+        for name, params in before.items():
+            moved = max(
+                (now.detach().cpu() - then).abs().max().item()
+                for now, then in zip(model.heads[name].parameters(), params)
+            )
+            assert moved > 0, f"{name} head never updated with {compute_loss_func=}"

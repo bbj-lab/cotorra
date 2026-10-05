@@ -6,6 +6,7 @@ train a model
 
 import os
 import pathlib
+import warnings
 
 import torch as t
 from omegaconf import OmegaConf
@@ -15,7 +16,7 @@ from transformers import Trainer as t_Trainer
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
 from cotorra.loss import Loss
-from cotorra.model import MppConfig, TteAwareConfig
+from cotorra.model import HEADS, CotorraConfig, head_options
 
 
 class TrainerWithCustomLoss(t_Trainer):
@@ -29,6 +30,13 @@ class TrainerWithCustomLoss(t_Trainer):
             labels = inputs.pop("labels", None)
             outputs = model(**inputs)
             loss = self.compute_loss_func(outputs, labels)
+            if model.training:
+                # with a custom loss set, hf's `training_step` leaves averaging
+                # over gradient accumulation to it -- which a per-batch mean
+                # doesn't do -- so the accumulated micro-batches would sum; this
+                # is the division hf's stock path makes (set only inside its
+                # training loop, hence the default)
+                loss = loss / getattr(self, "current_gradient_accumulation_steps", 1)
             return (loss, outputs) if return_outputs else loss
         else:
             return super().compute_loss(model, inputs, return_outputs, **kwargs)
@@ -49,19 +57,25 @@ class Trainer(Configurable):
         **kwargs,
     ):
         super().__init__(training_cfg, **kwargs)
-        if "tte_weight" in (self.cfg.get("mpp_objective") or {}):
-            raise ValueError(
-                "`mpp_objective` configures only the time-to-next-token head; to "
-                "train a time-to-event head alongside it, add a "
-                "`tte_aware_objective` block, which is where its `tte_weight` goes"
+        if "label_weighted_loss" in self.cfg:
+            # a FutureWarning, which python shows by default, rather than a
+            # DeprecationWarning, which it hides unless raised from `__main__`
+            warnings.warn(
+                "`label_weighted_loss` is deprecated: weighting the cross-entropy by "
+                "its target makes the model predict those tokens more often. Use "
+                "`balanced_toi_loss` instead, which takes the same "
+                "`tokens_of_interest` and weights its term by `bce_weight`",
+                FutureWarning,
+                stacklevel=2,
             )
-
         self.processed_data_home, self.output_home = map(
             lambda p: pathlib.Path(p).expanduser().resolve(),
             [processed_data_home, output_home],
         )
 
         self.tkzr_cfg = OmegaConf.load(self.processed_data_home / "tokenizer.yaml")
+        # one `<name>_objective` block per secondary head, in any combination
+        self.head_options = head_options(self.cfg, self.tkzr_cfg.lookup)
         self.loss = (
             Loss(self.cfg, self.tkzr_cfg).custom_loss if self.cfg.custom_loss else None
         )
@@ -94,30 +108,15 @@ class Trainer(Configurable):
         config = AutoConfig.from_pretrained(
             self.cfg.model.model_name, **conf_param, **self.cfg.model.model_args
         )
-        # each block doubles as its head's own config, so the weights written in
-        # the training yaml are the ones both this model and `Loss` use
-        if "mpp_objective" in self.cfg:
-            config = MppConfig(
-                text_config=config,
-                **(self.cfg.mpp_objective or {}),
-                # the time-to-event head is built only when its objective is set
-                **(
-                    {"tte_weight": 1.0, **(self.cfg.tte_aware_objective or {})}
-                    if "tte_aware_objective" in self.cfg
-                    else {}
-                ),
-            )
-        elif "tte_aware_objective" in self.cfg:
-            config = TteAwareConfig(
-                text_config=config, **(self.cfg.tte_aware_objective or {})
-            )
+        if self.head_options:
+            config = CotorraConfig(text_config=config, heads=self.head_options)
         mdl = AutoModelForCausalLM.from_config(config)
         self.logger.info(
             "Loaded model {name} with {num} params ({dtype}).".format(
                 name="{}{}".format(
                     self.cfg.model.model_name,
-                    f" ({config.model_type})"
-                    if isinstance(config, TteAwareConfig)
+                    f" (with {', '.join(self.head_options)} heads)"
+                    if self.head_options
                     else "",
                 ),
                 num=sum(p.numel() for p in mdl.parameters()),
@@ -137,14 +136,9 @@ class Trainer(Configurable):
             )
             p_ids += t.arange(p_ids.shape[-1], device=p_ids.device, dtype=p_ids.dtype)
             f_set["position_ids"] = p_ids
-        if "tte_aware_objective" in self.cfg:
-            f_set["hours_to_end_time"] = t.stack(
-                [x["hours_to_end_time"] for x in batch]
-            )
-        if "mpp_objective" in self.cfg:
-            f_set["hours_to_next_token"] = t.stack(
-                [x["hours_to_next_token"] for x in batch]
-            )
+        for name in self.head_options:
+            target = HEADS[name].target
+            f_set[target] = t.stack([x[target] for x in batch])
         return f_set
 
     def train(self, resume_from_checkpoint: bool = False, verbose: bool = False):

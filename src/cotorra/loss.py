@@ -6,12 +6,14 @@ note this code only runs when configured with `custom_loss: !!bool true`
 """
 
 import fnmatch
+import re
 
 import numpy as np
 import torch as t
 
 import wandb
 from cotorra.logger import Logger
+from cotorra.model import HEADS, head_options
 
 
 class Loss:
@@ -23,7 +25,10 @@ class Loss:
             sorted(self.tkzr_cfg.lookup, key=self.tkzr_cfg.lookup.get)
         )
         self.logger = Logger()
+        self.heads = head_options(self.cfg, self.tkzr_cfg.lookup)
 
+        # deprecated -- `Trainer` warns -- but still honored, so the configs that
+        # use it train as they always did
         if "label_weighted_loss" in self.cfg:
             self.grokked_outcome_tokens = [
                 x.item()
@@ -44,47 +49,86 @@ class Loss:
             )
 
         if "quantile_token_loss" in self.cfg:
-            self.q_type = np.array(
-                [
-                    v.endswith(tuple(f"_Q{i}" for i in range(self.tkzr_cfg.cfg.n_bins)))
-                    for v in self.vocab
-                ]
-            )
-            self.qt_cats, self.qt_vals = map(
-                np.array,
-                zip(*np.char.rsplit(self.vocab[self.q_type], sep="Q", maxsplit=1)),
-            )
-            self.qt_nums = (
-                t.tensor(self.qt_vals.astype(int) + 0.5) / self.tkzr_cfg.cfg.n_bins
-            ).to(dtype=t.float32)
-            self.label_to_q = t.full((len(self.vocab),), float("nan"))
-            self.label_to_q[self.q_type] = self.qt_nums
+            n_bins = self.tkzr_cfg.cfg.n_bins
+            # cocoa fuses a bin onto its code (`LAB//sodium_Q3`) or, unfused, emits
+            # a bare `Q3` after it; the bare bins then form a single category, the
+            # code they belong to being the token before them
+            bins = {
+                i: (m["code"] or "", int(m["q"]))
+                for tok, i in self.tkzr_cfg.lookup.items()
+                if (m := re.fullmatch(r"(?:(?P<code>.*)_)?Q(?P<q>\d+)", tok))
+                and int(m["q"]) < n_bins
+            }
+            codes = sorted({code for code, _ in bins.values()})
+            self.n_cats: int = len(codes)
+            if not self.n_cats:
+                self.logger.warning(
+                    "`quantile_token_loss` is configured but the vocabulary holds no "
+                    "quantile tokens, so the term is always zero"
+                )
+            # row c holds the token id of each of category c's bins, -1 where the
+            # vocabulary lacks one (tied breaks skip bins, as can winnowing)
+            self.qt_table = t.full((self.n_cats, n_bins), -1)
             self.label_to_cat = t.full((len(self.vocab),), -1)
-            self.label_to_cat[self.q_type] = t.tensor(
-                np.unique(self.qt_cats, return_inverse=True)[1]
-            )
-            self.n_cats: int = self.label_to_cat.max().item() + 1
+            # each bin stands for the midpoint of its slice of the quantile scale;
+            # a non-quantile token gets 0 rather than nan, which would poison the
+            # gradient through the `t.where` that masks it out
+            self.qt_vals = (t.arange(n_bins, dtype=t.float32) + 0.5) / n_bins
+            self.label_to_q = t.zeros(len(self.vocab))
+            for i, (code, q) in bins.items():
+                self.qt_table[codes.index(code), q] = i
+                self.label_to_cat[i] = codes.index(code)
+                self.label_to_q[i] = self.qt_vals[q]
+
+        if "balanced_toi_loss" in self.cfg:
+            patterns = (self.cfg.balanced_toi_loss or {}).get("tokens_of_interest", [])
+            matched = [
+                x.item()
+                for x in self.vocab
+                if any(fnmatch.fnmatch(x, p) for p in patterns)
+            ]
+            if not 0 < len(matched) < len(self.vocab):
+                raise ValueError(
+                    "`balanced_toi_loss.tokens_of_interest` has to match some of the "
+                    f"vocabulary but not all of it; {list(patterns)!r} matched "
+                    f"{len(matched)} of {len(self.vocab)} tokens"
+                )
+            self.logger.info(f"Processed expressions to generate {matched=}")
+            self.balanced_toi_flag = t.zeros(len(self.vocab), dtype=t.bool)
+            self.balanced_toi_flag[[self.tkzr_cfg.lookup[x] for x in matched]] = True
 
     def quantile_token_loss(self, outputs, labels, **kwargs):
-        shift_logits = outputs.get("logits")[:, :-1].contiguous()
-        shift_labels = labels[:, 1:].contiguous()
-        # a tensor rather than a bare 0.0: a batch need not contain any
-        # quantile token at all, and `custom_loss` calls `.item()` on this
-        loss = t.zeros((), device=shift_logits.device, dtype=t.float32)
-        for i in range(self.n_cats):
-            mask = self.label_to_cat.to(device=labels.device)[shift_labels] == i
-            if not mask.any():
-                continue
-            cat_labels = shift_labels[mask]
-            cat_logits = shift_logits[mask][:, self.label_to_cat == i].to(
-                dtype=t.float32
-            )
-            cat_preds = t.softmax(cat_logits, dim=-1) @ (
-                self.label_to_q[self.label_to_cat == i]
-            ).to(device=cat_logits.device, dtype=t.float32)
-            cat_true = self.label_to_q.to(device=cat_labels.device)[cat_labels]
-            loss += t.nn.MSELoss()(cat_preds, cat_true).to(dtype=t.float32)
-        return loss
+        """
+        squared error between the bin midpoint the model expects for a quantile
+        token, from its softmax over that code's bins alone, and the midpoint of
+        the bin that came, averaged over quantile tokens. Cross-entropy counts Q9
+        for a true Q3 as no worse than Q4; this teaches the model the bins are
+        ordered. It squares the error of the expected bin, not the expected
+        squared error, which would reward piling mass onto one bin, so the true
+        distribution still minimizes cross-entropy plus this term; and confined
+        to a code's bins, it moves mass among them without making the code
+        likelier
+        """
+        logits = outputs.get("logits")[:, :-1]
+        # a tensor rather than a bare 0.0, since `custom_loss` calls `.item()`
+        if not self.n_cats:
+            return t.zeros((), device=logits.device, dtype=t.float32)
+        shift_labels = labels[:, 1:].to(logits.device)
+        cat = self.label_to_cat.to(logits.device)[shift_labels]
+        is_q = cat >= 0
+        # gathered at every position, so no shape depends on the data and nothing
+        # waits on the host; a position without a quantile token borrows category
+        # 0's bins and drops out in the `t.where`
+        ids = self.qt_table.to(logits.device)[cat.clamp(min=0)]
+        bin_logits = (
+            logits.gather(-1, ids.clamp(min=0))
+            .to(dtype=t.float32)
+            .masked_fill(ids < 0, -t.inf)
+        )
+        pred = bin_logits.softmax(dim=-1) @ self.qt_vals.to(logits.device)
+        true = self.label_to_q.to(logits.device)[shift_labels]
+        sq_err = t.where(is_q, (pred - true) ** 2, 0.0)
+        return sq_err.sum() / is_q.sum().clamp(min=1)
 
     def label_weighted_loss(self, outputs, labels, **kwargs):
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
@@ -96,6 +140,25 @@ class Loss:
             dtype=t.float32
         )
 
+    def balanced_toi_loss(self, outputs, labels, **kwargs):
+        """
+        binary cross-entropy on whether the next token is a token of interest,
+        scored with the total probability the softmax puts on those tokens. A
+        proper scoring rule -- minimized by the true probability, as
+        cross-entropy itself is -- so adding it makes getting those tokens right
+        count for more without making them likelier, which the deprecated
+        `label_weighted_loss` (cross-entropy weighted by its target) did. Both
+        sides come straight from the logits, so neither degrades to
+        `log(1 - p)` as the other nears certainty
+        """
+        logits = outputs.get("logits")[:, :-1].to(dtype=t.float32)
+        flag = self.balanced_toi_flag.to(logits.device)
+        is_toi = flag[labels[:, 1:].to(logits.device)]
+        lse_toi = logits[..., flag].logsumexp(dim=-1)
+        lse_rest = logits.masked_fill(flag, -t.inf).logsumexp(dim=-1)
+        lse_all = t.logaddexp(lse_toi, lse_rest)
+        return -t.where(is_toi, lse_toi - lse_all, lse_rest - lse_all).mean()
+
     def x_ent_loss(self, outputs, labels, **kwargs):
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
         shift_logits = logits[:, :-1, :].contiguous()
@@ -104,32 +167,20 @@ class Loss:
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
         ).to(dtype=t.float32)
 
-    def tte_loss(self, outputs, **kwargs):
-        """the time-to-event term, which `TteAwareForCausalLM` computes itself --
-        it owns the head -- and hands back alongside the logits. It gets folded
-        into the objective here rather than in the model because
-        `TrainerWithCustomLoss` pops `labels` before the forward call, so the
-        model's own `loss + tte_weight * tte_loss` is never formed"""
-        if (tte_loss := outputs.get("tte_loss")) is None:
+    def head_loss(self, outputs, name: str):
+        """a secondary head's term, which the model computes itself -- it owns the
+        head -- and hands back alongside the logits. It gets folded into the
+        objective here rather than in the model because `TrainerWithCustomLoss`
+        pops `labels` before the forward call, so the model's own weighted sum
+        is never formed"""
+        if (loss := outputs.get(f"{name}_loss")) is None:
             raise ValueError(
-                "`tte_aware_objective` is configured but the model returned no "
-                "`tte_loss`: the term needs a model with a time-to-event head "
+                f"`{name}_objective` is configured but the model returned no "
+                f"`{name}_loss`: the term needs a model carrying a `{name}` head "
                 "(what `Trainer.model_init` builds when the block is present) fed "
-                "a batch carrying `hours_to_end_time`"
+                f"a batch carrying `{HEADS[name].target}`"
             )
-        return tte_loss.to(dtype=t.float32)
-
-    def ttnt_loss(self, outputs, **kwargs):
-        """the time-to-next-token term, handed back by `MppForCausalLM` and
-        folded in here for the same reason as `tte_loss`"""
-        if (ttnt_loss := outputs.get("ttnt_loss")) is None:
-            raise ValueError(
-                "`mpp_objective` is configured but the model returned no "
-                "`ttnt_loss`: the term needs an `mpp` model (what "
-                "`Trainer.model_init` builds when the block is present) fed a "
-                "batch carrying `hours_to_next_token`"
-            )
-        return ttnt_loss.to(dtype=t.float32)
+        return loss.to(dtype=t.float32)
 
     def custom_loss(self, outputs, labels, **kwargs):
         loss = 0.0
@@ -142,22 +193,19 @@ class Loss:
             x_ent_loss = self.x_ent_loss(outputs, labels)
             log |= {"x_ent_loss": x_ent_loss.item()}
             loss += x_ent_loss
+        if "balanced_toi_loss" in self.cfg:
+            balanced_toi_loss = self.balanced_toi_loss(outputs, labels)
+            log |= {"balanced_toi_loss": balanced_toi_loss.item()}
+            bce_weight = self.cfg.balanced_toi_loss.get("bce_weight", 1.0)
+            loss += bce_weight * balanced_toi_loss
         if "quantile_token_loss" in self.cfg:
             quantile_token_loss = self.quantile_token_loss(outputs, labels)
             log |= {"quantile_token_loss": quantile_token_loss.item()}
             loss += self.cfg.quantile_token_loss.qt_weight * quantile_token_loss
-        # each weight defaults, as `TteAwareConfig`/`MppConfig` do, to 1.0; a
-        # block left empty in the yaml parses to None
-        if "tte_aware_objective" in self.cfg:
-            tte_loss = self.tte_loss(outputs)
-            log |= {"tte_loss": tte_loss.item()}
-            tte_weight = (self.cfg.tte_aware_objective or {}).get("tte_weight", 1.0)
-            loss += tte_weight * tte_loss
-        if "mpp_objective" in self.cfg:
-            ttnt_loss = self.ttnt_loss(outputs)
-            log |= {"ttnt_loss": ttnt_loss.item()}
-            ttnt_weight = (self.cfg.mpp_objective or {}).get("ttnt_weight", 1.0)
-            loss += ttnt_weight * ttnt_loss
+        for name, options in self.heads.items():
+            head_loss = self.head_loss(outputs, name)
+            log |= {f"{name}_loss": head_loss.item()}
+            loss += options["weight"] * head_loss
         if wandb.run is not None:
             log |= {"custom_loss": loss.item()}
             wandb.log(log)
