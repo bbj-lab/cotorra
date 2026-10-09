@@ -22,9 +22,17 @@ class Tuner(Trainer):
             ),
         }
 
+    @staticmethod
+    def compute_objective(metrics: dict[str, float]) -> float:
+        # hf's default sums every metric once there's more than `eval_loss`, and
+        # evaluation reports each of the custom loss's terms beside it
+        return metrics["eval_loss"]
+
     def train(self, verbose=False):
         best_trial = self.trainer.hyperparameter_search(
-            hp_space=self.optuna_hp_space, **self.cfg.tuning_args
+            hp_space=self.optuna_hp_space,
+            compute_objective=self.compute_objective,
+            **self.cfg.tuning_args,
         )
         for n, v in best_trial.hyperparameters.items():
             setattr(self.trainer.args, n, v)

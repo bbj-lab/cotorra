@@ -272,6 +272,8 @@ def test_each_estimator_value_selects_its_own_estimator(
     assert ("eval_set" in fit_spy["fit_kwargs"]) == (
         estimator_type in EVAL_SET_ESTIMATORS
     )
+    # xgboost's `fit` no longer takes `eval_metric`; it raises a TypeError
+    assert ("eval_metric" in fit_spy["fit_kwargs"]) == (estimator_type == "lightGBM")
 
 
 def test_an_estimator_type_member_silently_falls_back_to_lightgbm(

@@ -57,7 +57,7 @@ def test_for_inference_carries_tokens_past_and_paired_label_columns(processed, s
 def test_every_token_id_is_within_the_tokenizer_vocabulary(processed, tokenizer_cfg):
     ids = (
         pl.read_parquet(processed / "tokens_times.parquet")
-        .select(pl.col("tokens").explode())
+        .select(pl.col("tokens").explode(empty_as_null=False))
         .to_series()
     )
     assert ids.min() >= 0

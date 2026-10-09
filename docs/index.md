@@ -16,8 +16,7 @@ hide:
     ***
 
     Fit a causal LM to predict the next token in each subject's timeline —
-    optionally with custom losses, time-aware RoPE, differential privacy, or
-    hyperparameter tuning.
+    optionally with custom losses, time-aware RoPE, or hyperparameter tuning.
 
     [:octicons-arrow-right-24: Training](#1-training)
 

@@ -30,6 +30,18 @@ def test_optuna_hp_space_only_suggests_keys_training_arguments_accepts():
         )
 
 
+def test_the_search_minimizes_the_eval_loss_alone():
+    """not hf's default objective, which sums every metric evaluation reports
+    once there's more than `eval_loss`, as there is with the custom loss's terms"""
+    metrics = {
+        "eval_loss": 3.0,
+        "eval_x_ent_loss": 2.0,
+        "eval_quantile_token_loss": 0.02,
+        "epoch": 1.0,
+    }
+    assert Tuner.compute_objective(metrics) == 3.0
+
+
 def test_tuner_inherits_the_trainer_wiring(processed, tmp_path_factory):
     """`Tuner` only adds the search; model/loss/collator must be the same"""
     cfg_path = write_cfg(

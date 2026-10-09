@@ -9,10 +9,33 @@ import pathlib
 import datasets as ds
 import numpy as np
 import polars as pl
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from cotorra.configurable import Configurable
+from cotorra.model import HEADS, head_options
 from cotorra.util import batched_iter
+
+
+def disposition_targets(input_ids, class_of: dict[int, int]) -> np.ndarray:
+    """
+    each token's target for a disposition head: the class of its record's last
+    disposition token -- `class_of` maps each such token's id to its class -- for
+    every token before it, and -100, unscored, from it on, the disposition no
+    longer being to come. A record with none of those tokens goes unscored
+    """
+    ids = np.asarray(input_ids)
+    hits = np.flatnonzero(np.isin(ids, list(class_of)))
+    target = np.full(len(ids), -100, dtype=np.int64)
+    if len(hits):
+        target[: hits[-1]] = class_of[int(ids[hits[-1]])]
+    return target
+
+
+def label_dispositions(batch: dict, class_of: dict[int, int]) -> dict:
+    """`disposition_targets` for a batch of records, as `datasets.map` takes it"""
+    return {
+        "disposition": [disposition_targets(x, class_of) for x in batch["input_ids"]]
+    }
 
 
 class Loader(Configurable):
@@ -24,7 +47,7 @@ class Loader(Configurable):
 
     def __init__(
         self,
-        training_cfg: pathlib.Path | str = None,
+        training_cfg: pathlib.Path | str | DictConfig = None,
         processed_data_home: pathlib.Path = None,
     ):
         super().__init__(training_cfg)
@@ -34,6 +57,7 @@ class Loader(Configurable):
             self.processed_data_home / "tokenizer.yaml"
         )
         self.splits: tuple = ("train", "tuning", "held_out")
+        self.heads = head_options(self.cfg, self.tokenizer_info.lookup)
 
         tt_all = self.processed_data_home / "tokens_times.parquet"
         assert tt_all.is_file(), FileNotFoundError(
@@ -44,17 +68,32 @@ class Loader(Configurable):
             s: self.processed_data_home / f"{s}_tokens_times.parquet"
             for s in self.splits
         }
-        if not all(s.is_file() for s in tt_split.values()) or any(
-            tt_all.stat().st_mtime > s.stat().st_mtime for s in tt_split.values()
-        ):  # pull out training and tuning sets if not already done
-            # or if tokens have been updated
+        if (
+            not all(s.is_file() for s in tt_split.values())
+            or any(
+                tt_all.stat().st_mtime > s.stat().st_mtime for s in tt_split.values()
+            )
+            or any(
+                "hours_to_next_token" not in pl.read_parquet_schema(s)
+                for s in tt_split.values()
+            )
+        ):  # pull out training and tuning sets if not already done,
+            # if tokens have been updated, or if the caches predate a derived column
             self.subject_splits = pl.scan_parquet(
                 self.processed_data_home / "subject_splits.parquet"
             )
             self.tokens_times = pl.scan_parquet(tt_all).with_columns(
                 s_elapsed=pl.col("times").list.eval(
                     (pl.element() - pl.element().first()).dt.total_seconds()
-                )
+                ),
+                # the target of a time-to-next-token head; a record's last
+                # token has no successor and gets a nan
+                hours_to_next_token=pl.col("times").list.eval(
+                    (pl.element().shift(-1) - pl.element())
+                    .dt.total_seconds()
+                    .truediv(3600)
+                    .fill_null(float("nan"))
+                ),
             )
             to_split = self.tokens_times.join(self.subject_splits, on="subject_id")
             for s in self.splits:
@@ -62,16 +101,24 @@ class Loader(Configurable):
                     tt_split[s]
                 )
 
-        self.dataset = (
-            ds.load_dataset(
-                "parquet", data_files={s: str(tt_split[s]) for s in self.splits}
+        dataset = ds.load_dataset(
+            "parquet", data_files={s: str(tt_split[s]) for s in self.splits}
+        ).rename_column("tokens", "input_ids")
+        if "disposition" in self.heads:
+            # labeled per record, before packing splits records across chunks;
+            # computed here rather than cached with the splits, since the classes
+            # come from the config
+            lookup = self.tokenizer_info.lookup
+            classes = self.heads["disposition"]["classes"]
+            dataset = dataset.map(
+                label_dispositions,
+                batched=True,
+                fn_kwargs={"class_of": {lookup[c]: i for i, c in enumerate(classes)}},
             )
-            .rename_column("tokens", "input_ids")
-            .select_columns(
-                ["input_ids"]
-                if "time_based_rope" not in self.cfg
-                else ["input_ids", "s_elapsed"]
-            )
+        self.dataset = dataset.select_columns(
+            ["input_ids"]
+            + (["s_elapsed"] if "time_based_rope" in self.cfg else [])
+            + [HEADS[name].target for name in self.heads]
         )
 
         self.inference_files = {
@@ -80,14 +127,21 @@ class Loader(Configurable):
             if (f := self.processed_data_home / f"{s}_for_inference.parquet").is_file()
         }
 
+        # where every inference table carries a `subject_id`, it leads the columns
+        # kept, to name the rows of the features `Extractor` writes from them
+        ids = all(
+            "subject_id" in pl.read_parquet_schema(f)
+            for f in self.inference_files.values()
+        )
         self.for_inference = (
             (
                 ds.load_dataset("parquet", data_files=self.inference_files)
                 .rename_column("tokens_past", "input_ids")
                 .select_columns(
-                    ["input_ids"]
-                    if "time_based_rope" not in self.cfg
-                    else ["input_ids", "s_elapsed_past"]
+                    (["subject_id"] if ids else [])
+                    + ["input_ids"]
+                    + (["s_elapsed_past"] if "time_based_rope" in self.cfg else [])
+                    + (["hours_to_end_time_past"] if "tte" in self.heads else [])
                 )
             )
             if self.inference_files

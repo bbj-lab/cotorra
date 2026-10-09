@@ -27,6 +27,16 @@ app = typer.Typer(
 )
 console = Console()
 
+# trailing every command: edits to its config, applied by `apply_overrides`
+Overrides = Annotated[
+    Optional[list[str]],
+    typer.Argument(
+        help="Config overrides: key=value sets a key, adding it if need be, and "
+        "~key deletes one",
+        show_default=False,
+    ),
+]
+
 
 @app.command()
 def train(
@@ -57,12 +67,12 @@ def train(
             "--resume-from-checkpoint",
             "-r",
             help="Try to resume training from the latest checkpoint in --output-home.",
-            is_flag=True,
         ),
     ] = False,
     verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
+        bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
+    overrides: Overrides = None,
 ):
     """
     Train a model on tokenized data. For tokenization, consult the cocoa package.
@@ -73,76 +83,11 @@ def train(
             training_cfg=training_config,
             processed_data_home=processed_data_home,
             output_home=output_home,
+            overrides=overrides,
         )
         trainer.train(resume_from_checkpoint=resume_from_checkpoint, verbose=verbose)
         t1 = time.perf_counter()
         print(f"\n[green]✓[/green] Training completed in {t1 - t0:.2f}s.")
-        out_path = trainer.output_home / f"mdl-{trainer.cfg.run_name}"
-        print(f"  Model: [cyan]{out_path}[/cyan]")
-
-
-@app.command()
-def train_private(
-    training_config: Annotated[
-        Optional[pathlib.Path],
-        typer.Option(
-            "--training-config",
-            "-t",
-            help="Training configuration file (overrides default)",
-            show_default=False,
-        ),
-    ] = None,
-    processed_data_home: Annotated[
-        Optional[str],
-        typer.Option(
-            "--processed-data-home",
-            "-p",
-            help="Processed data directory (overrides config)",
-        ),
-    ] = ...,
-    output_home: Annotated[
-        Optional[str],
-        typer.Option("--output-home", "-o", help="Output directory for trained models"),
-    ] = ...,
-    noise_multiplier: Annotated[
-        Optional[float],
-        typer.Option(
-            "--noise-multiplier",
-            "-n",
-            help="Noise multiplier (overrides configuration)",
-            show_default=False,
-        ),
-    ] = None,
-    max_grad_norm: Annotated[
-        Optional[float],
-        typer.Option(
-            "--max-grad-norm",
-            "-m",
-            help="Max grad norm (overrides configuration)",
-            show_default=False,
-        ),
-    ] = None,
-    verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
-    ] = False,
-):
-    """
-    Train a model with differential privacy on tokenized data.
-    """
-    from cotorra.trainer_dp import TrainerDP
-
-    with console.status("[bold green]Training model with differential privacy..."):
-        t0 = time.perf_counter()
-        trainer = TrainerDP(
-            training_cfg=training_config,
-            processed_data_home=processed_data_home,
-            output_home=output_home,
-            noise_multiplier=noise_multiplier,
-            max_grad_norm=max_grad_norm,
-        )
-        trainer.train(verbose=verbose)
-        t1 = time.perf_counter()
-        print(f"\n[green]✓[/green] DP training completed in {t1 - t0:.2f}s.")
         out_path = trainer.output_home / f"mdl-{trainer.cfg.run_name}"
         print(f"  Model: [cyan]{out_path}[/cyan]")
 
@@ -176,8 +121,9 @@ def tune(
         ),
     ] = ...,
     verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
+        bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
+    overrides: Overrides = None,
 ):
     """
     Run hyperparameter tuning while training a model.
@@ -188,6 +134,7 @@ def tune(
             training_cfg=training_config,
             processed_data_home=processed_data_home,
             output_home=output_home,
+            overrides=overrides,
         )
         tuner.train(verbose=verbose)
         t1 = time.perf_counter()
@@ -233,9 +180,35 @@ def extract(
             "--all-times",
             "-a",
             help="Extract features for all time steps (instead of just the final one)?",
-            is_flag=True,
         ),
     ] = False,
+    time_to_event: Annotated[
+        bool,
+        typer.Option(
+            "--time-to-event",
+            "-t",
+            help="Add the time-to-event head's predicted hours to the features?",
+        ),
+    ] = False,
+    time_to_next_token: Annotated[
+        bool,
+        typer.Option(
+            "--time-to-next-token",
+            "-n",
+            help="Add the time-to-next-token head's predicted hours, given the "
+            "history alone, to the features?",
+        ),
+    ] = False,
+    discharge_disposition: Annotated[
+        bool,
+        typer.Option(
+            "--discharge-disposition",
+            "-d",
+            help="Add the disposition head's probability of each discharge "
+            "disposition to the features?",
+        ),
+    ] = False,
+    overrides: Overrides = None,
 ):
     """
     Extract representations from a trained model.
@@ -247,8 +220,20 @@ def extract(
             processed_data_home=processed_data_home,
             model_home=model_home,
             output_home=output_home,
+            overrides=overrides,
         )
-        extractor.extract(all_times=all_times)
+        extractor.extract(
+            all_times=all_times,
+            heads=[
+                head
+                for head, wanted in (
+                    ("tte", time_to_event),
+                    ("tnt", time_to_next_token),
+                    ("disposition", discharge_disposition),
+                )
+                if wanted
+            ],
+        )
         t1 = time.perf_counter()
         print(f"\n[green]✓[/green] Extraction completed in {t1 - t0:.2f}s.")
         for split in extractor.loader.splits:
@@ -285,8 +270,9 @@ def generative_score(
         ),
     ] = None,
     verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
+        bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
+    overrides: Overrides = None,
 ):
     """
     Generate SCORE/REACH metrics from a trained model and save them to parquet.
@@ -300,6 +286,7 @@ def generative_score(
             processed_data_home=processed_data_home,
             model_home=model_home,
             output_home=output_home,
+            overrides=overrides,
         )
         scorer.save_all(verbose=verbose)
         t1 = time.perf_counter()
@@ -353,8 +340,9 @@ def rep_based_score(
         ),
     ] = EstimatorType.lightgbm,
     verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
+        bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
+    overrides: Overrides = None,
 ):
     """
     Generate rep-based scores for the token-based outcomes of interest.
@@ -370,6 +358,7 @@ def rep_based_score(
             output_home=output_home,
             training_home=training_home,
             estimator_type=estimator_type.value,
+            overrides=overrides,
         )
         scorer.save_all(verbose=verbose)
         t1 = time.perf_counter()

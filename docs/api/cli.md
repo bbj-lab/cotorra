@@ -11,7 +11,6 @@ Tokenized inputs are produced upstream by the
 | Command                    | What it does                                                          |
 | -------------------------- | --------------------------------------------------------------------- |
 | `cotorra train`            | Train a causal language model on tokenized timelines.                 |
-| `cotorra train-private`    | Train a model under differential privacy.                             |
 | `cotorra tune`             | Train while searching over hyperparameters.                           |
 | `cotorra extract`          | Extract hidden-state representations from a trained model.            |
 | `cotorra generative-score` | Score held-out timelines by autoregressive generation.                |
@@ -23,6 +22,11 @@ packaged default for that stage (`-t` for training, `-e` for extraction, `-s` fo
 scoring). Most also take `--output-home` / `-o` and `--verbose` / `-v`; the
 extraction and scoring commands additionally require `--model-home` / `-m`, the
 trained model to run.
+
+To change individual config keys for one run, list them after the command's
+options, as in
+`cotorra train -p ./processed/mimic -o ./models n_epochs=2 '~time_based_rope'`;
+see [Overriding config keys](../index.md#overriding-config-keys) for the syntax.
 
 Run any command with `-h` / `--help` to see its full set of options:
 
