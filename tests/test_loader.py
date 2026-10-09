@@ -173,14 +173,11 @@ def tte_home(processed, tmp_path_factory):
     """
     `processed` plus the `hours_to_end_time` column a `tte_objective`
     reads, which cocoa writes only under `include_hours_to_end_time` (off by
-    default, and so in the shared fixture). The inference files are dropped
-    rather than given a matching `hours_to_end_time_past`: only the training
-    side is under test here
+    default, and so in the shared fixture). The inference tables are left
+    without a matching `hours_to_end_time_past`, which nothing reads
     """
     home = tmp_path_factory.mktemp("loader-tte") / "processed"
     shutil.copytree(processed, home)
-    for f in home.glob("*_for_inference.parquet"):
-        f.unlink()
     tt = home / "tokens_times.parquet"
     pl.read_parquet(tt).with_columns(
         hours_to_end_time=pl.col("times").list.eval(
@@ -265,6 +262,35 @@ def test_each_target_is_loaded_only_for_its_objective(
             "hours_to_next_token",
             "disposition",
         ]
+
+
+def test_no_target_joins_the_inference_sets(
+    every_head_loader, tte_home, processed_with_end_times, tmp_path_factory
+):
+    """
+    the inference sets hold the model's context alone, whatever the objectives:
+    with every head, inference tables without end times load as they are, and
+    ones with them -- as cocoa winnows them under `include_hours_to_end_time`
+    -- don't lend their `hours_to_end_time_past`, the outcome itself, to the
+    batches `Extractor` writes back out
+    """
+    cfg_path = write_cfg(
+        tmp_path_factory.mktemp("loader-end-times-cfg") / "training.yaml",
+        base_training_cfg(tte_objective={}, tnt_objective={}, disposition_objective={}),
+    )
+    labeled = Loader(
+        training_cfg=cfg_path, processed_data_home=processed_with_end_times
+    )
+    for loader, home, has_end_times in (
+        (every_head_loader, tte_home, False),
+        (labeled, processed_with_end_times, True),
+    ):
+        assert set(loader.heads) == {"tte", "tnt", "disposition"}
+        assert set(loader.for_inference) == set(loader.splits)
+        for s, ds_ in loader.for_inference.items():
+            schema = pl.read_parquet_schema(home / f"{s}_for_inference.parquet")
+            assert ("hours_to_end_time_past" in schema) == has_end_times
+            assert ds_.column_names == ["subject_id", "input_ids", "s_elapsed_past"]
 
 
 def test_packing_keeps_the_gap_across_a_record_boundary_masked(tnt_loader):

@@ -127,8 +127,11 @@ class Loader(Configurable):
             if (f := self.processed_data_home / f"{s}_for_inference.parquet").is_file()
         }
 
-        # where every inference table carries a `subject_id`, it leads the columns
-        # kept, to name the rows of the features `Extractor` writes from them
+        # only the model's context is kept, never a head's target (as the end
+        # times' `hours_to_end_time_past`): `Extractor` writes each batch it reads
+        # back out beside the features, and the heads predict from the checkpoint
+        # alone. Where every inference table carries a `subject_id`, it leads the
+        # columns kept, to name the rows of the features written from them
         ids = all(
             "subject_id" in pl.read_parquet_schema(f)
             for f in self.inference_files.values()
@@ -141,7 +144,6 @@ class Loader(Configurable):
                     (["subject_id"] if ids else [])
                     + ["input_ids"]
                     + (["s_elapsed_past"] if "time_based_rope" in self.cfg else [])
-                    + (["hours_to_end_time_past"] if "tte" in self.heads else [])
                 )
             )
             if self.inference_files

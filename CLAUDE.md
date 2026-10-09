@@ -239,9 +239,12 @@ Stages read from `--processed-data-home`. Expected files (produced by cocoa's
   `BOS`, `EOS`; `quantile_token_loss` also reads `cfg.n_bins`.
 - `{train,tuning,held_out}_for_inference.parquet` — for extract/score; include
   `tokens_past`, optional `subject_id` and `s_elapsed_past`, and `<TOKEN>_past` /
-  `<TOKEN>_future` label columns. `Trainer`'s `Loader` loads these too when
-  present, so a training config with `tte_objective` needs
-  `hours_to_end_time_past` in them.
+  `<TOKEN>_future` label columns. `Loader` (`Trainer`'s too, when they're
+  present) keeps only their context — `subject_id`, `tokens_past` as `input_ids`,
+  and `s_elapsed_past` under `time_based_rope` — never a head's target or
+  anything else that gives the outcome away (`hours_to_end_time_past`,
+  `end_time`, `s_total_duration`, the future): `Extractor.extract_final` writes
+  the batch it reads back out beside the features.
 
 `Loader` derives per-split `{split}_tokens_times.parquet` caches, adding
 `s_elapsed` and `hours_to_next_token` (the TNT target, nan on each record's last
@@ -280,8 +283,8 @@ before packing splits records across chunks. Token-set selectors
   though `Extractor.__init__` has by then loaded the model and built the `Loader`
   (which may refresh the split caches). `*_objective` blocks in the extraction
   config don't enable them: they'd make its `Loader` load the heads' training
-  targets, so a `tte_objective` there fails without end times and, with them,
-  copies `hours_to_end_time_past` into every feature table.
+  targets (unused by `extract`), so a `tte_objective` there fails without
+  `hours_to_end_time` in `tokens_times.parquet`.
 - **`remove_unused_columns: false`** in `training_args` is required — otherwise
   HF drops the `s_elapsed` column that time-based RoPE needs.
 - **`--resume-from-checkpoint` is safe to pass unconditionally**: `Trainer.train`

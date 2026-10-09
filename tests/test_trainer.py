@@ -296,8 +296,9 @@ def test_every_objective_trains_on_what_cocoa_and_the_loader_produce(
         "hours_to_next_token",
         "disposition",
     ]
+    # the inference tables carry the end times too, but only the context is read
     for ds_ in trainer.loader.for_inference.values():
-        assert "hours_to_end_time_past" in ds_.column_names
+        assert ds_.column_names == ["subject_id", "input_ids"]
 
     mdl = trainer.model_init()
     assert list(mdl.heads) == ["tte", "tnt", "disposition"]

@@ -328,7 +328,9 @@ To train one or more:
    [default tokenization config](https://github.com/bbj-lab/cocoa/blob/master/src/cocoa/config/tokenization.yaml),
    set `include_hours_to_end_time: !!bool true`, and rerun tokenization and
    winnowing. Winnowing carries the column into the `*_for_inference.parquet`
-   tables as `hours_to_end_time_past`, which cotorra also expects.
+   tables as `hours_to_end_time_past`, which cotorra never reads: it is the
+   outcome itself, so it reaches neither the model nor the feature tables, and
+   `extract --time-to-event` needs no end times.
 
     ```sh
     cocoa tokenize -c tokenization.yaml -p processed/

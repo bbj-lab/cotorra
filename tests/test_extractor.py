@@ -817,6 +817,84 @@ def test_time_to_event_needs_no_end_times(extract_from, model_with_heads, proces
         assert to_event.dtype == pl.Float32 and to_event.is_finite().all()
 
 
+# a `tte_objective` in the extraction config has its `Loader` load the end times
+# a model with the head trains on, the most there is to leak
+WITH_TTE_OBJECTIVE = ["tte_objective={weight: 1.0}"]
+
+
+def test_the_end_times_reach_neither_the_model_nor_the_tables(
+    extract_from, model_with_heads, processed_with_end_times, monkeypatch
+):
+    """
+    inference tables winnowed with end times carry the outcome itself, as
+    `hours_to_end_time_past`; the model is still handed nothing but the tokens
+    and their position ids, and no feature table is written with the column
+    """
+    extractor = extract_from(
+        model_with_heads("tte"),
+        processed_data_home=processed_with_end_times,
+        overrides=WITH_TTE_OBJECTIVE,
+    )
+    assert "tte" in extractor.loader.heads
+    calls, forward = [], extractor.model.forward
+
+    def spy(*args, **kwargs):
+        calls.append((args, sorted(kwargs)))
+        return forward(*args, **kwargs)
+
+    monkeypatch.setattr(extractor.model, "forward", spy)
+    for all_times in (False, True):
+        extractor.extract(all_times=all_times, heads=["tte"])
+        for split in extractor.loader.splits:
+            assert "hours_to_end_time_past" in pl.read_parquet_schema(
+                processed_with_end_times / f"{split}_for_inference.parquet"
+            )
+            schema = pl.read_parquet_schema(written(extractor, split, all_times))
+            assert list(schema) == PLAIN_COLUMNS + ["time_to_event"]
+    assert calls
+    for args, kwargs in calls:
+        assert args == ()
+        assert kwargs == ["input_ids", "output_hidden_states", "position_ids"]
+
+
+def test_only_the_context_bears_on_what_is_extracted(
+    extract_from, model_with_heads, processed_with_end_times, tmp_path_factory
+):
+    """
+    nor do they reach it any other way, nor does anything else in the inference
+    tables that gives the outcome away -- the end time, the total duration, the
+    future, the labels: with the end times the `Loader` loads to train on
+    scrambled, and every inference table cut down to the context, each table
+    extracted, features and predicted times to event, is as it was
+    """
+    home = tmp_path_factory.mktemp("extract-context-alone") / "processed"
+    shutil.copytree(processed_with_end_times, home)
+    tt = home / "tokens_times.parquet"
+    pl.read_parquet(tt).with_columns(
+        pl.col("hours_to_end_time").list.eval(pl.element() * 1e3 + 1)
+    ).write_parquet(tt)
+    for f in home.glob("*_for_inference.parquet"):
+        df = pl.read_parquet(f)
+        given_away = {"hours_to_end_time_past", "end_time", "s_total_duration"}
+        assert given_away < set(df.columns)
+        df.select("subject_id", "tokens_past", "s_elapsed_past").write_parquet(f)
+
+    model_home = model_with_heads("tte")
+    extractors = [
+        extract_from(model_home, processed_data_home=h, overrides=WITH_TTE_OBJECTIVE)
+        for h in (processed_with_end_times, home)
+    ]
+    for all_times in (False, True):
+        for extractor in extractors:
+            extractor.extract(all_times=all_times, heads=["tte"])
+        for split in extractors[0].loader.splits:
+            given, context_alone = (
+                pl.read_parquet(written(extractor, split, all_times))
+                for extractor in extractors
+            )
+            assert context_alone.equals(given)
+
+
 def test_every_shard_carries_the_same_head_columns(
     extract_from, model_with_heads, processed
 ):
