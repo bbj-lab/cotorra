@@ -184,6 +184,32 @@ def extract(
             is_flag=True,
         ),
     ] = False,
+    time_to_event: Annotated[
+        bool,
+        typer.Option(
+            "--time-to-event",
+            "-t",
+            help="Add the time-to-event head's predicted hours to the features?",
+        ),
+    ] = False,
+    time_to_next_token: Annotated[
+        bool,
+        typer.Option(
+            "--time-to-next-token",
+            "-n",
+            help="Add the time-to-next-token head's predicted hours, given the "
+            "history alone, to the features?",
+        ),
+    ] = False,
+    discharge_disposition: Annotated[
+        bool,
+        typer.Option(
+            "--discharge-disposition",
+            "-d",
+            help="Add the disposition head's probability of each discharge "
+            "disposition to the features?",
+        ),
+    ] = False,
     overrides: Overrides = None,
 ):
     """
@@ -198,7 +224,18 @@ def extract(
             output_home=output_home,
             overrides=overrides,
         )
-        extractor.extract(all_times=all_times)
+        extractor.extract(
+            all_times=all_times,
+            heads=[
+                head
+                for head, wanted in (
+                    ("tte", time_to_event),
+                    ("tnt", time_to_next_token),
+                    ("disposition", discharge_disposition),
+                )
+                if wanted
+            ],
+        )
         t1 = time.perf_counter()
         print(f"\n[green]✓[/green] Extraction completed in {t1 - t0:.2f}s.")
         for split in extractor.loader.splits:

@@ -94,7 +94,7 @@ def test_for_inference_present_for_every_split_with_a_for_inference_file(
         assert (processed / f"{s}_for_inference.parquet").is_file()
         assert s in loader.inference_files
     for s, ds_ in loader.for_inference.items():
-        assert "input_ids" in ds_.column_names
+        assert ds_.column_names[:2] == ["subject_id", "input_ids"]
         assert "s_elapsed_past" in ds_.column_names
 
 

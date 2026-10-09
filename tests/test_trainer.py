@@ -334,6 +334,62 @@ def test_the_custom_loss_is_averaged_over_gradient_accumulation(
     assert training.item() == pytest.approx(evaluating.item() / 3, rel=1e-5)
 
 
+def test_training_logs_each_terms_mean_since_the_last_log(built_trainer):
+    """beside hf's `loss`, which averages the steps since its last log; each
+    batch weighted by its rows, and none of evaluation's mixed in"""
+    trainer = built_trainer.trainer
+    mdl = built_trainer.model_init()
+    batches = [
+        built_trainer.collate_fn([trainer.train_dataset[i] for i in rows])
+        for rows in ([0, 1], [2, 3, 4])
+    ]
+    trainer.reset_terms("train")
+    x_ents = list()
+    with t.no_grad():
+        trainer.compute_loss(mdl.eval(), batches[0])
+        for batch in batches:
+            _, outputs = trainer.compute_loss(mdl.train(), batch, return_outputs=True)
+            x_ents.append(
+                built_trainer.loss.__self__.x_ent_loss(outputs, batch["labels"])
+            )
+    trainer.log({"loss": 0.0})
+    logged = trainer.state.log_history[-1]
+    assert {"x_ent_loss", "balanced_toi_loss", "quantile_token_loss"} <= set(logged)
+    assert logged["x_ent_loss"] == pytest.approx(
+        ((2 * x_ents[0] + 3 * x_ents[1]) / 5).item(), rel=1e-5
+    )
+    trainer.log({"loss": 0.0})  # reported, and so reset
+    assert "x_ent_loss" not in trainer.state.log_history[-1]
+
+
+def test_evaluation_reports_each_terms_mean_over_the_whole_eval_set(
+    processed, tmp_path_factory
+):
+    """weighted by rows as hf weights `eval_loss` -- here over a short last
+    batch -- so the weighted terms add up to it"""
+    cfg = base_training_cfg(training_args={"per_device_eval_batch_size": 5})
+    trainer = Trainer(
+        training_cfg=write_cfg(
+            tmp_path_factory.mktemp("eval-terms") / "training.yaml", cfg
+        ),
+        processed_data_home=processed,
+        output_home=tmp_path_factory.mktemp("eval-terms-output"),
+    )
+    assert len(trainer.trainer.eval_dataset) % 5
+    metrics = trainer.trainer.evaluate()
+    assert metrics["eval_loss"] == pytest.approx(
+        metrics["eval_x_ent_loss"]
+        + cfg["balanced_toi_loss"]["bce_weight"] * metrics["eval_balanced_toi_loss"]
+        + cfg["quantile_token_loss"]["qt_weight"] * metrics["eval_quantile_token_loss"],
+        rel=1e-5,
+    )
+    assert "x_ent_loss" not in trainer.trainer.state.log_history[-1]
+    assert (
+        trainer.trainer.state.log_history[-1]["eval_x_ent_loss"]
+        == (metrics["eval_x_ent_loss"])
+    )
+
+
 @pytest.mark.slow
 def test_accumulated_batches_step_as_one_batch_of_their_size(tmp_path):
     """

@@ -4,6 +4,7 @@
 train a model
 """
 
+import collections
 import os
 import pathlib
 import warnings
@@ -12,6 +13,7 @@ import torch as t
 from omegaconf import OmegaConf
 from transformers import AutoConfig, AutoModelForCausalLM, TrainingArguments
 from transformers import Trainer as t_Trainer
+from transformers.trainer_pt_utils import nested_gather
 
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
@@ -23,13 +25,52 @@ class TrainerWithCustomLoss(t_Trainer):
     def __init__(self, compute_loss_func=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.compute_loss_func = compute_loss_func
+        # the terms a custom loss records, summed over the rows scored since they
+        # were last reported, training's apart from evaluation's: `log` reports
+        # training's means beside hf's `loss`, and `evaluation_loop` reports
+        # evaluation's, over the whole eval set, beside its `eval_loss`
+        self.term_sums, self.term_rows = dict(), dict()
+        for mode in ("train", "eval"):
+            self.reset_terms(mode)
+
+    def reset_terms(self, mode: str):
+        self.term_sums[mode] = collections.defaultdict(float)
+        self.term_rows[mode] = 0
+
+    def term_means(self, mode: str, prefix: str = "") -> dict[str, float]:
+        """the means of `mode`'s terms since they were last reported, over every
+        process, as hf gathers its own losses; reporting them resets them"""
+        if not (rows := self.term_rows[mode]):
+            return dict()
+        names = list(self.term_sums[mode])
+        totals = t.stack(
+            [
+                t.as_tensor(v, dtype=t.float32).to(self.args.device)
+                for v in (*self.term_sums[mode].values(), rows)
+            ]
+        )
+        totals = nested_gather(totals, self.args.parallel_mode)
+        totals = totals.view(-1, len(names) + 1).sum(dim=0)
+        self.reset_terms(mode)
+        return {
+            f"{prefix}{name}": (total / totals[-1]).item()
+            for name, total in zip(names, totals[:-1])
+        }
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         if self.compute_loss_func is not None:
             inputs = dict(inputs)
             labels = inputs.pop("labels", None)
             outputs = model(**inputs)
-            loss = self.compute_loss_func(outputs, labels)
+            # a `compute_loss_func` fills `terms` as `Loss.custom_loss` does, or
+            # takes it in a `**kwargs` and leaves it empty
+            terms = dict()
+            loss = self.compute_loss_func(outputs, labels, terms=terms)
+            # weighted by the batch's rows, as hf weights `eval_loss`
+            mode = "train" if model.training else "eval"
+            for name, term in terms.items():
+                self.term_sums[mode][name] += term * len(labels)
+            self.term_rows[mode] += len(labels)
             if model.training:
                 # with a custom loss set, hf's `training_step` leaves averaging
                 # over gradient accumulation to it -- which a per-batch mean
@@ -40,6 +81,38 @@ class TrainerWithCustomLoss(t_Trainer):
             return (loss, outputs) if return_outputs else loss
         else:
             return super().compute_loss(model, inputs, return_outputs, **kwargs)
+
+    def train(self, *args, **kwargs):
+        # a search's trials share this trainer, so one trial's last steps would
+        # otherwise open the next one's first log
+        self.reset_terms("train")
+        return super().train(*args, **kwargs)
+
+    def log(self, logs: dict[str, float], start_time: float | None = None):
+        # hf's `loss` averages the steps since its last log, as these do
+        if "loss" in logs:
+            logs = logs | self.term_means("train")
+        super().log(logs, start_time)
+
+    def evaluation_loop(
+        self,
+        dataloader,
+        description,
+        prediction_loss_only=None,
+        ignore_keys=None,
+        metric_key_prefix="eval",
+    ):
+        # whatever was scored outside this evaluation stays out of its means
+        self.reset_terms("eval")
+        output = super().evaluation_loop(
+            dataloader,
+            description,
+            prediction_loss_only,
+            ignore_keys,
+            metric_key_prefix,
+        )
+        output.metrics.update(self.term_means("eval", prefix=f"{metric_key_prefix}_"))
+        return output
 
 
 class Trainer(Configurable):

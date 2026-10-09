@@ -10,6 +10,7 @@ import fnmatch
 import math
 from typing import ClassVar
 
+import numpy as np
 import torch as t
 from omegaconf import DictConfig, OmegaConf
 from transformers import (
@@ -55,6 +56,14 @@ def log1p_hours_mse(preds: t.Tensor, hours: t.Tensor) -> t.Tensor:
     ) / keep.sum().clamp(min=1)
 
 
+def standard_normal_quadrature(n: int) -> tuple[np.ndarray, np.ndarray]:
+    """`n`-point Gauss-Hermite nodes and weights recast for a standard normal Z,
+    so that E[g(Z)] ~ sum(weights * g(nodes)): exact for a polynomial g of degree
+    below 2n, and close for any smooth one"""
+    nodes, weights = np.polynomial.hermite.hermgauss(n)
+    return math.sqrt(2) * nodes, weights / math.sqrt(math.pi)
+
+
 class ZeroInflatedLogNormalMixture:
     """
     a distribution over the hours until the next token: exactly 0 -- the next
@@ -68,6 +77,10 @@ class ZeroInflatedLogNormalMixture:
     # a sampled gap is capped at a million hours (~114 years), so that a far tail
     # draw can't overflow the clock it gets added to
     max_log_hours = math.log(1e6)
+
+    # the rule `mean_log1p_hours` integrates by: 32 nodes keep it within ~1e-5 of
+    # the exact value for components up to 3 log-hours wide, and ~5e-4 at 5
+    quadrature = standard_normal_quadrature(32)
 
     def __init__(self, params: t.Tensor):
         params = params.to(dtype=t.promote_types(params.dtype, t.float32))
@@ -117,6 +130,44 @@ class ZeroInflatedLogNormalMixture:
         return t.where(
             self.zero_logit >= 0, 0.0, log_hours.clamp(max=self.max_log_hours).exp()
         )
+
+    def mean_log1p_hours(self, quadrature=None) -> t.Tensor:
+        """
+        the mean of log1p(hours), which is what squared error on log1p-hours
+        trains a point head to predict: 0 for the zero part, and for a component,
+        its log-hours L ~ N(mean, scale^2) capped at `max_log_hours` as `sample`
+        caps them, E[log1p(exp(min(L, cap)))], or E[softplus(min(L, cap))].
+        Quadrature integrates softplus well for a component a few log-hours wide,
+        less so wider (off by ~1e-2 at 10), and the kink the cap puts in it
+        poorly, by 1e-2 or so; within 1e-6, though, softplus(min(L, cap)) is
+        softplus(L) - (L - cap)+, and that hinge's mean has a closed form, which
+        replaces quadrature's estimate of it. Each component's mean is kept within
+        [0, log1p(1e6)], where the exact value lies, however wide the component.
+        `quadrature`, the rule's nodes and weights already where the parameters
+        are, spares a caller asking again and again the copy there each time
+        """
+        nodes, weights = (
+            t.as_tensor(q, dtype=self.means.dtype, device=self.means.device)
+            for q in (self.quadrature if quadrature is None else quadrature)
+        )
+        log_hours = self.means[..., None] + self.scales[..., None] * nodes
+        mean = (
+            t.nn.functional.softplus(log_hours.clamp(max=self.max_log_hours)) * weights
+        ).sum(dim=-1)
+        del log_hours  # as large as the hinge's intermediates, so freed before them
+        # on the scale of a standard normal Z, with the cap `d` above its mean, the
+        # hinge is scale * (Z - d)+, of mean scale * (phi(d) - d * P(Z > d));
+        # quadrature has it right once the cap lies past its outermost node
+        d = (self.max_log_hours - self.means) / self.scales
+        reach = float(self.quadrature[0].max())
+        near = d.clamp(-reach, reach)
+        estimate = ((nodes - near[..., None]).clamp(min=0) * weights).sum(dim=-1)
+        exact = (-(near**2) / 2).exp() / math.sqrt(2 * math.pi) - near * 0.5 * (
+            t.special.erfc(near / math.sqrt(2))
+        )
+        mean = mean + self.scales * t.where(d.abs() < reach, estimate - exact, 0.0)
+        mean = mean.clamp(0.0, math.log1p(math.exp(self.max_log_hours)))
+        return t.sigmoid(-self.zero_logit) * (self.log_weights.exp() * mean).sum(dim=-1)
 
 
 # ------------------------------------------------------------------ the heads
@@ -248,6 +299,18 @@ class TntHead(Head):
         in `next_embeds`: a draw, or with `do_sample=False` a point estimate"""
         raise NotImplementedError
 
+    def mean_log1p_hours(
+        self,
+        hidden_states: t.Tensor,
+        lm_head: t.nn.Module,
+        input_embeddings: t.nn.Module,
+    ) -> t.Tensor:
+        """the mean log1p-hours from each hidden state's position until the next
+        token, given the history alone, whichever token that turns out to be; in
+        float32 at least. `lm_head` gives the next token's logits and
+        `input_embeddings` embeds it, for a head that conditions on it"""
+        raise NotImplementedError
+
 
 class TntPointHead(TntHead, Log1pHoursHead):
     """a single value per token, whatever token comes next, trained by squared
@@ -261,6 +324,12 @@ class TntPointHead(TntHead, Log1pHoursHead):
             dtype=t.promote_types(log1p_hours.dtype, t.float32)
         )
         return log1p_hours.expm1()
+
+    def mean_log1p_hours(self, hidden_states, lm_head, input_embeddings):
+        """the prediction, which squared error on log1p-hours trains to be that
+        mean"""
+        log1p_hours = self.predict(hidden_states)
+        return log1p_hours.to(dtype=t.promote_types(log1p_hours.dtype, t.float32))
 
 
 class TntMixtureHead(TntHead):
@@ -329,6 +398,67 @@ class TntMixtureHead(TntHead):
         dist = self.distribution(hidden_states, next_embeds)
         return dist.sample(generator) if do_sample else dist.point_estimate()
 
+    # the most elements any one of `mean_log1p_hours`'s intermediates may hold,
+    # which sets how many positions it takes at once: 64MB of float32, a few of
+    # which are alive at a time
+    chunk_elements = 2**24
+
+    @t.no_grad()
+    def mean_log1p_hours(self, hidden_states, lm_head, input_embeddings):
+        """
+        the mean log1p-hours given each next token, as `distribution` has it,
+        averaged over the language-modelling head's probability of that token:
+        the mean given the history alone, as a point head estimates it, rather
+        than given any one next token -- the one that came, or a likeliest one --
+        and so only as calibrated as that probability, which `label_weighted_loss`
+        skews on purpose. A vocabulary's worth of head evaluations per position,
+        made affordable by splitting the first layer over its input, W [h;
+        norm(e)] + b = W_h h + (W_e norm(e) + b): the vocabulary's half is
+        computed once per call, and positions go through in chunks small enough
+        that no intermediate holds more than `chunk_elements`. Without gradients:
+        nothing trains through it, and a graph would keep every chunk alive
+        """
+        width = hidden_states.shape[-1]
+        hidden = hidden_states.reshape(-1, width)
+        n_vocab = input_embeddings.num_embeddings
+        first, rest = self.proj[0], self.proj[1:]
+        # summed in float32 and rounded once into the head's dtype, as the layer
+        # itself rounds, rather than rounded half by half
+        weight = first.weight.float()
+        vocab_half = t.nn.functional.linear(
+            self.next_norm(
+                input_embeddings(t.arange(n_vocab, device=hidden.device))
+            ).float(),
+            weight[:, width:],
+            first.bias.float(),
+        )
+        n_components = (rest[-1].out_features - 1) // 3
+        n_nodes = len(ZeroInflatedLogNormalMixture.quadrature[0])
+        per_chunk = max(
+            1, self.chunk_elements // (n_vocab * max(width, n_components * n_nodes))
+        )
+        # the quadrature copied over once rather than once a chunk, which would
+        # stall the device each time, and the means written into one tensor
+        # rather than joined at the end, which on mps holds on to memory a chunk
+        dtype = t.promote_types(first.weight.dtype, t.float32)
+        quadrature = [
+            t.as_tensor(q, dtype=dtype, device=hidden.device)
+            for q in ZeroInflatedLogNormalMixture.quadrature
+        ]
+        means = t.empty(len(hidden), dtype=dtype, device=hidden.device)
+        for start in range(0, len(hidden), per_chunk):
+            h = hidden[start : start + per_chunk]
+            next_token = lm_head(h).float().softmax(dim=-1)
+            history_half = t.nn.functional.linear(h.float(), weight[:, :width])
+            params = rest(
+                (history_half[:, None] + vocab_half).to(dtype=first.weight.dtype)
+            )
+            given_next = ZeroInflatedLogNormalMixture(params).mean_log1p_hours(
+                quadrature
+            )
+            means[start : start + per_chunk] = (next_token * given_next).sum(dim=-1)
+        return means.reshape(hidden_states.shape[:-1])
+
 
 class DispositionHead(Head):
     """
@@ -387,7 +517,9 @@ class DispositionHead(Head):
 
 
 # every secondary objective, by name; adding one takes a `Head` subclass here and
-# its `<name>_pred`/`<name>_loss` fields on `CotorraCausalLMOutputWithPast`
+# its `<name>_pred`/`<name>_loss` fields on `CotorraCausalLMOutputWithPast`, and
+# extracting it, its columns in `extractor.HEAD_COLUMNS` and a `cotorra extract`
+# flag
 HEADS: dict[str, type[Head]] = {
     head.name: head for head in (TteHead, TntHead, DispositionHead)
 }
@@ -605,8 +737,8 @@ class CotorraForCausalLM(PreTrainedModel, GenerationMixin):
             **fields,
         )
 
-    # what generation asks of the time-to-next-token head, given token ids rather
-    # than the embeddings the head itself reads
+    # what generation and extraction ask of the time-to-next-token head, given
+    # token ids, if any, rather than the embeddings the head itself reads
 
     def _tnt_head(self) -> TntHead:
         if "tnt" not in self.heads:
@@ -645,6 +777,20 @@ class CotorraForCausalLM(PreTrainedModel, GenerationMixin):
             self.get_input_embeddings()(next_input_ids),
             do_sample=do_sample,
             generator=generator,
+        )
+
+    @t.no_grad()
+    def predict_hours_to_next_token(self, hidden_states: t.Tensor) -> t.Tensor:
+        """the hours from each hidden state's position until the next token, as
+        the history alone predicts them, whichever token that is: the expm1 of
+        the head's mean log1p-hours, a mixture head's averaged over the next
+        token as the language-modelling head predicts it; in float32 at least,
+        whatever the model's dtype, and without gradients, so that it takes
+        hidden states from under `inference_mode` too"""
+        return (
+            self._tnt_head()
+            .mean_log1p_hours(hidden_states, self.lm_head, self.get_input_embeddings())
+            .expm1()
         )
 
 

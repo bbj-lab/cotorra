@@ -127,12 +127,19 @@ class Loader(Configurable):
             if (f := self.processed_data_home / f"{s}_for_inference.parquet").is_file()
         }
 
+        # where every inference table carries a `subject_id`, it leads the columns
+        # kept, to name the rows of the features `Extractor` writes from them
+        ids = all(
+            "subject_id" in pl.read_parquet_schema(f)
+            for f in self.inference_files.values()
+        )
         self.for_inference = (
             (
                 ds.load_dataset("parquet", data_files=self.inference_files)
                 .rename_column("tokens_past", "input_ids")
                 .select_columns(
-                    ["input_ids"]
+                    (["subject_id"] if ids else [])
+                    + ["input_ids"]
                     + (["s_elapsed_past"] if "time_based_rope" in self.cfg else [])
                     + (["hours_to_end_time_past"] if "tte" in self.heads else [])
                 )

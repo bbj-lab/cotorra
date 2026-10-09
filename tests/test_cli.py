@@ -2,15 +2,21 @@
 
 """tests for cotorra.cli, the package's only public entry point"""
 
+import json
+import re
 import shutil
+import types
 
+import click
 import polars as pl
 import pytest
 from helpers import base_scoring_cfg, base_training_cfg, write_cfg
 from omegaconf import OmegaConf
 from typer.testing import CliRunner
 
+import cotorra.cli
 from cotorra.cli import app
+from cotorra.model import HEADS
 
 runner = CliRunner()
 
@@ -204,3 +210,171 @@ def test_extract_reports_the_directory_it_wrote_to(
     assert (out / f"features-held_out-{fake_model_home.name}.parquet").is_file()
     report = _report(result.output, "Extraction completed")
     assert "".join(str(out).split()) in report
+
+
+HEAD_FLAGS = {
+    "tte": ("--time-to-event", "-t"),
+    "tnt": ("--time-to-next-token", "-n"),
+    "disposition": ("--discharge-disposition", "-d"),
+}
+
+
+def test_extract_help_lists_a_flag_for_each_head():
+    """every head in `HEADS`, its long and short flag side by side -- read at a
+    width the long names fit, and unstyled, whatever the terminal"""
+    assert list(HEAD_FLAGS) == list(HEADS)
+    result = runner.invoke(app, ["extract", "-h"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    for long, short in HEAD_FLAGS.values():
+        assert re.search(rf"{long}\s+{short}\s", click.unstyle(result.output)), long
+
+
+@pytest.fixture
+def extractions(monkeypatch) -> list[dict]:
+    """
+    swaps `Extractor` in the command for a stand-in that only records what it
+    is built with and asked to extract, so that what the flags hand on can be
+    checked without a model or any data
+    """
+    calls = []
+
+    class Recording:
+        def __init__(self, **kwargs):
+            self.built_with = kwargs
+            self.output_home = kwargs["output_home"]
+            self.loader = types.SimpleNamespace(splits=("train", "tuning", "held_out"))
+
+        def extract(self, **kwargs):
+            calls.append({"built_with": self.built_with, "extract": kwargs})
+
+    monkeypatch.setattr(cotorra.cli, "Extractor", Recording)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "flags, heads",
+    [
+        ([], []),
+        (["-t"], ["tte"]),
+        (["--time-to-event"], ["tte"]),
+        (["-n"], ["tnt"]),
+        (["--time-to-next-token"], ["tnt"]),
+        (["-d"], ["disposition"]),
+        (["--discharge-disposition"], ["disposition"]),
+        (["-d", "-n", "-t"], ["tte", "tnt", "disposition"]),
+        (["-a", "-d", "-t"], ["tte", "disposition"]),
+    ],
+    ids=str,
+)
+def test_each_head_flag_reaches_the_extractor_as_its_head(
+    flags, heads, extractions, tmp_path
+):
+    """as the heads' names in `HEADS`, always in the same order -- time to
+    event, time to next token, disposition -- whatever order the flags came in,
+    and alongside `--all-times`"""
+    result = runner.invoke(
+        app, ["extract", "-p", str(tmp_path), "-m", str(tmp_path), *flags]
+    )
+    assert result.exit_code == 0, result.output
+    [call] = extractions
+    assert call["extract"] == {"all_times": "-a" in flags, "heads": heads}
+
+
+def test_a_head_flag_among_the_overrides_still_counts(extractions, tmp_path):
+    """the overrides trail the command, but a flag placed among them is still
+    read as a flag rather than as one of them"""
+    result = runner.invoke(
+        app,
+        # fmt: off
+        [
+            "extract",
+            "-p",
+            str(tmp_path),
+            "-m",
+            str(tmp_path),
+            "extract.batch_size=2",
+            "-n",
+            "max_seq_len=8",
+            "-t",
+        ],
+        # fmt: on
+    )
+    assert result.exit_code == 0, result.output
+    [call] = extractions
+    assert call["extract"]["heads"] == ["tte", "tnt"]
+    assert call["built_with"]["overrides"] == ["extract.batch_size=2", "max_seq_len=8"]
+
+
+def test_extract_with_every_head_flag_writes_their_columns(
+    processed, model_with_heads, tmp_path
+):
+    """every head's columns land in each split's table, after the features, in
+    float32 and finite -- the disposition head's named for the classes its
+    checkpoint lists"""
+    model_home = model_with_heads("tte", "tnt", "disposition", mixture=True)
+    heads = json.loads((model_home / "config.json").read_text())["heads"]
+    classes = heads["disposition"]["classes"]
+    out = tmp_path / "features"
+    out.mkdir()
+    result = runner.invoke(
+        app,
+        # fmt: off
+        [
+            "extract",
+            "-p",
+            str(processed),
+            "-m",
+            str(model_home),
+            "-o",
+            str(out),
+            "-t",
+            "-n",
+            "-d",
+        ],
+        # fmt: on
+    )
+    assert result.exit_code == 0, result.output
+    for split in ("train", "tuning", "held_out"):
+        table = pl.read_parquet(out / f"features-{split}-{model_home.name}.parquet")
+        assert table.columns == [
+            "subject_id",
+            "input_ids",
+            "s_elapsed_past",
+            "features",
+            "time_to_event",
+            "time_to_next_token",
+            *(f"{c}_prob" for c in classes),
+        ]
+        assert table.height > 0
+        assert all(
+            table[c].dtype == pl.Float32 and table[c].is_finite().all()
+            for c in table.columns[4:]
+        )
+
+
+def test_extract_refuses_a_head_flag_for_a_head_the_model_lacks(
+    processed, fake_model_home, tmp_path
+):
+    """a stock model has no head to extract, and says so before writing a
+    feature table"""
+    out = tmp_path / "features"
+    out.mkdir()
+    result = runner.invoke(
+        app,
+        # fmt: off
+        [
+            "extract",
+            "-p",
+            str(processed),
+            "-m",
+            str(fake_model_home),
+            "-o",
+            str(out),
+            "-n",
+        ],
+        # fmt: on
+    )
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
+    assert "this model carries no time-to-next-token head" in str(result.exception)
+    assert list(out.iterdir()) == []

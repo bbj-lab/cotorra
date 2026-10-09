@@ -23,6 +23,7 @@ from cotorra.model import (
     TteHead,
     ZeroInflatedLogNormalMixture,
     head_options,
+    standard_normal_quadrature,
 )
 
 VOCAB = 64
@@ -796,6 +797,246 @@ def test_the_mixture_head_learns_gaps_that_depend_on_the_next_token():
     assert to_quantile.zero_logit.sigmoid().item() > 0.95
     assert to_event.zero_logit.sigmoid().item() < 0.05
     assert to_event.point_estimate().item() == pytest.approx(2.0, rel=0.25)
+
+
+# ------------------------------- the time to the next token, given the history
+
+CAP = ZeroInflatedLogNormalMixture.max_log_hours
+# log1p of the capped hours, the most a mean of log1p-hours can be, rounded to
+# float32 as the clamp that keeps it there is
+MOST_LOG1P_HOURS = t.tensor(math.log1p(math.exp(CAP))).item()
+
+
+def softplus_inverse(scale: float) -> float:
+    """the raw parameter that makes a component's scale, softplus(raw) + 1e-3"""
+    x = scale - 1e-3
+    return x + math.log(-math.expm1(-x))  # log(expm1(x)), without overflowing
+
+
+def test_the_quadrature_integrates_polynomials_against_a_standard_normal():
+    """exactly, up to degree 2n - 1: the moments 1, 0, 1, 0, 3, 0, 15"""
+    nodes, weights = standard_normal_quadrature(4)
+    moments = [(weights * nodes**k).sum() for k in range(7)]
+    assert moments == pytest.approx([1, 0, 1, 0, 3, 0, 15], abs=1e-12)
+
+
+@pytest.mark.parametrize("scale", [0.05, 0.5, 1.0, 2.0, 3.0])
+def test_the_mean_log1p_hours_matches_dense_integration(scale):
+    """
+    against the trapezoid rule over a fine grid, in float64, for single
+    components below, around and beyond the cap, whose kink plain quadrature
+    resolves to only ~1e-2; within 2e-5 of it, for components as wide as 3
+    log-hours
+    """
+    means = [-8.0, -2.0, 0.0, 1.0, 4.0, 8.0, 11.0, 13.0, CAP, 15.0, 20.0]
+    params = t.stack(
+        [raw_params(-50.0, [0.0], [m], [softplus_inverse(scale)]) for m in means]
+    )
+    got = ZeroInflatedLogNormalMixture(params).mean_log1p_hours()
+    z = t.linspace(-12.0, 12.0, 480_001, dtype=t.float64)
+    log_hours = (t.tensor(means, dtype=t.float64)[:, None] + scale * z).clamp(max=CAP)
+    density = (-(z**2) / 2).exp() / math.sqrt(2 * math.pi)
+    expected = t.trapezoid(t.nn.functional.softplus(log_hours) * density, z, dim=-1)
+    assert got.dtype == t.float32
+    assert t.allclose(got.double(), expected, rtol=0, atol=2e-5)
+
+
+# components chosen to stress the mean: a mixture with its zero part, the same
+# mixture nearly all zero part, and one component so wide and so high that a
+# third of its draws reach the cap
+COMPONENTS = ([0.3, -0.2, 0.5], [-2.0, 0.5, 3.0], [-1.0, 0.0, 0.5])
+MEAN_CASES = {
+    "mixture": raw_params(-0.7, *COMPONENTS),
+    "mostly-zero": raw_params(4.6, *COMPONENTS),
+    "capped": raw_params(-5.0, [0.0], [12.0], [softplus_inverse(4.0)]),
+}
+
+
+@pytest.mark.parametrize("dtype", [t.float32, t.bfloat16], ids=["float32", "bf16"])
+@pytest.mark.parametrize("case", list(MEAN_CASES))
+def test_the_mean_log1p_hours_is_what_draws_average_to(case, dtype):
+    """
+    the mean of log1p over a million draws from `sample`, cap and zero part
+    included, to within four standard errors -- from bfloat16 parameters too,
+    which the distribution takes up to float32
+    """
+    params = MEAN_CASES[case].to(dtype=dtype)
+    mean = ZeroInflatedLogNormalMixture(params[None]).mean_log1p_hours()
+    draws = (
+        ZeroInflatedLogNormalMixture(params.expand(1_000_000, -1))
+        .sample(t.Generator().manual_seed(0))
+        .log1p()
+    )
+    if case == "mostly-zero":
+        assert (draws == 0).float().mean().item() > 0.98
+    if case == "capped":
+        assert (draws >= MOST_LOG1P_HOURS - 1e-5).float().mean().item() > 0.3
+    assert mean.dtype == t.float32 and mean.shape == (1,)
+    error = draws.std().item() / math.sqrt(len(draws))
+    assert mean.item() == pytest.approx(draws.mean().item(), abs=4 * error)
+
+
+def test_the_mean_log1p_hours_stays_within_bounds_whatever_the_parameters():
+    """between 0 and log1p of the cap, finite, for parameters far past any a
+    trained head would give -- components wide enough to straddle both 0 and
+    the cap, and raw values of 1e4 in either direction. Each component's mean is
+    clamped there, so the mixture's strays by no more than rounding"""
+    t.manual_seed(0)
+    raw = t.cat(
+        [
+            50 * t.randn(10_000, 1 + 3 * K),
+            t.full((1, 1 + 3 * K), 1e4),
+            t.full((1, 1 + 3 * K), -1e4),
+        ]
+    )
+    mean = ZeroInflatedLogNormalMixture(raw).mean_log1p_hours()
+    assert t.isfinite(mean).all() and (mean >= 0).all()
+    assert (mean <= MOST_LOG1P_HOURS * (1 + 2 * t.finfo(t.float32).eps)).all()
+
+
+def naive_mean_log1p_hours(model: CotorraForCausalLM, hidden: t.Tensor) -> t.Tensor:
+    """a mixture head's mean given the history, the long way round: its
+    distribution given each token of the vocabulary in turn, through the head's
+    own forward, weighted by the probability of that token coming next"""
+    head, embed = model.heads["tnt"], model.get_input_embeddings()
+    probs = model.lm_head(hidden).float().softmax(dim=-1)
+    total = t.zeros(hidden.shape[:-1])
+    for token in range(probs.shape[-1]):
+        given = head.distribution(hidden, embed(t.full(hidden.shape[:-1], token)))
+        total += probs[..., token] * given.mean_log1p_hours()
+    return total
+
+
+@pytest.fixture
+def wide_mixture() -> CotorraForCausalLM:
+    """initialized wide enough that the gap the head gives depends a good deal on
+    the token that comes next, so averaging over the wrong tokens would show,
+    and with the head's biases and norm drawn at random rather than left at
+    their init, since no trained head's are"""
+    mdl = build("tnt", mixture=True, initializer_range=0.5).eval()
+    with t.no_grad():
+        for p in mdl.heads["tnt"].parameters():
+            if p.dim() == 1:
+                p.normal_(std=0.5)
+    return mdl
+
+
+@pytest.mark.parametrize(
+    "per_chunk, chunks",
+    [(1, [1] * 14), (3, [3, 3, 3, 3, 2]), (None, [14])],
+    ids=["one-at-a-time", "uneven", "all-at-once"],
+)
+def test_the_history_only_mean_averages_over_the_next_token(
+    wide_mixture, per_chunk, chunks, monkeypatch
+):
+    """
+    the mixture head's mean given each next token, averaged over the language
+    model's probability of each, as the naive loop over the vocabulary has it,
+    however the positions are chunked: one at a time, in chunks the positions
+    don't divide into, and all at once
+    """
+    if per_chunk is not None:  # the rule: elements per position, at the widest
+        n_nodes = len(ZeroInflatedLogNormalMixture.quadrature[0])
+        width = max(TINY_MODEL_ARGS["hidden_size"], K * n_nodes)
+        monkeypatch.setattr(TntMixtureHead, "chunk_elements", per_chunk * VOCAB * width)
+    seen = []
+
+    def lm_head(hidden):
+        seen.append(len(hidden))
+        return wide_mixture.lm_head(hidden)
+
+    head, embed = wide_mixture.heads["tnt"], wide_mixture.get_input_embeddings()
+    with t.no_grad():
+        hidden = wide_mixture.model(input_ids=ids(2, 7)).last_hidden_state
+        got = head.mean_log1p_hours(hidden, lm_head, embed)
+        expected = naive_mean_log1p_hours(wide_mixture, hidden)
+        given_each = head.distribution(
+            hidden[..., None, :].expand(-1, -1, VOCAB, -1),
+            embed(t.arange(VOCAB)).expand(2, 7, -1, -1),
+        ).mean_log1p_hours()
+    assert seen == chunks
+    assert got.shape == (2, 7) and got.dtype == t.float32
+    assert t.allclose(got, expected, rtol=1e-5, atol=1e-6)
+    # the next token matters, so this is no average of near-equal values
+    assert (given_each.amax(dim=-1) - given_each.amin(dim=-1)).max() > 1.0
+
+
+def test_a_point_heads_history_only_hours_are_its_prediction():
+    mdl = build("tnt", initializer_range=0.5).eval()
+    with t.no_grad():
+        out = mdl(input_ids=ids(2, 7), output_hidden_states=True)
+        hours = mdl.predict_hours_to_next_token(out.hidden_states[-1])
+    assert t.equal(hours, out.tnt_pred.float().expm1())
+
+
+def test_a_mixture_heads_history_only_hours_are_its_mean_over_the_next_token(
+    wide_mixture,
+):
+    with t.no_grad():
+        hidden = wide_mixture.model(input_ids=ids(2, 7)).last_hidden_state
+        hours = wide_mixture.predict_hours_to_next_token(hidden)
+        expected = naive_mean_log1p_hours(wide_mixture, hidden).expm1()
+    assert t.allclose(hours, expected, rtol=1e-5)
+
+
+@pytest.mark.parametrize("mixture", [False, True], ids=["point", "mixture"])
+@pytest.mark.parametrize(
+    "shape", [(32,), (5, 32), (2, 3, 32), (2, 2, 2, 32), (0, 32)], ids=str
+)
+def test_history_only_hours_take_any_leading_shape(mixture, shape):
+    mdl = build("tnt", mixture=mixture, initializer_range=0.5).eval()
+    hidden = t.randn(*shape)
+    with t.no_grad():
+        hours = mdl.predict_hours_to_next_token(hidden)
+        flat = mdl.predict_hours_to_next_token(hidden.reshape(-1, shape[-1]))
+    assert hours.shape == shape[:-1]
+    assert t.allclose(hours.reshape(-1), flat, rtol=1e-5)
+
+
+@pytest.mark.parametrize("mixture", [False, True], ids=["point", "mixture"])
+def test_history_only_hours_are_float32_from_a_bfloat16_model(mixture):
+    """the head's output taken up to float32 before `expm1`, which in bfloat16
+    rounds hours to 3 significant digits"""
+    mdl = build("tnt", mixture=mixture, initializer_range=0.5, dtype="bfloat16")
+    with t.no_grad():
+        hidden = mdl.eval().model(input_ids=ids(2, 5)).last_hidden_state
+        hours = mdl.predict_hours_to_next_token(hidden)
+        if mixture:  # bfloat16 heads, given each next token in turn
+            expected = naive_mean_log1p_hours(mdl, hidden).expm1()
+        else:
+            expected = mdl.heads["tnt"].predict(hidden).float().expm1()
+    assert hidden.dtype == t.bfloat16
+    assert hours.dtype == t.float32 and t.isfinite(hours).all()
+    if mixture:
+        assert t.allclose(hours, expected, rtol=1e-3)
+    else:
+        assert t.equal(hours, expected)
+
+
+@pytest.mark.parametrize("bias", [-50.0, 50.0])
+@pytest.mark.parametrize("mixture", [False, True], ids=["point", "mixture"])
+def test_history_only_hours_stay_finite_and_non_negative_at_extremes(mixture, bias):
+    """wide random head weights and biases pushed far either way: a point head's
+    log1p-hours run to ~60 here, 1e26 hours, and a mixture's raw parameters to
+    the thousands"""
+    mdl = build("tnt", mixture=mixture).eval()
+    head = mdl.heads["tnt"]
+    with t.no_grad():
+        for p in head.parameters():
+            if p.dim() > 1:
+                p.normal_(std=5.0 if mixture else 1.0)
+        (head.proj[-1] if mixture else head.linear).bias.fill_(bias)
+        hours = mdl.predict_hours_to_next_token(
+            mdl.model(input_ids=ids(4, 9)).last_hidden_state
+        )
+    assert t.isfinite(hours).all() and (hours >= 0).all()
+    if mixture:  # a draw is capped at a million hours, and so is their mean
+        assert (hours <= 1e6 * (1 + 1e-6)).all()
+
+
+def test_without_a_tnt_head_there_is_no_time_to_next_token_to_predict():
+    with pytest.raises(ValueError, match="carries no time-to-next-token head"):
+        build("tte", "disposition").predict_hours_to_next_token(t.zeros(1, 32))
 
 
 # ------------------------------------------------------- the disposition head

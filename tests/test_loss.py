@@ -359,13 +359,26 @@ def test_balanced_toi_loss_stays_finite_however_sure_the_model_is():
     assert t.isfinite(logits.grad).all()
 
 
-def test_custom_loss_does_not_touch_wandb_when_no_run_is_active(outputs, labels):
-    import wandb
-
-    assert wandb.run is None
-    loss = Loss(make_cfg(), make_tkzr_cfg())
-    loss.custom_loss(outputs, labels)  # must not raise even though wandb is inactive
-    assert wandb.run is None
+def test_custom_loss_records_each_term_unweighted_and_detached(outputs, labels):
+    """what `TrainerWithCustomLoss` averages for its logs: every term the
+    objective sums, under the name it gets logged by, off the graph"""
+    loss = Loss(make_cfg(tte_objective={"weight": 0.25}), make_tkzr_cfg())
+    logits = outputs["logits"].clone().requires_grad_()
+    out = {"logits": logits} | HEAD_TERMS
+    terms = dict()
+    total = loss.custom_loss(out, labels, terms=terms)
+    assert set(terms) == {"x_ent_loss", "quantile_token_loss", "tte_loss"}
+    assert not any(term.requires_grad for term in terms.values())
+    assert terms["x_ent_loss"].item() == pytest.approx(
+        loss.x_ent_loss(out, labels).item(), rel=1e-5
+    )
+    assert terms["tte_loss"].item() == HEAD_TERMS["tte_loss"].item()
+    assert total.item() == pytest.approx(
+        terms["x_ent_loss"].item()
+        + 0.5 * terms["quantile_token_loss"].item()
+        + 0.25 * terms["tte_loss"].item(),
+        rel=1e-5,
+    )
 
 
 # `quantile_token_loss` maps a `..._Q<i>` token to the midpoint of its bin,
@@ -437,7 +450,7 @@ def test_quantile_token_loss_ignores_batches_with_no_quantile_labels():
 
 def test_custom_loss_survives_a_batch_with_no_quantile_labels():
     """
-    `custom_loss` calls `.item()` on whatever `quantile_token_loss` returns, so
+    `custom_loss` calls `.detach()` on whatever `quantile_token_loss` returns, so
     the no-quantile-token case has to come back as a tensor; it used to return
     a bare 0.0 and take training down with an `AttributeError` on any batch
     (short `max_seq_len`, or a vocabulary with no quantile tokens at all) that

@@ -11,7 +11,6 @@ import re
 import numpy as np
 import torch as t
 
-import wandb
 from cotorra.logger import Logger
 from cotorra.model import HEADS, head_options
 
@@ -110,7 +109,7 @@ class Loss:
         likelier
         """
         logits = outputs.get("logits")[:, :-1]
-        # a tensor rather than a bare 0.0, since `custom_loss` calls `.item()`
+        # a tensor rather than a bare 0.0, since `custom_loss` calls `.detach()`
         if not self.n_cats:
             return t.zeros((), device=logits.device, dtype=t.float32)
         shift_labels = labels[:, 1:].to(logits.device)
@@ -182,33 +181,37 @@ class Loss:
             )
         return loss.to(dtype=t.float32)
 
-    def custom_loss(self, outputs, labels, **kwargs):
+    def custom_loss(self, outputs, labels, terms: dict | None = None, **kwargs):
+        """
+        the configured objective: cross-entropy plus each weighted term its blocks
+        ask for. Given a dict `terms`, it also records each term there, unweighted
+        and detached, under the name it gets logged by; `TrainerWithCustomLoss`
+        averages them for its logs, left on the device so that no batch waits on
+        the host
+        """
         loss = 0.0
-        log = dict()
+        terms = dict() if terms is None else terms
         if "label_weighted_loss" in self.cfg:
             label_weighted_loss = self.label_weighted_loss(outputs, labels)
-            log |= {"label_weighted_loss": label_weighted_loss.item()}
+            terms["label_weighted_loss"] = label_weighted_loss.detach()
             loss += label_weighted_loss
         else:
             x_ent_loss = self.x_ent_loss(outputs, labels)
-            log |= {"x_ent_loss": x_ent_loss.item()}
+            terms["x_ent_loss"] = x_ent_loss.detach()
             loss += x_ent_loss
         if "balanced_toi_loss" in self.cfg:
             balanced_toi_loss = self.balanced_toi_loss(outputs, labels)
-            log |= {"balanced_toi_loss": balanced_toi_loss.item()}
+            terms["balanced_toi_loss"] = balanced_toi_loss.detach()
             bce_weight = self.cfg.balanced_toi_loss.get("bce_weight", 1.0)
             loss += bce_weight * balanced_toi_loss
         if "quantile_token_loss" in self.cfg:
             quantile_token_loss = self.quantile_token_loss(outputs, labels)
-            log |= {"quantile_token_loss": quantile_token_loss.item()}
+            terms["quantile_token_loss"] = quantile_token_loss.detach()
             loss += self.cfg.quantile_token_loss.qt_weight * quantile_token_loss
         for name, options in self.heads.items():
             head_loss = self.head_loss(outputs, name)
-            log |= {f"{name}_loss": head_loss.item()}
+            terms[f"{name}_loss"] = head_loss.detach()
             loss += options["weight"] * head_loss
-        if wandb.run is not None:
-            log |= {"custom_loss": loss.item()}
-            wandb.log(log)
         return loss
 
 

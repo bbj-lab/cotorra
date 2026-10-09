@@ -31,7 +31,15 @@ train / tune   →  extract  →  rep-based-score
 - **extract** — run a trained model over inference contexts, write hidden-state
   feature tables to `--output-home` (default: `--processed-data-home`) as
   `features[-all]-<split>[-<i>-of-<n>]-<model_name>.parquet` (`-all` with
-  `--all-times`; the shard suffix once a split exceeds `extract.shard_size`).
+  `--all-times`; the shard suffix once a split exceeds `extract.shard_size`), a
+  row per row of `<split>_for_inference.parquet`, in its order and led by its
+  `subject_id` (kept wherever every split's table has one). `-t`/`-n`/`-d`
+  (`--time-to-event`, `--time-to-next-token`, `--discharge-disposition`) add
+  float32 head columns after `features`, read at its positions (a value per row,
+  or with `--all-times` a `max_seq_len` list, NaN after the row's final position,
+  as `features` is): `time_to_event` and `time_to_next_token` in hours, and a
+  `<class>_prob` per disposition class; `HEAD_COLUMNS` in
+  [extractor.py](src/cotorra/extractor.py) maps each head name to its columns.
 - **rep-based-score** — fit a lightweight sklearn/boosting estimator on extracted
   features (requires `extract` first). It globs `features-<split>*-…` from
   `--processed-data-home`, so features extracted to another `--output-home`
@@ -55,8 +63,7 @@ the classes.
 | [tuner.py](src/cotorra/tuner.py)                         | `Tuner`                                 | `Trainer` + Optuna hyperparameter search                     |
 | [loss.py](src/cotorra/loss.py)                           | `Loss`                                  | custom losses (quantile-token, balanced-TOI) + head terms    |
 | [model.py](src/cotorra/model.py)                         | `CotorraForCausalLM`, `Head` subclasses | causal LM carrying any combination of secondary heads        |
-| [generator.py](src/cotorra/generator.py)                 | `generate`, `Trajectory`                | autoregressive (time, token) generation from a TNT head      |
-| [extractor.py](src/cotorra/extractor.py)                 | `Extractor`                             | hidden-state extraction                                      |
+| [extractor.py](src/cotorra/extractor.py)                 | `Extractor`                             | hidden-state and head-prediction extraction                  |
 | [scorer_rep_based.py](src/cotorra/scorer_rep_based.py)   | `RepBasedScorer`, `EstimatorType`       | estimator-on-features scoring                                |
 | [scorer_generative.py](src/cotorra/scorer_generative.py) | `GenerativeScorer`                      | SCOPE/REACH generative scoring                               |
 | [logger.py](src/cotorra/logger.py)                       | `Logger`                                | rich logging + bootstrap-CI eval summaries                   |
@@ -69,19 +76,21 @@ affects tuning too.
 In [model.py](src/cotorra/model.py), a model is a backbone plus any combination
 of secondary heads, each a `Head` subclass registered in `HEADS` by its `name`
 (`tte`, `tnt`, `disposition`). That name keys the head's `<name>_objective`
-training block, its entry in `CotorraConfig.heads`, and its `<name>_pred` /
-`<name>_loss` output fields; its `target` names the batch column it's scored
-against. Inheritance is for what heads share: `TteHead` and `TntPointHead` are
-`Log1pHoursHead`s, and `TntPointHead` and `TntMixtureHead` are `TntHead`s, the
-interface generation uses. The combinations live in one class,
-`CotorraForCausalLM`, which builds a `ModuleDict` of the heads its config lists,
-so adding an objective takes a `Head` subclass in `HEADS` plus its two output
-fields, not a new model class. `head_options` turns the training config's blocks
-into the heads' options (resolving the disposition `classes` patterns against the
-vocab) and is the one place `Trainer`, `Loader` and `Loss` read them from.
-`Trainer.model_init` builds a stock HF model when no objective is set. Importing
-`cotorra.model` registers `cotorra` with the HF auto classes, so anything that
-loads a saved `mdl-<run_name>/` (as `Extractor` does) has to import it first.
+training block, its entry in `CotorraConfig.heads`, its `<name>_pred` /
+`<name>_loss` output fields, and its `extract` columns in `HEAD_COLUMNS`; its
+`target` names the batch column it's scored against. Inheritance is for what
+heads share: `TteHead` and `TntPointHead` are `Log1pHoursHead`s, and
+`TntPointHead` and `TntMixtureHead` are `TntHead`s, the interface sampling and
+extraction use. The combinations live in one class, `CotorraForCausalLM`, which
+builds a `ModuleDict` of the heads its config lists, so adding an objective takes
+a `Head` subclass in `HEADS` plus its two output fields, a `HEAD_COLUMNS` entry
+and an `extract` flag (tests hold both to `HEADS`'s keys), not a new model class.
+`head_options` turns the training config's blocks into the heads' options
+(resolving the disposition `classes` patterns against the vocab) and is the one
+place `Trainer`, `Loader` and `Loss` read them from. `Trainer.model_init` builds
+a stock HF model when no objective is set. Importing `cotorra.model` registers
+`cotorra` with the HF auto classes, so anything that loads a saved
+`mdl-<run_name>/` (as `Extractor` does) has to import it first.
 
 Point heads (`Log1pHoursHead`: `TteHead`, and the default TNT head) are an
 `nn.Linear` read through a softplus, so their log1p-hours, and the hours `expm1`
@@ -92,14 +101,20 @@ given the hidden state _and the next token's embedding_ (layer-normed first: a
 raw embedding sits ~50x below the normed hidden state, and unnormalized the head
 learned the zero-gap rate but not which tokens arrive at once), it emits a
 `ZeroInflatedLogNormalMixture` (an exact-zero gap for same-timestamp tokens, else
-a log-normal mixture), trained by NLL and leaving `tnt_pred` empty. Every head is
+a log-normal mixture), trained by NLL and leaving `tnt_pred` empty.
+`CotorraForCausalLM.predict_hours_to_next_token` (what `extract -n` writes) is
+either kind's prediction from the history alone, through
+`TntHead.mean_log1p_hours`: a point head's output, or a mixture head's mean
+log1p-hours given each next token, averaged over the LM head's softmax and never
+conditioned on the observed or likeliest one (the per-token mean is
+`ZeroInflatedLogNormalMixture.mean_log1p_hours`, by Gauss-Hermite quadrature).
+That costs a vocabulary's worth of head evaluations per position, so
+`TntMixtureHead.mean_log1p_hours` splits `proj`'s first layer over `[h; norm(e)]`
+to compute the vocabulary's half once per call and chunks positions by
+`chunk_elements`; a change to `proj`'s layout has to change it too. Every head is
 scored unshifted (position i against its own target) over every position,
 whatever `logits_to_keep` trims, and each loss is summed then normalized so a
 batch with nothing to score still gives its head a gradient.
-[generator.py](src/cotorra/generator.py) runs its own KV-cached loop rather than
-HF's `generate()`: `generate()` builds integer position ids from the attention
-mask, but each new token needs the time-based RoPE position its sampled time
-gives it.
 
 ### Configuration model (important)
 
@@ -111,17 +126,17 @@ each overriding the one before:
    (`default_file`, in [src/cotorra/config/](src/cotorra/config/)); a
    `DictConfig` passed instead is copied as is,
 2. `overrides`: the `key=value` arguments trailing a CLI command, applied by
-   `apply_overrides` (`key=value` sets a key, adding it if absent, so a typo
-   adds a stray key rather than failing; `~key` deletes one; a Hydra-style
-   leading `+`/`++` is ignored),
+   `apply_overrides` (`key=value` sets a key, adding it if absent, so a typo adds
+   a stray key rather than failing; `~key` deletes one; a Hydra-style leading
+   `+`/`++` is ignored),
 3. keyword args passed to the constructor (only non-`None` values).
 
 A passed config file _replaces_ the packaged default rather than merging into it,
 so a key the file omits is absent from `self.cfg`, not filled in from the
-default, though an override can still add it. The CLI passes `overrides=` to
-each class, which forwards it to `Configurable` through `**kwargs`. Read optional
-keys defensively with `self.cfg.get(...)` or `"key" in self.cfg` — several
-features (`time_based_rope`, `quantile_token_loss`, `balanced_toi_loss`, and the
+default, though an override can still add it. The CLI passes `overrides=` to each
+class, which forwards it to `Configurable` through `**kwargs`. Read optional keys
+defensively with `self.cfg.get(...)` or `"key" in self.cfg` — several features
+(`time_based_rope`, `quantile_token_loss`, `balanced_toi_loss`, and the
 `*_objective` blocks) are toggled purely by _presence_ of their config block, not
 a boolean, so an override setting one to `null` leaves it on and `~key` is what
 turns it off.
@@ -215,17 +230,18 @@ Stages read from `--processed-data-home`. Expected files (produced by cocoa's
 
 - `tokens_times.parquet` — `subject_id`, `tokens` (list[u32]), `times`
   (list[datetime]), plus `hours_to_end_time` (list[float], written under cocoa's
-  `include_hours_to_end_time`) when training with `tte_objective`. Only
-  training reads its rows, but `Loader` asserts the file exists and `Extractor`
-  builds a `Loader`, so `extract` needs it too.
+  `include_hours_to_end_time`) when training with `tte_objective`. Only training
+  reads its rows, but `Loader` asserts the file exists and `Extractor` builds a
+  `Loader`, so `extract` needs it too.
 - `subject_splits.parquet` — `subject_id` → `split` ∈ {`train`, `tuning`,
   `held_out`}.
 - `tokenizer.yaml` — must contain a `lookup:` map (token label → int id), incl.
   `BOS`, `EOS`; `quantile_token_loss` also reads `cfg.n_bins`.
 - `{train,tuning,held_out}_for_inference.parquet` — for extract/score; include
-  `tokens_past`, optional `s_elapsed_past`, and `<TOKEN>_past` / `<TOKEN>_future`
-  label columns. `Trainer`'s `Loader` loads these too when present, so a training
-  config with `tte_objective` needs `hours_to_end_time_past` in them.
+  `tokens_past`, optional `subject_id` and `s_elapsed_past`, and `<TOKEN>_past` /
+  `<TOKEN>_future` label columns. `Trainer`'s `Loader` loads these too when
+  present, so a training config with `tte_objective` needs
+  `hours_to_end_time_past` in them.
 
 `Loader` derives per-split `{split}_tokens_times.parquet` caches, adding
 `s_elapsed` and `hours_to_next_token` (the TNT target, nan on each record's last
@@ -233,9 +249,9 @@ token), and regenerates them when `tokens_times.parquet` is newer or a cache
 predates a derived column. The disposition target depends on the config's
 `classes`, so it isn't cached: `Loader` labels each record (its last matching
 `DSCG//*` token's class before that token, -100 from it on) with `datasets.map`
-before packing splits records across chunks. Token-set selectors (`tokens_of_interest`,
-`target_tokens`) support **fnmatch patterns** (e.g. `LABEL//*`), resolved against
-the tokenizer vocab.
+before packing splits records across chunks. Token-set selectors
+(`tokens_of_interest`, `target_tokens`) support **fnmatch patterns** (e.g.
+`LABEL//*`), resolved against the tokenizer vocab.
 
 ## Gotchas
 
@@ -249,14 +265,23 @@ the tokenizer vocab.
   at module load, so [cli.py](src/cotorra/cli.py) imports it _lazily_ inside the
   command. Preserve that laziness so the base install works without these
   heavy/optional deps.
-- **`sec_per_pos_id` isn't saved with the model.** `generate` (like `extract`)
-  has to be told the `time_based_rope` spacing the model was trained with; it's
-  in `mdl-<run_name>-training.yaml`.
+- **`sec_per_pos_id` isn't saved with the model.** `extract` has to be told the
+  `time_based_rope` spacing the model was trained with; it's in
+  `mdl-<run_name>-training.yaml`.
 - **`time_based_rope` must match between training and extraction.** If a model
   was trained with time-based RoPE, the extraction config must enable it too
   (same `sec_per_pos_id`), or position ids won't line up. `generative-score`
   can't honor it at all: `GenerativeScorer` hands SGLang only `tokens_past`, and
   SGLang assigns sequential positions.
+- **`extract`'s head flags read the saved model, not the config.** `-t`/`-n`/`-d`
+  need a `cotorra` checkpoint whose `config.heads` carries the head; a model
+  trained without objectives is a stock HF one with none, and `Extractor.extract`
+  refuses it (`_check_heads`) before extracting a batch or writing a table,
+  though `Extractor.__init__` has by then loaded the model and built the `Loader`
+  (which may refresh the split caches). `*_objective` blocks in the extraction
+  config don't enable them: they'd make its `Loader` load the heads' training
+  targets, so a `tte_objective` there fails without end times and, with them,
+  copies `hours_to_end_time_past` into every feature table.
 - **`remove_unused_columns: false`** in `training_args` is required — otherwise
   HF drops the `s_elapsed` column that time-based RoPE needs.
 - **`--resume-from-checkpoint` is safe to pass unconditionally**: `Trainer.train`

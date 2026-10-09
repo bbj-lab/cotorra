@@ -118,6 +118,7 @@ tables in the same `processed_data_home` directory:
 
 These tables are expected to include at least:
 
+- `subject_id` (optional; carried into the extracted feature tables)
 - `tokens_past` (the model context used for extraction/scoring)
 - `s_elapsed_past` (if using `time_based_rope`)
 - token-specific label columns such as `<TOKEN>_past` and `<TOKEN>_future` used
@@ -219,9 +220,8 @@ that specifies:
       rather than a single value: the chance that the next token shares this
       one's timestamp, plus a mixture of this many log-normals over the positive
       gap, conditioned on which token comes next and trained by likelihood.
-      Needed to sample realistic times when
-      [generating](#generating-time-token-pairs). Left unset, the head predicts
-      log1p-hours by squared error.
+      Needed to sample realistic times. Left unset, the head predicts log1p-hours
+      by squared error.
 - **disposition_objective** _(optional)_: Trains a supervised head that predicts,
   at each token, the record's discharge disposition, read off its `DSCG//*`
   token, by cross-entropy.
@@ -236,8 +236,7 @@ that specifies:
 
     _Note:_ SGLang (behind `generative-score`) and vLLM number positions by token
     index and can't take time-based ones, so they run a model trained with this
-    on positions it never saw; only `cotorra.generator`'s slower PyTorch loop
-    generates from it faithfully.
+    on positions it never saw.
 
 - **training_args**: Arguments passed to HuggingFace's
   [`TrainingArguments`](https://huggingface.co/docs/transformers/en/main_classes/trainer#transformers.TrainingArguments).
@@ -290,8 +289,8 @@ The TNT head turns the model into a marked point process: the language-modelling
 head predicts _what_ the next token is, and the TNT head _when_ it arrives. It
 comes in two kinds. By default it predicts a single value per token (log1p-hours,
 by squared error). With `mixture_components` set, it predicts a distribution over
-the gap instead, given which token comes next, which is what
-[generating](#generating-time-token-pairs) needs.
+the gap instead, given which token comes next, which is what sampling realistic
+times needs.
 
 The disposition head is supervised. At each token it predicts how the record will
 end, for example the chance that the patient dies before discharge
@@ -390,65 +389,19 @@ To train one or more:
 
     A mixture TNT head leaves `out.tnt_pred` empty, since its prediction depends
     on which token comes next; `model.tnt_distribution(hidden_states, next_ids)`
-    gives the distribution, with `sample()`, `log_prob(hours)` and
-    `point_estimate()`.
+    gives the distribution, with `sample()`, `log_prob(hours)`,
+    `point_estimate()` and `mean_log1p_hours()`. For a prediction from the
+    history alone, which is what `cotorra extract --time-to-next-token` writes,
+    `model.predict_hours_to_next_token(hidden_states)` averages the mean
+    log1p-hours given each possible next token over the model's own next-token
+    probabilities, then converts it to hours; for a point head it gives
+    `out.tnt_pred.float().expm1()`. Both methods take the last hidden states,
+    `out.hidden_states[-1]` from a forward pass with `output_hidden_states=True`.
 
-5. **Generate (time, token) pairs** with a TNT head. See
-   [Generating (time, token) pairs](#generating-time-token-pairs) below.
-
-    The other stages don't use the secondary heads yet: `cotorra extract` reads
-    hidden states from a `cotorra` model as from any other, and
-    `generative-score` hasn't been tested with one.
-
-### Generating (time, token) pairs
-
-`cotorra.generator.generate` continues each prompt one (time, token) pair at a
-time. It samples the next token, then the hours until it (given that token, for a
-mixture head), and feeds the pair back in: the token as input, and the time
-through the token's time-based RoPE position, exactly as training builds it. So
-each new pair is conditioned on every time and token generated before it:
-
-```python
-import polars as pl
-import torch as t
-from omegaconf import OmegaConf
-from transformers import AutoModelForCausalLM
-
-from cotorra.generator import generate  # importing it registers `cotorra` too
-
-model = AutoModelForCausalLM.from_pretrained("output/mdl-<run_name>").eval()
-cfg = OmegaConf.load("output/mdl-<run_name>-training.yaml")
-prompts = pl.read_parquet("processed/held_out_for_inference.parquet", n_rows=8)
-
-trajectories = generate(
-    model,
-    [t.tensor(x) for x in prompts["tokens_past"]],
-    [t.tensor(x) for x in prompts["s_elapsed_past"]],
-    sec_per_pos_id=cfg.time_based_rope.sec_per_pos_id,  # None without it
-    max_new_tokens=512,
-    max_hours=24,  # stop 24 hours past each prompt's last token
-)
-for traj in trajectories:
-    print(traj.tokens, traj.s_elapsed)  # new tokens; seconds since record start
-```
-
-- **`sec_per_pos_id`** has to match what the model was trained with under
-  `time_based_rope`; the saved model doesn't record it, but
-  `mdl-<run_name>-training.yaml` does. For a model trained without time-based
-  RoPE pass `None`: generation still produces times, but the model never sees
-  them.
-- **Stopping:** a row ends at its first `EOS` (kept), after `max_new_tokens`, or
-  at the first token falling past `max_hours` (dropped).
-- **Sampling:** `do_sample=False` decodes greedily (the likeliest token and the
-  time head's point estimate); pass a `torch.Generator` as `generator` for
-  reproducible draws. For Monte-Carlo estimates, repeat each prompt as many times
-  as you want draws.
-- **Use a mixture head.** A point head has only one value to give and ignores
-  which token was sampled, so its times are deterministic and blur the
-  same-timestamp tokens of an event into a small positive gap.
-- **Batching:** prompts are left-padded into one batch, so chunk large cohorts.
-  This runs in PyTorch rather than SGLang (which can't take time-based
-  positions), so expect it to be slower than `generative-score`.
+Of the other stages, `cotorra extract` can add the heads' predictions to the
+feature tables it writes (see [Extraction](#2-extraction)); `rep-based-score`
+fits on the features alone, and `generative-score` hasn't been tested with a
+`cotorra` model.
 
 ### Outputs
 
@@ -469,7 +422,13 @@ tasks. It:
 2. Runs the model over each subject's `tokens_past` context.
 3. Extracts the hidden-state representation at the final position by default, or
    at all time steps when `--all-times` is set.
-4. Writes one feature table per split (optionally sharded).
+4. Optionally adds the predictions of the model's secondary heads at the same
+   positions: the hours until the record's end time (`--time-to-event`), the
+   hours until the next token (`--time-to-next-token`), and the probability of
+   each discharge disposition (`--discharge-disposition`). Each needs a `cotorra`
+   model carrying that head (see
+   [Training secondary heads](#training-secondary-heads)).
+5. Writes one feature table per split (optionally sharded).
 
 Extraction is driven by a YAML config (the package ships a default; see
 [`./src/cotorra/config/extraction.yaml`](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/extraction.yaml))
@@ -481,7 +440,9 @@ that specifies:
     - **sec_per_pos_id**: Number of seconds represented by one position id
       increment.
 - **extract**:
-    - **max_len**: Maximum input length (tokens) during extraction.
+    - **max_len**: Maximum input length (tokens) during extraction. A longer
+      context keeps its first `max_len` tokens, so its features and head columns
+      are read there, short of the prediction point.
     - **batch_size**: Batch size for inference.
     - **shard_size** _(optional)_: Number of samples per output parquet shard.
       Omit to write a single file per split.
@@ -489,10 +450,37 @@ that specifies:
 ### Outputs
 
 - `features-<split>-<model_name>.parquet` — extracted representations for each
-  split (`train`, `tuning`, `held_out`). With `--all-times`, files are named
+  split (`train`, `tuning`, `held_out`), in a `features` column, one row per row
+  of `<split>_for_inference.parquet` and in its order, led by its `subject_id`
+  where it has one. With `--all-times`, files are named
   `features-all-<split>-<model_name>.parquet`; when `shard_size` is set, each
   split is written across `-<index>-of-<count>` shards. These files are the input
-  to `cotorra rep-based-score`.
+  to `cotorra rep-based-score`, which reads only `features`. The head flags add
+  float32 columns after `features`, always in this order:
+    - `time_to_event` (`--time-to-event`): the hours until the record's end time,
+      `expm1` of the TTE head's log1p-hours.
+    - `time_to_next_token` (`--time-to-next-token`): the hours until the next
+      token, predicted from the history alone. For a point head that's `expm1` of
+      its log1p-hours; a mixture head predicts the gap given the next token, so
+      its mean log1p-hours given each possible next token is first averaged over
+      the model's own next-token probabilities, rather than conditioned on the
+      token that actually follows. That average costs a vocabulary's worth of
+      head evaluations per position: little at the final position, but with
+      `--all-times` it can take several times as long as the forward pass.
+    - `<class>_prob` (`--discharge-disposition`): the probability of each
+      discharge disposition, one column per class of the disposition head (e.g.
+      `DSCG//expired_prob`), in the head's order,
+      `model.heads["disposition"].classes`: token-id order, whatever order the
+      training config listed `classes` in. They sum to 1.
+
+    Each holds a value per row, read where `features` is; with `--all-times`, a
+    list per row of length `max_seq_len`, holding a value at each position up to
+    the final one and NaN after it, as `features` does. The heads and their
+    classes come from the saved model, so the extraction config needs no
+    `*_objective` block. A flag for a head the model doesn't carry stops
+    extraction with an error once the model is loaded, before any feature table
+    is written; a model trained without any objective is a stock HuggingFace
+    model and carries none.
 
 ## (3) Scoring
 
@@ -682,20 +670,30 @@ with commands:
     │                             adding it if need be, and ~key deletes one  │
     ╰─────────────────────────────────────────────────────────────────────────╯
     ╭─ Options ───────────────────────────────────────────────────────────────╮
-    │    --extraction-config    -e      PATH  Extraction configuration file   │
-    │                                         (overrides default)             │
-    │ *  --processed-data-home  -p      TEXT  Processed data directory        │
-    │                                         [required]                      │
-    │ *  --model-home           -m      TEXT  Directory of the trained model  │
-    │                                         to extract from                 │
-    │                                         [required]                      │
-    │    --output-home          -o      TEXT  Output directory for extracted  │
-    │                                         features, defaults to           │
-    │                                         processed-data-home             │
-    │    --all-times            -a            Extract features for all time   │
-    │                                         steps (instead of just the      │
-    │                                         final one)?                     │
-    │    --help                 -h            Show this message and exit.     │
+    │    --extraction-config      -e      PATH  Extraction configuration file │
+    │                                           (overrides default)           │
+    │ *  --processed-data-home    -p      TEXT  Processed data directory      │
+    │                                           [required]                    │
+    │ *  --model-home             -m      TEXT  Directory of the trained      │
+    │                                           model to extract from         │
+    │                                           [required]                    │
+    │    --output-home            -o      TEXT  Output directory for          │
+    │                                           extracted features, defaults  │
+    │                                           to processed-data-home        │
+    │    --all-times              -a            Extract features for all time │
+    │                                           steps (instead of just the    │
+    │                                           final one)?                   │
+    │    --time-to-event          -t            Add the time-to-event head's  │
+    │                                           predicted hours to the        │
+    │                                           features?                     │
+    │    --time-to-next-token     -n            Add the time-to-next-token    │
+    │                                           head's predicted hours, given │
+    │                                           the history alone, to the     │
+    │                                           features?                     │
+    │    --discharge-disposition  -d            Add the disposition head's    │
+    │                                           probability of each discharge │
+    │                                           disposition to the features?  │
+    │    --help                   -h            Show this message and exit.   │
     ╰─────────────────────────────────────────────────────────────────────────╯
     ```
 

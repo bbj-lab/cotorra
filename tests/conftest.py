@@ -21,7 +21,14 @@ import numpy as np
 import polars as pl
 import pytest
 import synth
-from helpers import base_extraction_cfg, base_scoring_cfg, base_training_cfg, write_cfg
+from helpers import (
+    TINY_MODEL_ARGS,
+    base_extraction_cfg,
+    base_scoring_cfg,
+    base_training_cfg,
+    tiny_model_dir,
+    write_cfg,
+)
 from omegaconf import OmegaConf
 from rich.logging import RichHandler
 
@@ -234,6 +241,58 @@ def fake_model_home(built_trainer, tmp_path_factory) -> pathlib.Path:
     model_home = tmp_path_factory.mktemp("fake-model") / "mdl-fake"
     built_trainer.model.save_pretrained(model_home)
     return model_home
+
+
+@pytest.fixture(scope="session")
+def model_with_heads(
+    tokenizer_cfg, tmp_path_factory
+) -> collections.abc.Callable[..., pathlib.Path]:
+    """
+    saves a tiny, randomly-initialized checkpoint carrying the secondary heads
+    named -- any of `tte`, `tnt` (a mixture with `mixture=True`), `disposition`
+    (over `classes` patterns, every `DSCG//*` token by default) -- and returns
+    its home. Built from the synthetic tokenizer's lookup as
+    `Trainer.model_init` builds a model from objective blocks, and initialized
+    wide (`initializer_range=0.5`, against the usual 0.02) so that
+    neighbouring positions give values far enough apart to tell apart. Each
+    combination is built once a session
+    """
+    import torch as t
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    from cotorra.model import CotorraConfig, head_options
+
+    built = {}
+
+    def make(*names, mixture=False, classes=None, dtype="float32") -> pathlib.Path:
+        key = (names, mixture, None if classes is None else tuple(classes), dtype)
+        if key not in built:
+            objectives = {f"{name}_objective": {} for name in names}
+            if mixture:
+                objectives["tnt_objective"]["mixture_components"] = 3
+            if classes is not None:
+                objectives["disposition_objective"]["classes"] = list(classes)
+            lookup = tokenizer_cfg.lookup
+            config = AutoConfig.from_pretrained(
+                tiny_model_dir(),
+                vocab_size=len(lookup),
+                bos_token_id=lookup.BOS,
+                eos_token_id=lookup.EOS,
+                **TINY_MODEL_ARGS,
+                initializer_range=0.5,
+                dtype=dtype,
+            )
+            if heads := head_options(OmegaConf.create(objectives), lookup):
+                config = CotorraConfig(text_config=config, heads=heads)
+            t.manual_seed(0)
+            home = tmp_path_factory.mktemp("model-with-heads") / "mdl-{}{}-{}".format(
+                "-".join(names) or "stock", "-mixture" if mixture else "", dtype
+            )
+            AutoModelForCausalLM.from_config(config).save_pretrained(home)
+            built[key] = home
+        return built[key]
+
+    return make
 
 
 @pytest.fixture
