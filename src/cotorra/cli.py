@@ -67,11 +67,10 @@ def train(
             "--resume-from-checkpoint",
             "-r",
             help="Try to resume training from the latest checkpoint in --output-home.",
-            is_flag=True,
         ),
     ] = False,
     verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
+        bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
     overrides: Overrides = None,
 ):
@@ -122,7 +121,7 @@ def tune(
         ),
     ] = ...,
     verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
+        bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
     overrides: Overrides = None,
 ):
@@ -181,7 +180,6 @@ def extract(
             "--all-times",
             "-a",
             help="Extract features for all time steps (instead of just the final one)?",
-            is_flag=True,
         ),
     ] = False,
     time_to_event: Annotated[
@@ -272,7 +270,7 @@ def generative_score(
         ),
     ] = None,
     verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
+        bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
     overrides: Overrides = None,
 ):
@@ -342,7 +340,7 @@ def rep_based_score(
         ),
     ] = EstimatorType.lightgbm,
     verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Verbose logging", is_flag=True)
+        bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
     overrides: Overrides = None,
 ):
