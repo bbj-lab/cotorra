@@ -45,10 +45,12 @@ def test_each_command_requires_processed_data_home(command):
 
 @pytest.mark.parametrize("command", COMMANDS)
 def test_each_command_takes_config_overrides(command):
-    """typer >= 0.27 no longer upper-cases an argument's name in its usage line"""
+    """typer >= 0.27 no longer upper-cases an argument's name in its usage line,
+    and typer < 0.26 under click 8.5 drops the argument's help from `-h`"""
     result = runner.invoke(app, [command, "-h"])
     assert result.exit_code == 0
     assert "[overrides]..." in result.output.lower()
+    assert "Config overrides" in result.output
 
 
 @pytest.mark.parametrize("command", COMMANDS)

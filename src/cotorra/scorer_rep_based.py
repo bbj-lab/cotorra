@@ -192,19 +192,7 @@ class RepBasedScorer(Configurable):
         mdl.fit(
             X=self.features["train"][train_valid],
             y=train_label[train_valid],
-            **(
-                {
-                    "eval_set": [
-                        (
-                            self.features["tuning"][tuning_valid],
-                            tuning_label[tuning_valid],
-                        )
-                    ],
-                    "eval_metric": "auc",
-                }
-                if str(self.estimator_type).lower() in ("lightgbm", "xgboost")
-                else {}
-            ),
+            **fit_kwargs,
         )
 
         scores = np.nan * np.ones_like(held_out_valid)
