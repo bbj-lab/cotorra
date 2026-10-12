@@ -4,6 +4,7 @@
 load data and prepare for training / evaluation
 """
 
+import collections.abc
 import pathlib
 
 import datasets as ds
@@ -16,7 +17,9 @@ from cotorra.model import HEADS, head_options
 from cotorra.util import batched_iter
 
 
-def disposition_targets(input_ids, class_of: dict[int, int]) -> np.ndarray:
+def disposition_targets(
+    input_ids: collections.abc.Sequence[int], class_of: dict[int, int]
+) -> np.ndarray:
     """
     each token's target for a disposition head: the class of its record's last
     disposition token -- `class_of` maps each such token's id to its class -- for
@@ -31,7 +34,9 @@ def disposition_targets(input_ids, class_of: dict[int, int]) -> np.ndarray:
     return target
 
 
-def label_dispositions(batch: dict, class_of: dict[int, int]) -> dict:
+def label_dispositions(
+    batch: collections.abc.Mapping[str, list], class_of: dict[int, int]
+) -> dict:
     """`disposition_targets` for a batch of records, as `datasets.map` takes it"""
     return {
         "disposition": [disposition_targets(x, class_of) for x in batch["input_ids"]]
@@ -47,9 +52,10 @@ class Loader(Configurable):
 
     def __init__(
         self,
-        training_cfg: pathlib.Path | str | DictConfig = None,
-        processed_data_home: pathlib.Path = None,
-    ):
+        training_cfg: pathlib.Path | str | DictConfig | None = None,
+        processed_data_home: pathlib.Path | None = None,
+    ) -> None:
+        self.require(processed_data_home=processed_data_home)
         super().__init__(training_cfg)
         self.rng = np.random.default_rng(42)
         self.processed_data_home = processed_data_home
@@ -150,7 +156,7 @@ class Loader(Configurable):
             else None
         )
 
-    def get_train_data(self):
+    def get_train_data(self) -> ds.Dataset:
         return ds.Dataset.from_generator(
             batched_iter,
             gen_kwargs={
@@ -161,7 +167,7 @@ class Loader(Configurable):
             },
         ).with_format("torch")
 
-    def get_tuning_data(self):
+    def get_tuning_data(self) -> ds.Dataset:
         return ds.Dataset.from_generator(
             batched_iter,
             gen_kwargs={

@@ -39,11 +39,11 @@ class RepBasedScorer(Configurable):
 
     def __init__(
         self,
-        scoring_cfg: pathlib.Path | str = None,
-        processed_data_home: pathlib.Path | str = None,
-        model_home: pathlib.Path | str = None,
-        output_home: pathlib.Path | str = None,
-        training_home: pathlib.Path | str = None,
+        scoring_cfg: pathlib.Path | str | None = None,
+        processed_data_home: pathlib.Path | str | None = None,
+        model_home: pathlib.Path | str | None = None,
+        output_home: pathlib.Path | str | None = None,
+        training_home: pathlib.Path | str | None = None,
         estimator_type: typing.Literal[
             "k-NN",
             "lightGBM",
@@ -54,7 +54,8 @@ class RepBasedScorer(Configurable):
             "XGBoost",
         ] = "lightGBM",
         **kwargs,
-    ):
+    ) -> None:
+        self.require(processed_data_home=processed_data_home, model_home=model_home)
         super().__init__(scoring_cfg, **kwargs)
         self.processed_data_home, self.model_home = map(
             lambda x: pathlib.Path(x).expanduser().resolve(),
@@ -115,7 +116,7 @@ class RepBasedScorer(Configurable):
             f"Processed expressions to generate {self.grokked_outcome_tokens=}"
         )
 
-    def score_label(self, target_token="DSCG//expired"):
+    def score_label(self, target_token: str = "DSCG//expired") -> np.ndarray:
         cols = (~pl.col(f"{target_token}_past"), f"{target_token}_future")
         train_valid, train_label = (
             self.labels["train"].select(*cols).collect().to_numpy().T
@@ -202,14 +203,14 @@ class RepBasedScorer(Configurable):
 
         return scores
 
-    def score(self):
+    def score(self) -> dict[str, np.ndarray]:
         res = dict()
         for tt in tqdm.tqdm(self.grokked_outcome_tokens, position=0):
             res[f"{tt}_rep_score"] = self.score_label(target_token=tt)
 
         return res
 
-    def save_all(self, verbose: bool = False):
+    def save_all(self, verbose: bool = False) -> None:
         (
             df_res := self.labels["held_out"].with_columns(pl.from_dict(self.score()))
         ).sink_parquet(self.output_home)

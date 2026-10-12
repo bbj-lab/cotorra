@@ -14,7 +14,7 @@ from omegaconf import DictConfig, OmegaConf
 from cotorra.logger import Logger
 
 
-def apply_overrides(cfg: DictConfig, overrides: collections.abc.Iterable[str]):
+def apply_overrides(cfg: DictConfig, overrides: collections.abc.Iterable[str]) -> None:
     """
     edits `cfg` in place with `overrides`, in order: `key=value` sets a key,
     adding it if `cfg` lacks it (a leading `+` or `++`, as Hydra writes an
@@ -47,10 +47,10 @@ class Configurable:
 
     def __init__(
         self,
-        config_file: pathlib.Path | str | DictConfig = None,
-        overrides: collections.abc.Iterable[str] = None,
+        config_file: pathlib.Path | str | DictConfig | None = None,
+        overrides: collections.abc.Iterable[str] | None = None,
         **kwargs,
-    ):
+    ) -> None:
         self.config_file = config_file
         cfg = (
             # one already loaded, as a `Trainer` hands its own to its `Loader`
@@ -68,3 +68,14 @@ class Configurable:
         )
 
         self.logger = Logger()
+
+    def require(self, **arguments: object) -> None:
+        """refuse to go on without any of `arguments`, those a stage can't run
+        without. A stage's directories default to None, a holdover from when its
+        config could name them, so one left out would otherwise fail later, in
+        `pathlib`, without saying which"""
+        if missing := [name for name, value in arguments.items() if value is None]:
+            raise TypeError(
+                f"{type(self).__name__} needs "
+                + " and ".join(f"`{name}`" for name in missing)
+            )

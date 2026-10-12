@@ -10,8 +10,9 @@ import subprocess
 import sys
 import textwrap
 
+import polars as pl
 import pytest
-from helpers import base_scoring_cfg
+from helpers import base_scoring_cfg, write_cfg
 from omegaconf import OmegaConf
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -152,3 +153,131 @@ def test_time_stopping_unsuppresses_the_trunc_token(generation_config_builder):
     )
     assert VOCAB["TRUNC"] not in gen_cfg.suppressed_ids
     assert VOCAB["PAD"] in gen_cfg.suppressed_ids
+
+
+def test_verbose_save_all_summarizes_the_scores_it_writes(
+    processed, target_token, tmp_path, monkeypatch
+):
+    """
+    `save_all` assembles its table as a `pl.DataFrame`, but
+    `Logger.summarize_preds` collects what it selects, which only a
+    `pl.LazyFrame` can, so `-v` used to crash at the very end of a generation
+    run, its scores already written. Built on the synthetic data, with the
+    SGLang engine and the generation itself stubbed out
+    """
+    pytest.importorskip("quick_sco_re", reason="requires the [gen] extra")
+    from cotorra import scorer_generative
+
+    monkeypatch.setattr(scorer_generative, "create_engine", lambda **_: None)
+    cfg = base_scoring_cfg(score={"target_tokens": [target_token]})
+    scorer = scorer_generative.GenerativeScorer(
+        scoring_cfg=write_cfg(tmp_path / "scoring.yaml", cfg),
+        processed_data_home=processed,
+        model_home=tmp_path / "mdl-stub",
+        output_home=tmp_path,
+    )
+    columns = [f"{target_token}_{m}_score" for m in ("mc", "scope", "reach")]
+    future = scorer.ds[f"{target_token}_future"].to_numpy().astype(float)
+
+    async def score():
+        return {column: future for column in columns}
+
+    scorer.score = score
+    scorer.save_all(verbose=True)
+
+    assert set(columns) <= set(pl.read_parquet(scorer.output_home).columns)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("generation",),
+        ("generation", "end_tokens"),
+        ("generation", "end_tokens", "prefixes"),
+        ("generation", "time_stopping"),
+        ("generation", "time_stopping", "time_token_bounds"),
+        ("score", "end_tokens"),
+        ("score", "suppressed_tokens"),
+    ],
+    ids="/".join,
+)
+def test_a_block_or_list_left_empty_reads_as_if_absent(generation_config_builder, path):
+    """an entry left empty in the yaml parses to None, which `.get(key, default)`
+    returns in place of its default, so each of these used to fail on `None.get`
+    or on iterating None; time stopping is on, so that its bounds are read"""
+    build_generation_config, _ = generation_config_builder
+    tracked = ["DSCG//expired", "RESP//imv"]
+    built = {}
+    for how in ("empty", "absent"):
+        cfg = base_scoring_cfg(
+            generation={
+                "time_stopping": {
+                    "enabled": True,
+                    "trunc_token": "TRUNC",
+                    "time_token_bounds": {"TIME//1h-2h": [60, 120]},
+                }
+            }
+        )
+        *parents, leaf = path
+        parent = cfg
+        for key in parents:
+            parent = parent[key]
+        if how == "empty":
+            parent[leaf] = None
+        else:
+            del parent[leaf]
+        built[how] = build_generation_config(
+            OmegaConf.create(cfg), VOCAB, tracked, [VOCAB[name] for name in tracked]
+        )
+    assert built["empty"] == built["absent"]
+
+
+def scorer_with(scoring_cfg: dict, processed, tmp_path, monkeypatch):
+    """a `GenerativeScorer` built on the synthetic data under `scoring_cfg`,
+    with the SGLang engine stubbed out"""
+    pytest.importorskip("quick_sco_re", reason="requires the [gen] extra")
+    from cotorra import scorer_generative
+
+    monkeypatch.setattr(scorer_generative, "create_engine", lambda **_: None)
+    return scorer_generative.GenerativeScorer(
+        scoring_cfg=write_cfg(tmp_path / "scoring.yaml", scoring_cfg),
+        processed_data_home=processed,
+        model_home=tmp_path / "mdl-stub",
+        output_home=tmp_path,
+    )
+
+
+@pytest.mark.parametrize(
+    "blocks, methods",
+    [
+        ({"generation": None, "engine": None}, ["M1", "M2"]),
+        ({"generation": {"methods": None}}, ["M1", "M2"]),
+        ({"generation": {"methods": []}}, []),  # explicit, so kept
+    ],
+    ids=["empty-blocks", "empty-methods", "no-methods"],
+)
+def test_empty_generation_and_engine_blocks_take_their_defaults(
+    blocks, methods, processed, target_token, tmp_path, monkeypatch
+):
+    """as in `build_generation_config`, the scorer read `generation` and `engine`
+    with `.get(key, {})`, which returns a block left empty as None, and an empty
+    `methods:` likewise, which `"M2" in self.methods` then failed on"""
+    cfg = base_scoring_cfg(score={"target_tokens": [target_token]}, **blocks)
+    scorer = scorer_with(cfg, processed, tmp_path, monkeypatch)
+    assert scorer.methods == methods
+    assert scorer.chunk_size == 64
+
+
+def test_a_generative_scorer_without_its_directories_is_refused_by_name(tmp_path):
+    """both default to None, a holdover from when the config named them, and
+    leaving one out used to fail inside `pathlib` without saying which"""
+    pytest.importorskip("quick_sco_re", reason="requires the [gen] extra")
+    from cotorra.scorer_generative import GenerativeScorer
+
+    with pytest.raises(TypeError, match=r"^GenerativeScorer needs `model_home`$"):
+        GenerativeScorer(processed_data_home=tmp_path)
+    with pytest.raises(
+        TypeError,
+        match=r"^GenerativeScorer needs `processed_data_home` and `model_home`$",
+    ):
+        GenerativeScorer()

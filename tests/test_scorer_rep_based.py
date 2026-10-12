@@ -293,3 +293,15 @@ def test_an_estimator_type_member_silently_falls_back_to_lightgbm(
 
     assert fit_spy["chosen"] == ["LGBMClassifier"]
     assert fit_spy["fit_kwargs"] == []
+
+
+def test_a_scorer_without_its_directories_is_refused_by_name(tmp_path):
+    """both default to None, a holdover from when the config named them, and
+    leaving one out used to fail inside `pathlib` without saying which"""
+    with pytest.raises(TypeError, match=r"^RepBasedScorer needs `model_home`$"):
+        RepBasedScorer(processed_data_home=tmp_path)
+    with pytest.raises(
+        TypeError,
+        match=r"^RepBasedScorer needs `processed_data_home` and `model_home`$",
+    ):
+        RepBasedScorer()

@@ -4,6 +4,7 @@
 logging
 """
 
+import collections.abc
 import logging
 
 import numpy as np
@@ -11,6 +12,7 @@ import polars as pl
 import torch as t
 from rich.console import Console
 from rich.logging import RichHandler
+from transformers import PreTrainedModel
 
 from cotorra.util import bootstrap_ci
 
@@ -27,7 +29,7 @@ pl.Config.set_tbl_width_chars(500)
 
 
 class Logger(logging.Logger):
-    def __init__(self, name: str = __package__):
+    def __init__(self, name: str = __package__) -> None:
         super().__init__(name=name)
         self.setLevel(logging.INFO)
         self.handlers.clear()
@@ -44,8 +46,13 @@ class Logger(logging.Logger):
         self.propagate = False
 
     def summarize_trained_model(
-        self, model, bos_token_id, reverse, n_samp=3, max_len=2048
-    ):
+        self,
+        model: "PreTrainedModel",
+        bos_token_id: int,
+        reverse: collections.abc.Mapping[int, str],
+        n_samp: int = 3,
+        max_len: int = 2048,
+    ) -> None:
         for i in range(n_samp):
             sample = model.generate(
                 t.tensor([[bos_token_id]], dtype=t.int32).to(model.device),
@@ -59,7 +66,9 @@ class Logger(logging.Logger):
                 )
             )
 
-    def summarize_preds(self, df_res, target_tokens):
+    def summarize_preds(
+        self, df_res: pl.LazyFrame, target_tokens: collections.abc.Iterable[str]
+    ) -> None:
         cols = df_res.collect_schema().names()
         for tt in target_tokens:
             self.info("=" * 42)

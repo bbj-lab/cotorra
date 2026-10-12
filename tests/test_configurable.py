@@ -20,6 +20,15 @@ def test_no_default_and_no_config_file_yields_empty_cfg():
     assert isinstance(cfg_obj.logger, Logger)
 
 
+def test_require_names_every_missing_argument_and_passes_the_rest():
+    """what each stage calls first, so that a directory left at its None default
+    is refused by name rather than failing later in `pathlib`"""
+    cfg_obj = _WithDefault()
+    cfg_obj.require(processed_data_home="here", output_home="there")
+    with pytest.raises(TypeError, match=r"^_WithDefault needs `a` and `c`$"):
+        cfg_obj.require(a=None, b="b", c=None)
+
+
 def test_default_file_is_loaded_when_no_override_given():
     cfg_obj = _WithDefault()
     assert cfg_obj.cfg.max_seq_len == 4096

@@ -993,3 +993,61 @@ def test_a_bfloat16_checkpoint_gives_float32_columns(
     for split in extractor.loader.splits:
         schema = pl.read_parquet_schema(written(extractor, split, False))
         assert all(schema[column] == pl.Float32 for column in expected)
+
+
+def test_an_extractor_without_its_directories_is_refused_by_name(tmp_path):
+    """both default to None, a holdover from when the config named them, and
+    leaving one out used to fail inside `pathlib` without saying which"""
+    with pytest.raises(TypeError, match=r"^Extractor needs `model_home`$"):
+        Extractor(processed_data_home=tmp_path)
+    with pytest.raises(
+        TypeError, match=r"^Extractor needs `processed_data_home` and `model_home`$"
+    ):
+        Extractor()
+
+
+def test_an_empty_extract_block_takes_every_default(
+    processed, fake_model_home, tmp_path
+):
+    """an `extract:` block left empty parses to None, which `.get("extract", {})`
+    returns in place of its default, so `collate_fn` and `extract` failed on
+    `None.get`; its keys now take their defaults, `max_len` 4096 among them"""
+    cfg = base_extraction_cfg()
+    cfg["extract"] = None
+    extractor = Extractor(
+        extraction_cfg=write_cfg(tmp_path / "extraction.yaml", cfg),
+        processed_data_home=processed,
+        model_home=fake_model_home,
+        output_home=tmp_path,
+    )
+    prompt = t.arange(40)  # longer than base_extraction_cfg's 16, within 4096
+    out = extractor.collate_fn(
+        {"input_ids": [prompt], "s_elapsed_past": [prompt.float() * 60.0]}
+    )
+    assert out["input_ids"].shape == (1, 40)
+    extractor.extract()
+    for split in extractor.loader.splits:
+        assert (tmp_path / f"features-{split}-{fake_model_home.name}.parquet").is_file()
+
+
+def test_extract_names_the_inference_tables_it_cannot_find(
+    processed, fake_model_home, tmp_path
+):
+    """the loader leaves `for_inference` None when no split has a
+    `<split>_for_inference.parquet`, and `extract` used to fail on
+    `None.with_format`; it now says what's missing, before writing anything"""
+    home = tmp_path / "processed"
+    shutil.copytree(processed, home)
+    for f in home.glob("*_for_inference.parquet"):
+        f.unlink()
+    out = tmp_path / "out"
+    out.mkdir()
+    extractor = Extractor(
+        extraction_cfg=write_cfg(tmp_path / "extraction.yaml", base_extraction_cfg()),
+        processed_data_home=home,
+        model_home=fake_model_home,
+        output_home=out,
+    )
+    with pytest.raises(FileNotFoundError, match="_for_inference.parquet"):
+        extractor.extract()
+    assert not any(out.iterdir())

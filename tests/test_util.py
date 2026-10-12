@@ -172,6 +172,29 @@ def test_bootstrap_aggregate_pval_two_sided_is_large_for_identical_scores(rng):
         assert p > 0.5
 
 
+@pytest.mark.parametrize("paired", [False, True])
+@pytest.mark.parametrize("alternative", ["one-sided", "two-sided"])
+def test_every_p_value_is_a_python_float(rng, alternative, paired):
+    """`bootstrap_pval`'s two-sided branch called `.item()` on the observed
+    difference inside its mean rather than on the mean, and so returned
+    np.float64 where every other branch returns the float both promise"""
+    n = 60
+    y_true = (rng.random(n) > 0.5).astype(int)
+    y_score0 = rng.random(n)
+    y_score1 = np.clip(y_true + rng.normal(0, 0.3, size=n), 0, 1)
+    common = dict(
+        n_samples=50, rng=rng, n_jobs=1, alternative=alternative, paired=paired
+    )
+    single = bootstrap_pval(
+        y_true, y_score0, y_score1, metrics=("roc_auc", "brier"), **common
+    )
+    aggregate = bootstrap_aggregate_pval(
+        [y_true], [y_score0], [y_score1], metrics=("avg_roc_auc",), **common
+    )
+    for p in (*single.values(), *aggregate.values()):
+        assert type(p) is float
+
+
 def test_bootstrap_ci_is_reproducible_for_a_fixed_seed():
     y_true = (np.random.default_rng(1).random(120) > 0.5).astype(int)
     y_score = np.clip(y_true + np.random.default_rng(2).normal(0, 0.3, 120), 0, 1)

@@ -381,3 +381,38 @@ def test_extract_refuses_a_head_flag_for_a_head_the_model_lacks(
     assert isinstance(result.exception, ValueError)
     assert "this model carries no time-to-next-token head" in str(result.exception)
     assert list(out.iterdir()) == []
+
+
+def test_extract_reports_its_directory_once(extractions, tmp_path):
+    """it used to print the same line once per split, its loop variable unused"""
+    out = tmp_path / "features"
+    result = runner.invoke(
+        app, ["extract", "-p", str(tmp_path), "-m", str(tmp_path), "-o", str(out)]
+    )
+    assert result.exit_code == 0, result.output
+    report = _report(result.output, "Extraction completed")
+    assert report.count("".join(str(out).split())) == 1
+
+
+@pytest.mark.parametrize("command, stage", [("train", "Trainer"), ("tune", "Tuner")])
+def test_the_model_is_reported_under_the_name_it_was_saved_by(
+    command, stage, monkeypatch, tmp_path
+):
+    """the closing summary printed `mdl-{cfg.run_name}`, but the stage saves
+    under its `run_name`, which falls back on `wandb.run_name`: a config without
+    a top-level `run_name` failed on that last line, the model already saved"""
+
+    class Trained:
+        def __init__(self, **kwargs):
+            self.cfg = OmegaConf.create({"wandb": {"run_name": "from-wandb"}})
+            self.run_name = "from-wandb"
+            self.output_home = tmp_path
+
+        def train(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(cotorra.cli, stage, Trained)
+    result = runner.invoke(app, [command, "-p", str(tmp_path), "-o", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    report = _report(result.output, "completed in")
+    assert "".join(str(tmp_path / "mdl-from-wandb").split()) in report
