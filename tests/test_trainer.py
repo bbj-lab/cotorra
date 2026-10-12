@@ -2,6 +2,8 @@
 
 """tests for cotorra.trainer.Trainer"""
 
+import os
+
 import pytest
 import torch as t
 from helpers import base_training_cfg, default_cfg, write_cfg
@@ -9,6 +11,7 @@ from omegaconf import OmegaConf
 from transformers import AutoModelForCausalLM
 
 from cotorra.trainer import Trainer
+from cotorra.tuner import Tuner
 
 
 def test_model_init_wires_vocab_and_special_tokens_from_tokenizer(built_trainer):
@@ -450,3 +453,74 @@ def test_accumulated_batches_step_as_one_batch_of_their_size(tmp_path):
     for loss_func in (x_ent, None):
         whole, accumulated = one_step(4, 1, loss_func), one_step(2, 2, loss_func)
         assert t.allclose(whole, accumulated, atol=1e-6), loss_func
+
+
+@pytest.mark.parametrize("stage", [Trainer, Tuner])
+def test_a_stage_without_its_directories_is_refused_by_name(stage, tmp_path):
+    """both directories default to None, a holdover from when the config named
+    them, and leaving one out used to fail inside `pathlib` without saying which"""
+    with pytest.raises(TypeError, match=rf"^{stage.__name__} needs `output_home`$"):
+        stage(processed_data_home=tmp_path)
+    with pytest.raises(
+        TypeError, match="needs `processed_data_home` and `output_home`$"
+    ):
+        stage()
+
+
+@pytest.mark.parametrize("block", ["absent", "empty"])
+def test_the_wandb_block_is_optional(processed, tmp_path, monkeypatch, block):
+    """`run_name` fell back on `self.cfg.wandb.get(...)`, evaluated whether or not
+    it was needed, so a config without a `wandb` block raised `Missing key
+    wandb`, and one left empty -- parsed to None -- failed on `None.get`"""
+    cfg = base_training_cfg()
+    if block == "absent":
+        del cfg["wandb"]
+    else:
+        cfg["wandb"] = None
+    # set, so that monkeypatch restores their absence over what Trainer writes
+    monkeypatch.setenv("WANDB_PROJECT", "unset")
+    monkeypatch.setenv("WANDB_NAME", "unset")
+    trainer = Trainer(
+        training_cfg=write_cfg(tmp_path / "training.yaml", cfg),
+        processed_data_home=processed,
+        output_home=tmp_path,
+    )
+    assert trainer.run_name == "test-run"
+    assert os.environ["WANDB_PROJECT"] == os.environ["WANDB_NAME"] == "cotorra"
+
+
+def test_custom_loss_is_off_when_the_config_omits_it(processed, tmp_path):
+    """the README gives `custom_loss` a default of false, but it was read as
+    `self.cfg.custom_loss`, which a config without it raised on"""
+    cfg = base_training_cfg()
+    del cfg["custom_loss"]
+    trainer = Trainer(
+        training_cfg=write_cfg(tmp_path / "training.yaml", cfg),
+        processed_data_home=processed,
+        output_home=tmp_path,
+    )
+    assert trainer.loss is None
+    assert trainer.trainer.compute_loss_func is None
+
+
+def test_a_custom_loss_can_score_a_batch_without_labels(built_trainer, monkeypatch):
+    """the rows weighting the logged terms used to be counted as `len(labels)`,
+    which failed on a batch without `labels`, though hf's own custom-loss path
+    hands such a batch's loss function `labels=None`"""
+    trainer = built_trainer.trainer
+    mdl = built_trainer.model_init()
+    batch = built_trainer.collate_fn([trainer.train_dataset[i] for i in range(3)])
+    del batch["labels"]
+
+    def loss_func(outputs, labels, terms):
+        assert labels is None
+        terms["mean_logit"] = outputs.logits.mean().detach()
+        return outputs.logits.mean()
+
+    monkeypatch.setattr(trainer, "compute_loss_func", loss_func)
+    trainer.reset_terms("eval")
+    with t.no_grad():
+        trainer.compute_loss(mdl.eval(), batch)
+    assert trainer.term_rows["eval"] == 3
+    assert set(trainer.term_sums["eval"]) == {"mean_logit"}
+    trainer.reset_terms("eval")

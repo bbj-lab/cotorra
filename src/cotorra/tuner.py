@@ -4,17 +4,18 @@
 train a model with hyperparameter tuning
 """
 
+import optuna
 from omegaconf import OmegaConf
 
 from cotorra.trainer import Trainer
 
 
 class Tuner(Trainer):
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
 
     @staticmethod
-    def optuna_hp_space(trial):
+    def optuna_hp_space(trial: "optuna.trial.BaseTrial") -> dict[str, float]:
         return {
             "learning_rate": trial.suggest_float("learning_rate", 1e-4, 5e-4, log=True),
             "gradient_accumulation_steps": trial.suggest_int(
@@ -28,7 +29,7 @@ class Tuner(Trainer):
         # evaluation reports each of the custom loss's terms beside it
         return metrics["eval_loss"]
 
-    def train(self, verbose=False):
+    def train(self, verbose: bool = False) -> None:
         best_trial = self.trainer.hyperparameter_search(
             hp_space=self.optuna_hp_space,
             compute_objective=self.compute_objective,

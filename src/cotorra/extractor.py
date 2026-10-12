@@ -60,12 +60,13 @@ class Extractor(Configurable):
 
     def __init__(
         self,
-        extraction_cfg: pathlib.Path | str = None,
-        processed_data_home: pathlib.Path | str = None,
-        model_home: pathlib.Path | str = None,
-        output_home: pathlib.Path | str = None,
+        extraction_cfg: pathlib.Path | str | None = None,
+        processed_data_home: pathlib.Path | str | None = None,
+        model_home: pathlib.Path | str | None = None,
+        output_home: pathlib.Path | str | None = None,
         **kwargs,
-    ):
+    ) -> None:
+        self.require(processed_data_home=processed_data_home, model_home=model_home)
         super().__init__(extraction_cfg, **kwargs)
         self.processed_data_home, self.model_home = map(
             lambda x: pathlib.Path(x).expanduser().resolve(),
@@ -91,8 +92,8 @@ class Extractor(Configurable):
             self.model.config.pad_token_id = self.model.config.eos_token_id
         self.ds = None
 
-    def collate_fn(self, batch):
-        ml = t.tensor(self.cfg.get("extract", {}).get("max_len", 4096))
+    def collate_fn(self, batch: dict) -> dict[str, t.Tensor | None]:
+        ml = t.tensor((self.cfg.get("extract") or {}).get("max_len", 4096))
         input_ids = pad_sequence(
             [x[:ml] for x in batch["input_ids"]],
             batch_first=True,
@@ -133,8 +134,11 @@ class Extractor(Configurable):
         return heads
 
     def extract_final(
-        self, batch, all_times: bool = False, heads: collections.abc.Iterable[str] = ()
-    ):
+        self,
+        batch: dict,
+        all_times: bool = False,
+        heads: collections.abc.Iterable[str] = (),
+    ) -> dict:
         """the last hidden state at each row's last real token -- or with
         `all_times` at every position up to it -- as `features`, plus the columns
         `HEAD_COLUMNS` gives for each of `heads` from the same positions"""
@@ -190,12 +194,19 @@ class Extractor(Configurable):
 
     def extract(
         self, all_times: bool = False, heads: collections.abc.Iterable[str] = ()
-    ):
+    ) -> None:
         """write each split's features to `output_home`, with the columns of each
         of `heads`; a head the model lacks is refused before a table is written"""
         heads = self._check_heads(heads)
+        if self.loader.for_inference is None:
+            raise FileNotFoundError(
+                f"found no inference tables (`<split>_for_inference.parquet`, for "
+                f"any of {list(self.loader.splits)}) in {self.processed_data_home} "
+                "to extract from"
+            )
         a = "-all" if all_times else ""
-        shard_size = self.cfg.get("extract", {}).get("shard_size", None)
+        extract_cfg = self.cfg.get("extract") or {}  # None when left empty
+        shard_size = extract_cfg.get("shard_size", None)
         ds = self.loader.for_inference.with_format("torch")
         for split, dset in ds.items():
             n = math.ceil(len(dset) / shard_size) if shard_size else 1
@@ -206,7 +217,7 @@ class Extractor(Configurable):
                         batch, all_times=all_times, heads=heads
                     ),
                     batched=True,
-                    batch_size=self.cfg.get("extract", {}).get("batch_size", 8),
+                    batch_size=extract_cfg.get("batch_size", 8),
                     load_from_cache_file=False,  # disable caching
                 ).to_parquet(
                     self.output_home

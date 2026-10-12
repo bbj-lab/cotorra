@@ -13,8 +13,9 @@ import pathlib
 import numpy as np
 import polars as pl
 import tqdm
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from quick_sco_re import (
+    GeneratedTrajectory,
     GenerationConfig,
     PatientResults,
     TrajectoryType,
@@ -28,7 +29,10 @@ from cotorra.configurable import Configurable
 
 
 def build_generation_config(
-    cfg, vocab: dict[str, int], tracked_names: list[str], tracked_ids: list[int]
+    cfg: DictConfig,
+    vocab: dict[str, int],
+    tracked_names: list[str],
+    tracked_ids: list[int],
 ) -> GenerationConfig:
     """Build a GenerationConfig for inline multi-outcome SCOPE/REACH scoring.
 
@@ -37,23 +41,25 @@ def build_generation_config(
     (and the shared `cfg.score.end_tokens`/`suppressed_tokens`).
     """
     score_cfg = cfg.score
-    gen_cfg = cfg.get("generation", {})
+    # a block or list left empty in the yaml parses to None, which `.get` returns
+    # in place of its default, hence the `or`s
+    gen_cfg = cfg.get("generation") or {}
 
     end_ids: set[int] = {
         tid
-        for name in score_cfg.get("end_tokens", [])
+        for name in (score_cfg.get("end_tokens") or [])
         if (tid := vocab.get(name)) is not None
     }
-    for prefix in gen_cfg.get("end_tokens", {}).get("prefixes", []):
+    for prefix in (gen_cfg.get("end_tokens") or {}).get("prefixes") or []:
         end_ids |= {tid for name, tid in vocab.items() if name.startswith(prefix)}
 
     suppressed_ids = [
         tid
-        for name in score_cfg.get("suppressed_tokens", [])
+        for name in (score_cfg.get("suppressed_tokens") or [])
         if (tid := vocab.get(name)) is not None
     ]
 
-    ts = gen_cfg.get("time_stopping", {})
+    ts = gen_cfg.get("time_stopping") or {}
     trunc_id: int | None = None
     token_id_to_minutes: dict[int, float] = {}
     max_time = None
@@ -67,7 +73,7 @@ def build_generation_config(
                 f"time_stopping.trunc_token '{trunc_name}' not found in vocabulary"
             )
         max_time = ts.get("max_time_minutes")
-        for tok_name, bounds in ts.get("time_token_bounds", {}).items():
+        for tok_name, bounds in (ts.get("time_token_bounds") or {}).items():
             if (tid := vocab.get(tok_name)) is not None:
                 lo, hi = bounds
                 token_id_to_minutes[tid] = math.sqrt(lo * hi)
@@ -91,7 +97,7 @@ def build_generation_config(
 
 
 def aggregate_inline_results(
-    trajectories: list, num_patients: int, config: GenerationConfig
+    trajectories: list[GeneratedTrajectory], num_patients: int, config: GenerationConfig
 ) -> list[PatientResults]:
     """Build per-patient results from inline SCOPE/REACH estimates on trajectories.
 
@@ -137,12 +143,13 @@ class GenerativeScorer(Configurable):
 
     def __init__(
         self,
-        scoring_cfg: pathlib.Path | str = None,
-        processed_data_home: pathlib.Path | str = None,
-        model_home: pathlib.Path | str = None,
-        output_home: pathlib.Path | str = None,
+        scoring_cfg: pathlib.Path | str | None = None,
+        processed_data_home: pathlib.Path | str | None = None,
+        model_home: pathlib.Path | str | None = None,
+        output_home: pathlib.Path | str | None = None,
         **kwargs,
-    ):
+    ) -> None:
+        self.require(processed_data_home=processed_data_home, model_home=model_home)
         super().__init__(scoring_cfg, **kwargs)
         self.processed_data_home, self.model_home = map(
             lambda x: pathlib.Path(x).expanduser().resolve(),
@@ -177,9 +184,11 @@ class GenerativeScorer(Configurable):
         self.gen_config = build_generation_config(
             self.cfg, self.vocab, self.grokked_outcome_tokens, tracked_ids
         )
-        gen_cfg = self.cfg.get("generation", {})
-        self.methods = gen_cfg.get("methods", ["M1", "M2"])
-        engine_cfg = self.cfg.get("engine", {})
+        gen_cfg = self.cfg.get("generation") or {}
+        # an empty `methods:` means the default, but an explicit `[]` stays empty
+        methods = gen_cfg.get("methods")
+        self.methods = ["M1", "M2"] if methods is None else methods
+        engine_cfg = self.cfg.get("engine") or {}
         self.chunk_size = engine_cfg.get("patient_chunk_size", 64)
 
         self.engine = create_engine(
@@ -343,7 +352,7 @@ class GenerativeScorer(Configurable):
 
         return all_results
 
-    async def score(self):
+    async def score(self) -> dict[str, np.ndarray]:
         all_results = await self.sco_re()
         orig_idx = np.flatnonzero(self.keep_mask)
         n = len(self.tokens_past)
@@ -376,14 +385,14 @@ class GenerativeScorer(Configurable):
 
         return res
 
-    def save_all(self, verbose: bool = False):
+    def save_all(self, verbose: bool = False) -> None:
         res = asyncio.run(self.score())
         (df_res := self.ds.with_columns(pl.from_dict(res))).write_parquet(
             self.output_home
         )
 
-        if verbose:
-            self.logger.summarize_preds(df_res, self.grokked_outcome_tokens)
+        if verbose:  # lazy, since `summarize_preds` collects what it selects
+            self.logger.summarize_preds(df_res.lazy(), self.grokked_outcome_tokens)
 
 
 if __name__ == "__main__":

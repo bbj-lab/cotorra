@@ -367,3 +367,10 @@ def test_a_record_ending_in_none_of_the_classes_goes_unscored(
         scored.append(commonest in row["input_ids"])
         assert any(c != -100 for c in row["disposition"]) == scored[-1]
     assert any(scored) and not all(scored)
+
+
+def test_a_loader_without_its_directory_is_refused_by_name():
+    """`processed_data_home` defaults to None but has no fallback, and leaving it
+    out used to fail at `None / "tokenizer.yaml"` without naming it"""
+    with pytest.raises(TypeError, match=r"^Loader needs `processed_data_home`$"):
+        Loader()

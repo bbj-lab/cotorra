@@ -4,7 +4,7 @@
 utility functions
 """
 
-import collections
+import collections.abc
 import itertools
 import typing
 import warnings
@@ -17,7 +17,7 @@ from sklearn import metrics as skl_mets
 Generator: typing.TypeAlias = np.random._generator.Generator
 
 
-def batched(iterable, n) -> collections.abc.Iterator:
+def batched(iterable: collections.abc.Iterable, n: int) -> collections.abc.Iterator:
     """
     `itertools.batched` introduced in Python 3.12
     cf. https://docs.python.org/3/library/itertools.html#itertools.batched
@@ -41,7 +41,7 @@ def batched_iter(dset: ds.Dataset, seq_len: int) -> collections.abc.Iterator:
             yield {k: [dq[k].popleft() for _ in range(seq_len)] for k in dq}
 
 
-def pr_auc_score(y_true: np.ndarray, y_score: np.ndarray):
+def pr_auc_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
     precs, recs, *_ = skl_mets.precision_recall_curve(
         y_true, np.round(y_score, decimals=4), drop_intermediate=True
     )
@@ -159,7 +159,7 @@ def bootstrap_pval(
     ),
     n_jobs: int = -1,
     paired: bool = False,
-) -> dict:
+) -> dict[str, float]:
     """
     Performs a bootstrapped test for the null hypothesis that `y_score0` &
     `y_score1` are equally good predictions of y_true (in terms of `objs`), as
@@ -174,7 +174,9 @@ def bootstrap_pval(
     score populations are pooled and resampled as independent groups.
     """
 
-    def get_diffs(yt0, ys0, yt1, ys1) -> dict[str, float]:
+    def get_diffs(
+        yt0: np.ndarray, ys0: np.ndarray, yt1: np.ndarray, ys1: np.ndarray
+    ) -> dict[str, float]:
         diffs = dict()
         if "roc_auc" in metrics:
             diffs["roc_auc"] = skl_mets.roc_auc_score(
@@ -225,7 +227,7 @@ def bootstrap_pval(
         }
     else:  # two-sided
         return {
-            ob: np.mean([np.abs(d[ob]) > np.abs(diff_obs[ob]).item() for d in diffs])
+            ob: np.mean([np.abs(d[ob]) > np.abs(diff_obs[ob]) for d in diffs]).item()
             for ob in metrics
         }
 
@@ -243,7 +245,7 @@ def bootstrap_aggregate_pval(
     ] = ("avg_roc_auc", "avg_pr_auc", "avg_brier"),
     n_jobs: int = -1,
     paired: bool = False,
-) -> dict:
+) -> dict[str, float]:
     """
     Like `bootstrap_pval` but for the average performance over multiple labels
     (cf. `bootstrap_aggregate_ci` vs. `bootstrap_ci`); tests the null that

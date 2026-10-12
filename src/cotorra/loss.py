@@ -10,13 +10,14 @@ import re
 
 import numpy as np
 import torch as t
+from omegaconf import DictConfig
 
 from cotorra.logger import Logger
 from cotorra.model import HEADS, head_options
 
 
 class Loss:
-    def __init__(self, cfg=None, tkzr_cfg=None):
+    def __init__(self, cfg: DictConfig, tkzr_cfg: DictConfig) -> None:
 
         self.cfg = cfg
         self.tkzr_cfg = tkzr_cfg
@@ -96,7 +97,9 @@ class Loss:
             self.balanced_toi_flag = t.zeros(len(self.vocab), dtype=t.bool)
             self.balanced_toi_flag[[self.tkzr_cfg.lookup[x] for x in matched]] = True
 
-    def quantile_token_loss(self, outputs, labels, **kwargs):
+    def quantile_token_loss(
+        self, outputs: dict, labels: t.Tensor, **kwargs
+    ) -> t.Tensor:
         """
         squared error between the bin midpoint the model expects for a quantile
         token, from its softmax over that code's bins alone, and the midpoint of
@@ -129,7 +132,9 @@ class Loss:
         sq_err = t.where(is_q, (pred - true) ** 2, 0.0)
         return sq_err.sum() / is_q.sum().clamp(min=1)
 
-    def label_weighted_loss(self, outputs, labels, **kwargs):
+    def label_weighted_loss(
+        self, outputs: dict, labels: t.Tensor, **kwargs
+    ) -> t.Tensor:
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = labels[:, 1:].contiguous()
@@ -139,7 +144,7 @@ class Loss:
             dtype=t.float32
         )
 
-    def balanced_toi_loss(self, outputs, labels, **kwargs):
+    def balanced_toi_loss(self, outputs: dict, labels: t.Tensor, **kwargs) -> t.Tensor:
         """
         binary cross-entropy on whether the next token is a token of interest,
         scored with the total probability the softmax puts on those tokens. A
@@ -158,7 +163,7 @@ class Loss:
         lse_all = t.logaddexp(lse_toi, lse_rest)
         return -t.where(is_toi, lse_toi - lse_all, lse_rest - lse_all).mean()
 
-    def x_ent_loss(self, outputs, labels, **kwargs):
+    def x_ent_loss(self, outputs: dict, labels: t.Tensor, **kwargs) -> t.Tensor:
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = labels[:, 1:].contiguous()
@@ -166,7 +171,7 @@ class Loss:
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
         ).to(dtype=t.float32)
 
-    def head_loss(self, outputs, name: str):
+    def head_loss(self, outputs: dict, name: str) -> t.Tensor:
         """a secondary head's term, which the model computes itself -- it owns the
         head -- and hands back alongside the logits. It gets folded into the
         objective here rather than in the model because `TrainerWithCustomLoss`
@@ -181,7 +186,9 @@ class Loss:
             )
         return loss.to(dtype=t.float32)
 
-    def custom_loss(self, outputs, labels, terms: dict | None = None, **kwargs):
+    def custom_loss(
+        self, outputs: dict, labels: t.Tensor, terms: dict | None = None, **kwargs
+    ) -> t.Tensor:
         """
         the configured objective: cross-entropy plus each weighted term its blocks
         ask for. Given a dict `terms`, it also records each term there, unweighted

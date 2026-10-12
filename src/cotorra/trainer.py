@@ -4,16 +4,23 @@
 train a model
 """
 
-import collections
+import collections.abc
 import os
 import pathlib
+import typing
 import warnings
 
 import torch as t
 from omegaconf import OmegaConf
-from transformers import AutoConfig, AutoModelForCausalLM, TrainingArguments
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    PreTrainedModel,
+    TrainingArguments,
+)
 from transformers import Trainer as t_Trainer
-from transformers.trainer_pt_utils import nested_gather
+from transformers.trainer_pt_utils import find_batch_size, nested_gather
+from transformers.trainer_utils import EvalLoopOutput, TrainOutput
 
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
@@ -22,7 +29,12 @@ from cotorra.model import HEADS, CotorraConfig, head_options
 
 
 class TrainerWithCustomLoss(t_Trainer):
-    def __init__(self, compute_loss_func=None, *args, **kwargs):
+    def __init__(
+        self,
+        compute_loss_func: collections.abc.Callable[..., t.Tensor] | None = None,
+        *args,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.compute_loss_func = compute_loss_func
         # the terms a custom loss records, summed over the rows scored since they
@@ -33,7 +45,7 @@ class TrainerWithCustomLoss(t_Trainer):
         for mode in ("train", "eval"):
             self.reset_terms(mode)
 
-    def reset_terms(self, mode: str):
+    def reset_terms(self, mode: str) -> None:
         self.term_sums[mode] = collections.defaultdict(float)
         self.term_rows[mode] = 0
 
@@ -57,7 +69,13 @@ class TrainerWithCustomLoss(t_Trainer):
             for name, total in zip(names, totals[:-1])
         }
 
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+    def compute_loss(
+        self,
+        model: t.nn.Module,
+        inputs: dict[str, t.Tensor | typing.Any],
+        return_outputs: bool = False,
+        **kwargs,
+    ) -> t.Tensor | tuple[t.Tensor, typing.Any]:
         if self.compute_loss_func is not None:
             inputs = dict(inputs)
             labels = inputs.pop("labels", None)
@@ -66,11 +84,13 @@ class TrainerWithCustomLoss(t_Trainer):
             # takes it in a `**kwargs` and leaves it empty
             terms = dict()
             loss = self.compute_loss_func(outputs, labels, terms=terms)
-            # weighted by the batch's rows, as hf weights `eval_loss`
+            # weighted by the batch's rows, as hf weights `eval_loss`, counted off
+            # the batch itself, which needn't carry `labels`
             mode = "train" if model.training else "eval"
+            rows = find_batch_size(inputs) or 0
             for name, term in terms.items():
-                self.term_sums[mode][name] += term * len(labels)
-            self.term_rows[mode] += len(labels)
+                self.term_sums[mode][name] += term * rows
+            self.term_rows[mode] += rows
             if model.training:
                 # with a custom loss set, hf's `training_step` leaves averaging
                 # over gradient accumulation to it -- which a per-batch mean
@@ -82,13 +102,13 @@ class TrainerWithCustomLoss(t_Trainer):
         else:
             return super().compute_loss(model, inputs, return_outputs, **kwargs)
 
-    def train(self, *args, **kwargs):
+    def train(self, *args, **kwargs) -> TrainOutput:
         # a search's trials share this trainer, so one trial's last steps would
         # otherwise open the next one's first log
         self.reset_terms("train")
         return super().train(*args, **kwargs)
 
-    def log(self, logs: dict[str, float], start_time: float | None = None):
+    def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
         # hf's `loss` averages the steps since its last log, as these do
         if "loss" in logs:
             logs = logs | self.term_means("train")
@@ -96,12 +116,12 @@ class TrainerWithCustomLoss(t_Trainer):
 
     def evaluation_loop(
         self,
-        dataloader,
-        description,
-        prediction_loss_only=None,
-        ignore_keys=None,
-        metric_key_prefix="eval",
-    ):
+        dataloader: t.utils.data.DataLoader,
+        description: str,
+        prediction_loss_only: bool | None = None,
+        ignore_keys: list[str] | None = None,
+        metric_key_prefix: str = "eval",
+    ) -> EvalLoopOutput:
         # whatever was scored outside this evaluation stays out of its means
         self.reset_terms("eval")
         output = super().evaluation_loop(
@@ -124,11 +144,12 @@ class Trainer(Configurable):
 
     def __init__(
         self,
-        training_cfg: pathlib.Path | str = None,
-        processed_data_home: pathlib.Path | str = None,
-        output_home: pathlib.Path | str = None,
+        training_cfg: pathlib.Path | str | None = None,
+        processed_data_home: pathlib.Path | str | None = None,
+        output_home: pathlib.Path | str | None = None,
         **kwargs,
-    ):
+    ) -> None:
+        self.require(processed_data_home=processed_data_home, output_home=output_home)
         super().__init__(training_cfg, **kwargs)
         if "label_weighted_loss" in self.cfg:
             # a FutureWarning, which python shows by default, rather than a
@@ -150,9 +171,13 @@ class Trainer(Configurable):
         # one `<name>_objective` block per secondary head, in any combination
         self.head_options = head_options(self.cfg, self.tkzr_cfg.lookup)
         self.loss = (
-            Loss(self.cfg, self.tkzr_cfg).custom_loss if self.cfg.custom_loss else None
+            Loss(self.cfg, self.tkzr_cfg).custom_loss
+            if self.cfg.get("custom_loss", False)
+            else None
         )
-        self.run_name = self.cfg.get("run_name", self.cfg.wandb.get("run_name", ""))
+        # optional, and None when left empty
+        wandb_cfg = self.cfg.get("wandb") or {}
+        self.run_name = self.cfg.get("run_name", wandb_cfg.get("run_name", ""))
         # the merged config, not the file it came from, so overrides reach it too
         self.loader = Loader(self.cfg, self.processed_data_home)
 
@@ -168,12 +193,10 @@ class Trainer(Configurable):
         )
         self.model = self.trainer.model
 
-        os.environ["WANDB_PROJECT"] = self.cfg.get("wandb", {}).get(
-            "project", "cotorra"
-        )
-        os.environ["WANDB_NAME"] = self.cfg.get("wandb", {}).get("run_name", "cotorra")
+        os.environ["WANDB_PROJECT"] = wandb_cfg.get("project", "cotorra")
+        os.environ["WANDB_NAME"] = wandb_cfg.get("run_name", "cotorra")
 
-    def model_init(self):
+    def model_init(self) -> PreTrainedModel:
         conf_param = dict(
             vocab_size=len(self.tkzr_cfg.lookup),
             bos_token_id=self.tkzr_cfg.lookup.BOS,
@@ -200,7 +223,7 @@ class Trainer(Configurable):
 
         return mdl
 
-    def collate_fn(self, batch):
+    def collate_fn(self, batch: list[dict[str, t.Tensor]]) -> dict[str, t.Tensor]:
         input_ids = t.stack([x["input_ids"] for x in batch])
         f_set = {"input_ids": input_ids, "labels": input_ids}
         if "time_based_rope" in self.cfg:
@@ -215,7 +238,9 @@ class Trainer(Configurable):
             f_set[target] = t.stack([x[target] for x in batch])
         return f_set
 
-    def train(self, resume_from_checkpoint: bool = False, verbose: bool = False):
+    def train(
+        self, resume_from_checkpoint: bool = False, verbose: bool = False
+    ) -> None:
         if resume_from_checkpoint:
             try:
                 self.trainer.train(resume_from_checkpoint=True)

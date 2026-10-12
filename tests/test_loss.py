@@ -572,3 +572,10 @@ def test_quantile_token_loss_with_no_quantile_tokens_in_the_vocabulary():
     assert loss.custom_loss(outputs, labels).item() == pytest.approx(
         loss.x_ent_loss(outputs, labels).item(), rel=1e-5
     )
+
+
+def test_both_configs_are_required():
+    """they used to default to None, which the constructor dereferenced at once,
+    failing with an AttributeError rather than naming what was missing"""
+    with pytest.raises(TypeError, match="cfg"):
+        Loss()

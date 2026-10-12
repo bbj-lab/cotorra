@@ -73,7 +73,7 @@ def train(
         bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
     overrides: Overrides = None,
-):
+) -> None:
     """
     Train a model on tokenized data. For tokenization, consult the cocoa package.
     """
@@ -88,7 +88,7 @@ def train(
         trainer.train(resume_from_checkpoint=resume_from_checkpoint, verbose=verbose)
         t1 = time.perf_counter()
         print(f"\n[green]✓[/green] Training completed in {t1 - t0:.2f}s.")
-        out_path = trainer.output_home / f"mdl-{trainer.cfg.run_name}"
+        out_path = trainer.output_home / f"mdl-{trainer.run_name}"
         print(f"  Model: [cyan]{out_path}[/cyan]")
 
 
@@ -124,7 +124,7 @@ def tune(
         bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
     overrides: Overrides = None,
-):
+) -> None:
     """
     Run hyperparameter tuning while training a model.
     """
@@ -139,7 +139,7 @@ def tune(
         tuner.train(verbose=verbose)
         t1 = time.perf_counter()
         print(f"\n[green]✓[/green] Tuning completed in {t1 - t0:.2f}s.")
-        out_path = tuner.output_home / f"mdl-{tuner.cfg.run_name}"
+        out_path = tuner.output_home / f"mdl-{tuner.run_name}"
         print(f"  Model: [cyan]{out_path}[/cyan]")
 
 
@@ -209,7 +209,7 @@ def extract(
         ),
     ] = False,
     overrides: Overrides = None,
-):
+) -> None:
     """
     Extract representations from a trained model.
     """
@@ -236,8 +236,7 @@ def extract(
         )
         t1 = time.perf_counter()
         print(f"\n[green]✓[/green] Extraction completed in {t1 - t0:.2f}s.")
-        for split in extractor.loader.splits:
-            print(f" Output in: {extractor.output_home}")
+        print(f"  Features: [cyan]{extractor.output_home}[/cyan]")
 
 
 @app.command()
@@ -273,7 +272,7 @@ def generative_score(
         bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
     overrides: Overrides = None,
-):
+) -> None:
     """
     Generate SCORE/REACH metrics from a trained model and save them to parquet.
     """
@@ -343,7 +342,7 @@ def rep_based_score(
         bool, typer.Option("--verbose", "-v", help="Verbose logging")
     ] = False,
     overrides: Overrides = None,
-):
+) -> None:
     """
     Generate rep-based scores for the token-based outcomes of interest.
     Note: this requires that features have already been extracted and saved
@@ -366,7 +365,7 @@ def rep_based_score(
         print(f"  Scores: [cyan]{scorer.output_home}[/cyan]")
 
 
-def main():
+def main() -> None:
     app()
 
 

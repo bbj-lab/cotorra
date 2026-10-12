@@ -760,6 +760,16 @@ def test_scoring_needs_the_input_ids_the_head_conditions_on(mixture):
         mixture(inputs_embeds=embeds, hours_to_next_token=t.rand(1, 4))
 
 
+def test_scoring_needs_the_embeddings_the_head_embeds_the_next_token_with(mixture):
+    """with `input_embeddings` left at its None default, `loss` used to fail on
+    calling it, "'NoneType' object is not callable", rather than saying so"""
+    hidden = t.rand(1, 4, mixture.config.hidden_size)
+    with pytest.raises(ValueError, match="needs the backbone's `input_embeddings`"):
+        mixture.heads["tnt"].loss(
+            None, t.rand(1, 4), hidden_states=hidden, input_ids=ids(1, 4)
+        )
+
+
 def test_the_mixture_head_learns_gaps_that_depend_on_the_next_token():
     """
     tokens 20-29 play the quantile tokens that complete an event, arriving at

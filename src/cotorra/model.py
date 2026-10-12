@@ -4,6 +4,7 @@
 huggingface causal lms carrying any combination of cotorra's secondary heads
 """
 
+import collections.abc
 import copy
 import dataclasses
 import fnmatch
@@ -82,7 +83,7 @@ class ZeroInflatedLogNormalMixture:
     # the exact value for components up to 3 log-hours wide, and ~5e-4 at 5
     quadrature = standard_normal_quadrature(32)
 
-    def __init__(self, params: t.Tensor):
+    def __init__(self, params: t.Tensor) -> None:
         params = params.to(dtype=t.promote_types(params.dtype, t.float32))
         k = (params.shape[-1] - 1) // 3
         self.zero_logit = params[..., 0]
@@ -131,7 +132,9 @@ class ZeroInflatedLogNormalMixture:
             self.zero_logit >= 0, 0.0, log_hours.clamp(max=self.max_log_hours).exp()
         )
 
-    def mean_log1p_hours(self, quadrature=None) -> t.Tensor:
+    def mean_log1p_hours(
+        self, quadrature: collections.abc.Sequence[t.Tensor] | None = None
+    ) -> t.Tensor:
         """
         the mean of log1p(hours), which is what squared error on log1p-hours
         trains a point head to predict: 0 for the zero part, and for a component,
@@ -193,12 +196,14 @@ class Head(t.nn.Module):
     name: ClassVar[str]
     target: ClassVar[str]
 
-    def __init__(self, weight: float = 1.0):
+    def __init__(self, weight: float = 1.0) -> None:
         super().__init__()
         self.weight = weight
 
     @classmethod
-    def options_from(cls, block: dict, lookup) -> dict:
+    def options_from(
+        cls, block: dict, lookup: collections.abc.Mapping[str, int]
+    ) -> dict:
         """the options this head's `<name>_objective` training block gives it,
         resolved against the tokenizer's `lookup`; every head takes a `weight`
         on its term, 1.0 unless the block says otherwise"""
@@ -238,14 +243,14 @@ class Log1pHoursHead(Head):
     head whose raw output has drifted below zero; scored by `log1p_hours_mse`
     """
 
-    def __init__(self, hidden_size: int, weight: float = 1.0):
+    def __init__(self, hidden_size: int, weight: float = 1.0) -> None:
         super().__init__(weight)
         self.linear = t.nn.Linear(hidden_size, 1)
 
-    def predict(self, hidden_states):
+    def predict(self, hidden_states: t.Tensor) -> t.Tensor:
         return t.nn.functional.softplus(self.linear(hidden_states)).squeeze(-1)
 
-    def loss(self, pred, target, **context):
+    def loss(self, pred: t.Tensor, target: t.Tensor, **context) -> t.Tensor:
         return log1p_hours_mse(pred, target)
 
 
@@ -263,7 +268,7 @@ class TteHead(Log1pHoursHead):
     name = "tte"
     target = "hours_to_end_time"
 
-    def loss(self, pred, target, **context):
+    def loss(self, pred: t.Tensor, target: t.Tensor, **context) -> t.Tensor:
         return super().loss(pred, target.clamp(min=0))
 
 
@@ -283,7 +288,9 @@ class TntHead(Head):
     target = "hours_to_next_token"
 
     @classmethod
-    def build(cls, hidden_size, mixture_components=None, **options):
+    def build(
+        cls, hidden_size: int, mixture_components: int | None = None, **options
+    ) -> "TntPointHead | TntMixtureHead":
         if mixture_components is None:
             return TntPointHead(hidden_size, **options)
         return TntMixtureHead(hidden_size, mixture_components, **options)
@@ -302,7 +309,7 @@ class TntHead(Head):
     def mean_log1p_hours(
         self,
         hidden_states: t.Tensor,
-        lm_head: t.nn.Module,
+        lm_head: collections.abc.Callable[[t.Tensor], t.Tensor],
         input_embeddings: t.nn.Module,
     ) -> t.Tensor:
         """the mean log1p-hours from each hidden state's position until the next
@@ -316,7 +323,13 @@ class TntPointHead(TntHead, Log1pHoursHead):
     """a single value per token, whatever token comes next, trained by squared
     error on log1p-hours"""
 
-    def sample_hours(self, hidden_states, next_embeds, do_sample=True, generator=None):
+    def sample_hours(
+        self,
+        hidden_states: t.Tensor,
+        next_embeds: t.Tensor,
+        do_sample: bool = True,
+        generator: t.Generator | None = None,
+    ) -> t.Tensor:
         """the prediction, which is all a point head has to give, whatever the
         next token -- the reason to train a mixture head for generation"""
         log1p_hours = self.predict(hidden_states)
@@ -325,7 +338,12 @@ class TntPointHead(TntHead, Log1pHoursHead):
         )
         return log1p_hours.expm1()
 
-    def mean_log1p_hours(self, hidden_states, lm_head, input_embeddings):
+    def mean_log1p_hours(
+        self,
+        hidden_states: t.Tensor,
+        lm_head: collections.abc.Callable[[t.Tensor], t.Tensor],
+        input_embeddings: t.nn.Module,
+    ) -> t.Tensor:
         """the prediction, which squared error on log1p-hours trains to be that
         mean"""
         log1p_hours = self.predict(hidden_states)
@@ -346,7 +364,9 @@ class TntMixtureHead(TntHead):
     learned the zero-gap rate but not which tokens arrive at once
     """
 
-    def __init__(self, hidden_size: int, mixture_components: int, weight: float = 1.0):
+    def __init__(
+        self, hidden_size: int, mixture_components: int, weight: float = 1.0
+    ) -> None:
         if mixture_components < 1:
             raise ValueError(
                 "`mixture_components` counts the log-normal components of the "
@@ -368,12 +388,19 @@ class TntMixtureHead(TntHead):
             self.proj(t.cat([hidden_states, self.next_norm(next_embeds)], dim=-1))
         )
 
-    def predict(self, hidden_states):
+    def predict(self, hidden_states: t.Tensor) -> None:
         return None  # what it predicts depends on the next token
 
     def loss(
-        self, pred, target, *, hidden_states, input_ids=None, input_embeddings=None, **_
-    ):
+        self,
+        pred: t.Tensor | None,
+        target: t.Tensor,
+        *,
+        hidden_states: t.Tensor,
+        input_ids: t.Tensor | None = None,
+        input_embeddings: t.nn.Module | None = None,
+        **_,
+    ) -> t.Tensor:
         """
         the mean negative log-likelihood, position i's distribution conditioned
         on token i+1 -- known here, sampled first in generation. The last
@@ -386,6 +413,12 @@ class TntMixtureHead(TntHead):
                 "a mixture time-to-next-token head conditions on the next token, "
                 "so scoring `hours_to_next_token` needs `input_ids`"
             )
+        if input_embeddings is None:
+            raise ValueError(
+                "a mixture time-to-next-token head embeds the next token itself, "
+                "so scoring `hours_to_next_token` needs the backbone's "
+                "`input_embeddings`"
+            )
         dist = self.distribution(
             hidden_states[:, :-1], input_embeddings(input_ids[:, 1:])
         )
@@ -394,7 +427,13 @@ class TntMixtureHead(TntHead):
         nll = -dist.log_prob(t.where(keep, target, 0.0))
         return (nll * keep).sum() / keep.sum().clamp(min=1)
 
-    def sample_hours(self, hidden_states, next_embeds, do_sample=True, generator=None):
+    def sample_hours(
+        self,
+        hidden_states: t.Tensor,
+        next_embeds: t.Tensor,
+        do_sample: bool = True,
+        generator: t.Generator | None = None,
+    ) -> t.Tensor:
         dist = self.distribution(hidden_states, next_embeds)
         return dist.sample(generator) if do_sample else dist.point_estimate()
 
@@ -404,7 +443,12 @@ class TntMixtureHead(TntHead):
     chunk_elements = 2**24
 
     @t.no_grad()
-    def mean_log1p_hours(self, hidden_states, lm_head, input_embeddings):
+    def mean_log1p_hours(
+        self,
+        hidden_states: t.Tensor,
+        lm_head: collections.abc.Callable[[t.Tensor], t.Tensor],
+        input_embeddings: t.nn.Module,
+    ) -> t.Tensor:
         """
         the mean log1p-hours given each next token, as `distribution` has it,
         averaged over the language-modelling head's probability of that token:
@@ -476,7 +520,9 @@ class DispositionHead(Head):
     target = "disposition"
     default_classes = ("DSCG//*",)
 
-    def __init__(self, hidden_size: int, classes: list[str], weight: float = 1.0):
+    def __init__(
+        self, hidden_size: int, classes: list[str], weight: float = 1.0
+    ) -> None:
         if not classes:
             raise ValueError("a disposition head needs at least one class")
         super().__init__(weight)
@@ -484,7 +530,9 @@ class DispositionHead(Head):
         self.linear = t.nn.Linear(hidden_size, len(self.classes))
 
     @classmethod
-    def options_from(cls, block, lookup):
+    def options_from(
+        cls, block: dict, lookup: collections.abc.Mapping[str, int]
+    ) -> dict:
         """`classes` given as fnmatch patterns -- `DSCG//*` unless the block says
         otherwise -- resolved to the tokens they match, in token-id order"""
         options = super().options_from(block, lookup)
@@ -502,10 +550,10 @@ class DispositionHead(Head):
             )
         return options
 
-    def predict(self, hidden_states):
+    def predict(self, hidden_states: t.Tensor) -> t.Tensor:
         return self.linear(hidden_states)
 
-    def loss(self, pred, target, **context):
+    def loss(self, pred: t.Tensor, target: t.Tensor, **context) -> t.Tensor:
         target = target.to(device=pred.device, dtype=t.long)
         nll = t.nn.functional.cross_entropy(
             pred.flatten(0, -2).to(dtype=t.float32),
@@ -525,7 +573,9 @@ HEADS: dict[str, type[Head]] = {
 }
 
 
-def head_options(cfg, lookup) -> dict[str, dict]:
+def head_options(
+    cfg: DictConfig | dict, lookup: collections.abc.Mapping[str, int]
+) -> dict[str, dict]:
     """
     the heads a training config asks for -- one per `<name>_objective` block,
     any combination of them -- each with the options its block gives, resolved
@@ -577,7 +627,7 @@ class CotorraConfig(PreTrainedConfig):
     tie_word_embeddings: bool | None = None
     use_cache: bool | None = None
 
-    def __post_init__(self, **kwargs):
+    def __post_init__(self, **kwargs) -> None:
         if self.text_config is None:
             raise ValueError(
                 f"a `{self.model_type}` config wraps a causal-lm backbone and so "
@@ -632,7 +682,7 @@ class CotorraForCausalLM(PreTrainedModel, GenerationMixin):
     _supports_flex_attn = True
     _supports_attention_backend = True
 
-    def __init__(self, config: CotorraConfig):
+    def __init__(self, config: CotorraConfig) -> None:
         super().__init__(config)
         self.model = AutoModel.from_config(config.text_config)
         self.lm_head = t.nn.Linear(
