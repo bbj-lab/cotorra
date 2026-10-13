@@ -430,7 +430,9 @@ tasks. It:
    each discharge disposition (`--discharge-disposition`). Each needs a `cotorra`
    model carrying that head (see
    [Training secondary heads](#training-secondary-heads)).
-5. Writes one feature table per split (optionally sharded).
+5. Optionally scores every token of the context by its negative log2-likelihood
+   under the model, given the tokens before it (`--token-nll`).
+6. Writes one feature table per split (optionally sharded).
 
 Extraction is driven by a YAML config (the package ships a default; see
 [`./src/cotorra/config/extraction.yaml`](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/extraction.yaml))
@@ -483,6 +485,21 @@ that specifies:
     extraction with an error once the model is loaded, before any feature table
     is written; a model trained without any objective is a stock HuggingFace
     model and carries none.
+
+    `--token-nll` adds one more column, last: `token_nll_bits`, a float32 list
+    per row as long as its `input_ids` (the row's `tokens_past`). Entry i is
+    that token's negative log2-likelihood in bits given the tokens before it,
+    −log₂ p(tokenᵢ | token₀, …, tokenᵢ₋₁), from the model's own next-token
+    probabilities. Entry 0 is zero: the first token is always `BOS`, so it
+    carries no information. Every entry past `extract.max_len` is NaN, since the
+    model never sees those tokens. The column is the same with or without
+    `--all-times`, and every model has it, stock HuggingFace models included.
+    Skipping any NaNs (e.g. with `np.nansum`), a row's sum is the context's total
+    surprisal in bits, and the mean of its entries after the first is log₂ of
+    the model's perplexity on it. The probabilities are the
+    model's as trained: a model trained with the deprecated
+    `label_weighted_loss` overpredicts its tokens of interest, so it scores
+    them as less surprising than they are.
 
 ## (3) Scoring
 
@@ -695,6 +712,11 @@ with commands:
     │    --discharge-disposition  -d            Add the disposition head's    │
     │                                           probability of each discharge │
     │                                           disposition to the features?  │
+    │    --token-nll              -l            Add each token's negative     │
+    │                                           log2-likelihood under the     │
+    │                                           model, given the tokens       │
+    │                                           before it, as a list as long  │
+    │                                           as the tokens?                │
     │    --help                   -h            Show this message and exit.   │
     ╰─────────────────────────────────────────────────────────────────────────╯
     ```

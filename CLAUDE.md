@@ -40,6 +40,10 @@ train / tune   →  extract  →  rep-based-score
   as `features` is): `time_to_event` and `time_to_next_token` in hours, and a
   `<class>_prob` per disposition class; `HEAD_COLUMNS` in
   [extractor.py](src/cotorra/extractor.py) maps each head name to its columns.
+  `-l` (`--token-nll`) adds `token_nll_bits` last, from the LM's logits rather
+  than a head, so any model has it: each token's −log₂ p given those before it,
+  a float32 list as long as the row's `input_ids` whatever `--all-times` (0 at
+  the first token, a `BOS` carrying no information; NaN past `extract.max_len`).
 - **rep-based-score** — fit a lightweight sklearn/boosting estimator on extracted
   features (requires `extract` first). It globs `features-<split>*-…` from
   `--processed-data-home`, so features extracted to another `--output-home`

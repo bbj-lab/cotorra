@@ -208,6 +208,15 @@ def extract(
             "disposition to the features?",
         ),
     ] = False,
+    token_nll: Annotated[
+        bool,
+        typer.Option(
+            "--token-nll",
+            "-l",
+            help="Add each token's negative log2-likelihood under the model, given "
+            "the tokens before it, as a list as long as the tokens?",
+        ),
+    ] = False,
     overrides: Overrides = None,
 ) -> None:
     """
@@ -233,6 +242,7 @@ def extract(
                 )
                 if wanted
             ],
+            token_nll=token_nll,
         )
         t1 = time.perf_counter()
         print(f"\n[green]✓[/green] Extraction completed in {t1 - t0:.2f}s.")
