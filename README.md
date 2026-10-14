@@ -243,6 +243,12 @@ that specifies:
 - **tuning_args**: Arguments passed to HuggingFace's
   [`hyperparameter_search`](https://huggingface.co/docs/transformers/hpo_train?backends=Optuna)
   when `cotorra tune` is called.
+    - **hp_space**: The search space, a block per `training_args` field to tune.
+      Its `type` (`float`, `int` or `categorical`) picks Optuna's
+      `trial.suggest_<type>`, and its other keys are that method's arguments
+      (`low`, `high`, `step`, `log`; `choices` for `categorical`). Without it,
+      the search covers `learning_rate` (1e-4 to 5e-4, log-scaled) and
+      `gradient_accumulation_steps` (1 to 3).
 
 ### Model presets
 
