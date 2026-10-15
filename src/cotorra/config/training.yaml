@@ -122,3 +122,13 @@ tuning_args:
   direction: minimize
   backend: optuna
   n_trials: !!int 10
+  hp_space: # `training_args` fields to search, each sampled by optuna's `trial.suggest_<type>`
+    learning_rate:
+      type: float
+      low: !!float 1e-4
+      high: !!float 5e-4
+      log: !!bool true
+    gradient_accumulation_steps:
+      type: int
+      low: !!int 1
+      high: !!int 3

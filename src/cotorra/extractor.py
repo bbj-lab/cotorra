@@ -53,6 +53,33 @@ HEAD_COLUMNS = {
 }
 
 
+def token_nll_bits(
+    logits: t.Tensor, input_ids: t.Tensor, n_tokens: collections.abc.Sequence[int]
+) -> list[np.ndarray]:
+    """
+    the negative log2-likelihood, in bits, of each of a row's `n_tokens` tokens
+    given those before it, from `logits`, the model's next-token logits over the
+    padded (and maybe truncated) `input_ids`: a float32 array as long as the row,
+    zero at its first token, the BOS every timeline opens with, which carries no
+    information, and NaN past the tokens it was cut to, which the model never
+    saw. Worked out in float32 whatever the model's dtype, a row at a time, so
+    that no intermediate outgrows one row's logits
+    """
+    kept = [min(n, input_ids.shape[-1]) for n in n_tokens]
+    nats = t.full(input_ids.shape, t.nan, dtype=t.float32, device=logits.device)
+    nats[:, 0] = 0.0
+    for i, n in enumerate(kept):
+        if n > 1:
+            nats[i, 1:n] = t.nn.functional.cross_entropy(
+                logits[i, : n - 1].float(), input_ids[i, 1:n], reduction="none"
+            )
+    rows = (nats / math.log(2)).cpu().numpy()
+    bits = [np.full(n, np.nan, dtype=np.float32) for n in n_tokens]
+    for row, b, n in zip(rows, bits, kept):
+        b[:n] = row[:n]
+    return bits
+
+
 class Extractor(Configurable):
     """load a model and extract representations from it"""
 
@@ -138,11 +165,15 @@ class Extractor(Configurable):
         batch: dict,
         all_times: bool = False,
         heads: collections.abc.Iterable[str] = (),
+        token_nll: bool = False,
     ) -> dict:
         """the last hidden state at each row's last real token -- or with
         `all_times` at every position up to it -- as `features`, plus the columns
-        `HEAD_COLUMNS` gives for each of `heads` from the same positions"""
+        `HEAD_COLUMNS` gives for each of `heads` from the same positions, and with
+        `token_nll` a `token_nll_bits` list as long as each row's tokens, whatever
+        `all_times`: each one's negative log2-likelihood given those before it"""
         heads = self._check_heads(heads)
+        n_tokens = [len(x) for x in batch["input_ids"]]
         collated = self.collate_fn(batch)
         first_eos = t.where(
             (hits := (collated["input_ids"] == self.model.config.eos_token_id)).any(
@@ -154,9 +185,14 @@ class Extractor(Configurable):
         )
         columns = dict()
         with t.inference_mode():
-            features = self.model(**collated, output_hidden_states=True).hidden_states[
-                -1
-            ]  # last hidden layer
+            outputs = self.model(**collated, output_hidden_states=True)
+            features = outputs.hidden_states[-1]  # last hidden layer
+            nll = (
+                token_nll_bits(outputs.logits, collated["input_ids"], n_tokens)
+                if token_nll
+                else None
+            )
+            del outputs  # every layer's hidden states and the logits, not held on to
             if heads:  # read where the features are, from the model's own dtype
                 positions = (
                     features[
@@ -190,13 +226,19 @@ class Extractor(Configurable):
                 features[t.arange(len(first_eos)), first_eos].half().cpu().numpy()
             )
             batch.update(columns)
+        if nll is not None:
+            batch["token_nll_bits"] = nll
         return batch
 
     def extract(
-        self, all_times: bool = False, heads: collections.abc.Iterable[str] = ()
+        self,
+        all_times: bool = False,
+        heads: collections.abc.Iterable[str] = (),
+        token_nll: bool = False,
     ) -> None:
         """write each split's features to `output_home`, with the columns of each
-        of `heads`; a head the model lacks is refused before a table is written"""
+        of `heads` and with `token_nll` each token's negative log2-likelihood; a
+        head the model lacks is refused before a table is written"""
         heads = self._check_heads(heads)
         if self.loader.for_inference is None:
             raise FileNotFoundError(
@@ -214,7 +256,7 @@ class Extractor(Configurable):
                 index = f"-{i:05d}-of-{n:05d}" if n > 1 else ""
                 dset.shard(num_shards=n, index=i).map(
                     lambda batch: self.extract_final(
-                        batch, all_times=all_times, heads=heads
+                        batch, all_times=all_times, heads=heads, token_nll=token_nll
                     ),
                     batched=True,
                     batch_size=extract_cfg.get("batch_size", 8),

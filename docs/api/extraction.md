@@ -27,4 +27,12 @@ columns after it in the order `heads` lists them: `time_to_event` and
 probability for each of the disposition head's classes. Asking for a head the
 model doesn't carry raises a `ValueError` before anything is written.
 
+Given `token_nll`, it adds a last column, `token_nll_bits`: for each timeline, a
+float32 list as long as its tokens holding each token's negative log2-likelihood
+under the model given the tokens before it, read from the language-modelling
+head's logits. The first token, always `BOS`, carries no information and gets
+zero; any token past `extract.max_len`, which the model never sees, gets NaN. The
+list is the same whether or not `all_times` is set, and any model has it, with or
+without secondary heads.
+
 ::: cotorra.extractor.Extractor

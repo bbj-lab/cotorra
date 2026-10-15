@@ -4,10 +4,19 @@
 train a model with hyperparameter tuning
 """
 
+import functools
+
 import optuna
 from omegaconf import OmegaConf
+from transformers import TrainingArguments
 
 from cotorra.trainer import Trainer
+
+# the search space when `tuning_args` sets no `hp_space`, as before it could
+DEFAULT_HP_SPACE = {
+    "learning_rate": {"type": "float", "low": 1e-4, "high": 5e-4, "log": True},
+    "gradient_accumulation_steps": {"type": "int", "low": 1, "high": 3},
+}
 
 
 class Tuner(Trainer):
@@ -15,12 +24,16 @@ class Tuner(Trainer):
         super().__init__(**kwargs)
 
     @staticmethod
-    def optuna_hp_space(trial: "optuna.trial.BaseTrial") -> dict[str, float]:
+    def optuna_hp_space(
+        trial: "optuna.trial.BaseTrial", hp_space: dict | None = None
+    ) -> dict[str, float | int | str | bool | None]:
+        """samples each `training_args` field `hp_space` names with optuna's
+        `trial.suggest_<type>`, passing it the field's other keys"""
         return {
-            "learning_rate": trial.suggest_float("learning_rate", 1e-4, 5e-4, log=True),
-            "gradient_accumulation_steps": trial.suggest_int(
-                "gradient_accumulation_steps", 1, 3
-            ),
+            name: getattr(trial, f"suggest_{spec['type']}")(
+                name, **{k: v for k, v in spec.items() if k != "type"}
+            )
+            for name, spec in (hp_space or DEFAULT_HP_SPACE).items()
         }
 
     @staticmethod
@@ -30,10 +43,19 @@ class Tuner(Trainer):
         return metrics["eval_loss"]
 
     def train(self, verbose: bool = False) -> None:
+        tuning_args = OmegaConf.to_container(self.cfg.tuning_args, resolve=True)
+        hp_space = tuning_args.pop("hp_space", None)
+        # hf skips a field `TrainingArguments` lacks with a warning, so a typo would
+        # run every trial alike
+        if unknown := set(hp_space or {}) - set(TrainingArguments.__dataclass_fields__):
+            raise ValueError(
+                f"tuning_args.hp_space names {sorted(unknown)}, which aren't "
+                "`TrainingArguments` fields"
+            )
         best_trial = self.trainer.hyperparameter_search(
-            hp_space=self.optuna_hp_space,
+            hp_space=functools.partial(self.optuna_hp_space, hp_space=hp_space),
             compute_objective=self.compute_objective,
-            **self.cfg.tuning_args,
+            **tuning_args,
         )
         for n, v in best_trial.hyperparameters.items():
             setattr(self.trainer.args, n, v)

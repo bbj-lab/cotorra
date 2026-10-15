@@ -1051,3 +1051,124 @@ def test_extract_names_the_inference_tables_it_cannot_find(
     with pytest.raises(FileNotFoundError, match="_for_inference.parquet"):
         extractor.extract()
     assert not any(out.iterdir())
+
+
+# ------------------------------------- each token's negative log2-likelihood
+
+
+@pytest.mark.parametrize(
+    "names, dtype",
+    [((), "float32"), (ALL_HEADS, "float32"), (ALL_HEADS, "bfloat16")],
+    ids=["stock", "every-head", "bfloat16"],
+)
+def test_each_tokens_nll_is_the_loss_the_model_trains_on_there(
+    names, dtype, extract_from, model_with_heads, ending_batch
+):
+    """
+    in bits, the cross-entropy of each token but the first, a BOS that carries
+    no information and is zero: the mean of a row's others, in nats, is the
+    loss its own forward gives it with its tokens for labels, the model's own
+    shift and all. A list per row as long as its tokens, in float32 whatever
+    the model's dtype, and the same whether or not `all_times`
+    """
+    extractor = extract_from(model_with_heads(*names, mixture=bool(names), dtype=dtype))
+    collated = extractor.collate_fn(dict(ending_batch))
+    for all_times in (False, True):
+        bits = extractor.extract_final(
+            dict(ending_batch), all_times=all_times, token_nll=True
+        )["token_nll_bits"]
+        assert len(bits) == len(ending_batch["input_ids"])
+        for i, (row, ids) in enumerate(zip(bits, ending_batch["input_ids"])):
+            assert row.dtype == np.float32 and row.shape == ids.shape
+            assert row[0] == 0 and np.isfinite(row).all()
+            labels = t.full_like(collated["input_ids"], -100)
+            labels[i, : len(ids)] = collated["input_ids"][i, : len(ids)]
+            with t.no_grad():
+                loss = extractor.model(**collated, labels=labels).loss.item()
+            np.testing.assert_allclose(row[1:].mean() * math.log(2), loss, rtol=1e-5)
+
+
+def test_tokens_past_max_len_have_no_nll_and_the_rest_as_if_cut_there(
+    extract_from, fake_model_home, tokenizer_cfg
+):
+    """the model never sees a token past `extract.max_len` and so gives it no
+    likelihood, but the list stays as long as the row, lined up with its
+    `input_ids` in the table"""
+    extractor = extract_from(fake_model_home)
+    max_len = extractor.cfg.extract.max_len
+    long = t.tensor([tokenizer_cfg.lookup.BOS] + [5, 6, 7, 8] * max_len)
+
+    def nll(row: t.Tensor) -> np.ndarray:
+        batch = {"input_ids": [row], "s_elapsed_past": [t.arange(len(row)) * 600.0]}
+        return extractor.extract_final(batch, token_nll=True)["token_nll_bits"][0]
+
+    cut, kept = nll(long), nll(long[:max_len])
+    assert cut.shape == long.shape and kept.shape == (max_len,)
+    np.testing.assert_array_equal(cut[:max_len], kept)
+    assert np.isnan(cut[max_len:]).all()
+
+
+def test_the_nlls_come_last_and_each_rows_its_own(
+    extract_from, model_with_heads, ending_batch
+):
+    """after the features and the heads' columns, which they leave as they were,
+    and a row's the same whatever it's batched with, its batchmates' padding
+    unseen"""
+    extractor = extract_from(model_with_heads(*ALL_HEADS, mixture=True))
+    for all_times in (False, True):
+        plain = extractor.extract_final(
+            dict(ending_batch), all_times=all_times, heads=ALL_HEADS
+        )
+        flagged = extractor.extract_final(
+            dict(ending_batch), all_times=all_times, heads=ALL_HEADS, token_nll=True
+        )
+        assert list(flagged) == list(plain) + ["token_nll_bits"]
+        for column in (c for c in plain if c not in ending_batch):
+            np.testing.assert_array_equal(flagged[column], plain[column])
+
+    together = extractor.extract_final(dict(ending_batch), token_nll=True)
+    for i, row in enumerate(together["token_nll_bits"]):
+        alone = {k: v[i : i + 1] for k, v in ending_batch.items()}
+        [by_itself] = extractor.extract_final(alone, token_nll=True)["token_nll_bits"]
+        np.testing.assert_allclose(row, by_itself, rtol=1e-4)
+
+
+def test_every_shards_nlls_line_up_with_its_input_ids(
+    extract_from, model_with_heads, processed
+):
+    """
+    written last, a float32 list per row as long as its `input_ids` -- zero at
+    its first token, NaN at any past `extract.max_len` -- the same in every
+    shard, a last batch of one row among them, so that a glob over the shards
+    reads them as one table
+    """
+    extractor = extract_from(
+        model_with_heads(*ALL_HEADS),
+        extract={"max_len": 16, "batch_size": 3, "shard_size": SHARD_SIZE},
+    )
+    name = extractor.model_home.name
+    columns = [c for head in ALL_HEADS for c in head_columns(extractor, head)]
+    for all_times in (False, True):
+        extractor.extract(all_times=all_times, heads=ALL_HEADS, token_nll=True)
+        a, sharded, cut = "-all" if all_times else "", 0, 0
+        for split in extractor.loader.splits:
+            pattern = f"features{a}-{split}*-{name}.parquet"
+            shards = sorted(extractor.output_home.glob(pattern))
+            schemas = [pl.read_parquet_schema(s) for s in shards]
+            assert all(schema == schemas[0] for schema in schemas)
+            assert list(schemas[0]) == PLAIN_COLUMNS + columns + ["token_nll_bits"]
+            assert schemas[0]["token_nll_bits"] == pl.List(pl.Float32)
+            scanned = pl.scan_parquet(extractor.output_home / pattern).collect()
+            expected = pl.read_parquet(processed / f"{split}_for_inference.parquet")
+            assert scanned["input_ids"].equals(
+                expected["tokens_past"], check_names=False
+            )
+            for ids, bits in zip(scanned["input_ids"], scanned["token_nll_bits"]):
+                bits = bits.to_numpy()
+                assert len(bits) == len(ids)
+                assert bits[0] == 0 and np.isfinite(bits[:16]).all()
+                assert np.isnan(bits[16:]).all()
+                cut += len(ids) > 16
+            sharded += len(shards) > 1
+        assert sharded, "no split was large enough to actually shard"
+        assert cut, "no row was long enough to be cut to `max_len`"

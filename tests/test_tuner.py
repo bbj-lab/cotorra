@@ -4,9 +4,9 @@
 
 import optuna
 import pytest
-from helpers import base_training_cfg, write_cfg
+from helpers import base_training_cfg, default_cfg, write_cfg
 
-from cotorra.tuner import Tuner
+from cotorra.tuner import DEFAULT_HP_SPACE, Tuner
 
 
 def test_optuna_hp_space_suggests_expected_ranges():
@@ -28,6 +28,73 @@ def test_optuna_hp_space_only_suggests_keys_training_arguments_accepts():
             hasattr(TrainingArguments, key)
             or key in TrainingArguments.__dataclass_fields__
         )
+
+
+def test_the_packaged_config_searches_the_default_space():
+    """so a run without a config file searches what a config without
+    `hp_space` does"""
+    assert default_cfg("cotorra", "training")["tuning_args"]["hp_space"] == (
+        DEFAULT_HP_SPACE
+    )
+
+
+def test_optuna_hp_space_samples_a_configured_space():
+    hp_space = {
+        "weight_decay": {"type": "float", "low": 0.0, "high": 0.1, "step": 0.05},
+        "warmup_steps": {"type": "int", "low": 2, "high": 8, "log": True},
+        "lr_scheduler_type": {"type": "categorical", "choices": ["linear", "cosine"]},
+    }
+    study = optuna.create_study(direction="minimize")
+    for _ in range(5):
+        space = Tuner.optuna_hp_space(study.ask(), hp_space)
+        assert set(space.keys()) == set(hp_space)
+        assert space["weight_decay"] in (0.0, 0.05, 0.1)
+        assert isinstance(space["warmup_steps"], int)
+        assert 2 <= space["warmup_steps"] <= 8
+        assert space["lr_scheduler_type"] in ("linear", "cosine")
+
+
+def _tuner(processed, tmp_path_factory, hp_space) -> Tuner:
+    cfg = base_training_cfg()
+    cfg["tuning_args"]["hp_space"] = hp_space
+    return Tuner(
+        training_cfg=write_cfg(
+            tmp_path_factory.mktemp("tuner-hp-space-cfg") / "training.yaml", cfg
+        ),
+        processed_data_home=processed,
+        output_home=tmp_path_factory.mktemp("tuner-hp-space-output"),
+    )
+
+
+def test_train_searches_the_configured_space(processed, tmp_path_factory, monkeypatch):
+    """`hp_space` reaches the search as its sampler, not as an optuna kwarg"""
+    hp_space = {"weight_decay": {"type": "float", "low": 0.0, "high": 0.1}}
+    tuner = _tuner(processed, tmp_path_factory, hp_space)
+    searched = {}
+
+    def search(**kwargs):
+        searched.update(kwargs)
+        raise InterruptedError
+
+    monkeypatch.setattr(tuner.trainer, "hyperparameter_search", search)
+    with pytest.raises(InterruptedError):
+        tuner.train()
+    # still in the config, which the tuning yaml saved beside the model records
+    assert "hp_space" in tuner.cfg.tuning_args
+    assert searched["n_trials"] == 1
+    trial = optuna.create_study(direction="minimize").ask()
+    assert set(searched["hp_space"](trial)) == {"weight_decay"}
+
+
+def test_train_rejects_a_field_training_arguments_lacks(
+    processed, tmp_path_factory, monkeypatch
+):
+    hp_space = {"learning_rte": {"type": "float", "low": 1e-4, "high": 5e-4}}
+    tuner = _tuner(processed, tmp_path_factory, hp_space)
+    # it fails before searching, rather than once the trials have all run
+    monkeypatch.setattr(tuner.trainer, "hyperparameter_search", pytest.fail)
+    with pytest.raises(ValueError, match="learning_rte"):
+        tuner.train()
 
 
 def test_the_search_minimizes_the_eval_loss_alone():

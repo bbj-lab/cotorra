@@ -24,9 +24,10 @@ in Weights & Biases, and `train()` can resume from the latest checkpoint.
 ## `Tuner`
 
 `Tuner` extends [`Trainer`](#trainer) to run an [Optuna](https://optuna.org)
-hyperparameter search (over learning rate and gradient-accumulation steps) before
-the final training run. The best trial's hyperparameters are copied back onto the
-trainer, the model is retrained with them, and the weights and configuration are
-saved as usual.
+hyperparameter search (over the `training_args` fields `tuning_args.hp_space`
+names, by default learning rate and gradient-accumulation steps) before the final
+training run. The best trial's hyperparameters are copied back onto the trainer,
+the model is retrained with them, and the weights and configuration are saved as
+usual.
 
 ::: cotorra.tuner.Tuner

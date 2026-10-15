@@ -280,7 +280,30 @@ def test_each_head_flag_reaches_the_extractor_as_its_head(
     )
     assert result.exit_code == 0, result.output
     [call] = extractions
-    assert call["extract"] == {"all_times": "-a" in flags, "heads": heads}
+    assert call["extract"] == {
+        "all_times": "-a" in flags,
+        "heads": heads,
+        "token_nll": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "flags, heads",
+    [(["-l"], []), (["--token-nll"], []), (["-a", "-l", "-t"], ["tte"])],
+    ids=str,
+)
+def test_the_token_nll_flag_reaches_the_extractor(flags, heads, extractions, tmp_path):
+    """on its own, or alongside `--all-times` and a head's flag"""
+    result = runner.invoke(
+        app, ["extract", "-p", str(tmp_path), "-m", str(tmp_path), *flags]
+    )
+    assert result.exit_code == 0, result.output
+    [call] = extractions
+    assert call["extract"] == {
+        "all_times": "-a" in flags,
+        "heads": heads,
+        "token_nll": True,
+    }
 
 
 def test_a_head_flag_among_the_overrides_still_counts(extractions, tmp_path):
@@ -353,6 +376,39 @@ def test_extract_with_every_head_flag_writes_their_columns(
             table[c].dtype == pl.Float32 and table[c].is_finite().all()
             for c in table.columns[4:]
         )
+
+
+def test_extract_with_the_token_nll_flag_writes_a_list_per_row(
+    processed, fake_model_home, tmp_path
+):
+    """from a stock model, which carries no head but has its own likelihood: a
+    float32 list last in each split's table, as long as the row's tokens"""
+    out = tmp_path / "features"
+    out.mkdir()
+    result = runner.invoke(
+        app,
+        # fmt: off
+        [
+            "extract",
+            "-p",
+            str(processed),
+            "-m",
+            str(fake_model_home),
+            "-o",
+            str(out),
+            "-l",
+        ],
+        # fmt: on
+    )
+    assert result.exit_code == 0, result.output
+    for split in ("train", "tuning", "held_out"):
+        table = pl.read_parquet(
+            out / f"features-{split}-{fake_model_home.name}.parquet"
+        )
+        assert table.columns[-1] == "token_nll_bits"
+        assert table["token_nll_bits"].dtype == pl.List(pl.Float32)
+        assert table.height > 0
+        assert table["token_nll_bits"].list.len().equals(table["input_ids"].list.len())
 
 
 def test_extract_refuses_a_head_flag_for_a_head_the_model_lacks(
