@@ -43,8 +43,8 @@ hide:
 
     ***
 
-    Task-oriented guides for common workflows, from the development workflow to
-    transfer learning.
+    Task-oriented guides for common workflows, from an end-to-end run on the
+    public MIMIC-IV demo to the development workflow and transfer learning.
 
     [:octicons-arrow-right-24: Recipes](recipes/index.md)
 

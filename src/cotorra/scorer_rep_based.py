@@ -19,8 +19,9 @@ from omegaconf import OmegaConf
 
 from cotorra.configurable import Configurable
 
-# the estimators `score_label` hands a tuning-split `eval_set`; they are the
-# only ones for which the tuning split has to be fittable too
+# the estimators `score_label` hands the tuning split to evaluate on (lightgbm's
+# `eval_X`/`eval_y`, xgboost's `eval_set`); they are the only ones for which the
+# tuning split has to be fittable too
 EVAL_SET_ESTIMATORS = ("lightgbm", "xgboost")
 
 
@@ -184,11 +185,13 @@ class RepBasedScorer(Configurable):
 
         fit_kwargs = dict()
         if (estimator := str(self.estimator_type).lower()) in EVAL_SET_ESTIMATORS:
-            fit_kwargs["eval_set"] = [
-                (self.features["tuning"][tuning_valid], tuning_label[tuning_valid])
-            ]
+            eval_X = self.features["tuning"][tuning_valid]
+            eval_y = tuning_label[tuning_valid]
             if estimator == "lightgbm":
-                fit_kwargs["eval_metric"] = "auc"
+                # lightgbm 4.7 deprecates `eval_set` for these
+                fit_kwargs |= dict(eval_X=eval_X, eval_y=eval_y, eval_metric="auc")
+            else:
+                fit_kwargs["eval_set"] = [(eval_X, eval_y)]
 
         mdl.fit(
             X=self.features["train"][train_valid],

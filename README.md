@@ -36,8 +36,10 @@ pip install "cotorra" \
   --extra-index-url https://pypi.org/simple
 ```
 
-This installs the `cotorra` command. To work from source instead (e.g. to use
-generative scoring or for development):
+This installs the `cotorra` command. To see it run end to end on public data,
+follow the
+[MIMIC-IV demo](https://github.com/bbj-lab/cotorra/blob/main/recipes/mimic-iv-demo.md).
+To work from source instead (e.g. to use generative scoring or for development):
 
 ```sh
 git clone git@github.com:bbj-lab/cotorra.git

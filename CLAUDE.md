@@ -210,8 +210,10 @@ reusable `model_presets` (YAML anchors) and selects one via the `model:` key.
 - **One-line module docstring** at the top of each file describing its single
   purpose; keep it.
 - **`if __name__ == "__main__":` blocks are dev scratch harnesses**, not tests or
-  entry points. They often hardcode local paths (`./processed/mimic`) and a
-  trailing `# breakpoint()`. Leave them; they're for interactive debugging.
+  entry points. They often hardcode local paths (`./processed/mimic`, for which
+  cocoa's MIMIC-IV demo builds a public stand-in, `processed/demo`, the one
+  [recipes/mimic-iv-demo.md](recipes/mimic-iv-demo.md) trains on) and a trailing
+  `# breakpoint()`. Leave them; they're for interactive debugging.
 - **Tests: `pytest`** (config in [pyproject.toml](pyproject.toml); install with
   `pip install -e ".[test]"`). No CI, so run it locally before committing;
   `-m "not slow"` drops the handful of real (tiny) training loops. `pythonpath`
@@ -316,3 +318,9 @@ recipe markdown). `docs/index.md` likewise includes `README.md`, so README edits
 change the docs home page, and `docs/api/` renders docstrings via mkdocstrings.
 The end-to-end dev workflow (cocoa → tune → score) is in
 [recipes/development-workflow.md](recipes/development-workflow.md).
+[recipes/mimic-iv-demo.md](recipes/mimic-iv-demo.md) runs train → tune → extract
+→ rep-based-score on the public MIMIC-IV demo, with the shipped configs and a few
+overrides, and quotes what they make of it (parameter count, losses, Optuna's
+trials, AUC intervals, timings, warnings), so rerun it after changing a shipped
+config, a loss, the tuner, or the scorers, without a Hugging Face token, as the
+public would.
