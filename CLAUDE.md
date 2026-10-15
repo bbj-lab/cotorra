@@ -82,19 +82,26 @@ of secondary heads, each a `Head` subclass registered in `HEADS` by its `name`
 (`tte`, `tnt`, `disposition`). That name keys the head's `<name>_objective`
 training block, its entry in `CotorraConfig.heads`, its `<name>_pred` /
 `<name>_loss` output fields, and its `extract` columns in `HEAD_COLUMNS`; its
-`target` names the batch column it's scored against. Inheritance is for what
-heads share: `TteHead` and `TntPointHead` are `Log1pHoursHead`s, and
-`TntPointHead` and `TntMixtureHead` are `TntHead`s, the interface sampling and
-extraction use. The combinations live in one class, `CotorraForCausalLM`, which
-builds a `ModuleDict` of the heads its config lists, so adding an objective takes
-a `Head` subclass in `HEADS` plus its two output fields, a `HEAD_COLUMNS` entry
-and an `extract` flag (tests hold both to `HEADS`'s keys), not a new model class.
-`head_options` turns the training config's blocks into the heads' options
-(resolving the disposition `classes` patterns against the vocab) and is the one
-place `Trainer`, `Loader` and `Loss` read them from. `Trainer.model_init` builds
-a stock HF model when no objective is set. Importing `cotorra.model` registers
-`cotorra` with the HF auto classes, so anything that loads a saved
-`mdl-<run_name>/` (as `Extractor` does) has to import it first.
+`target` names the batch column it's scored against, and its `target_weight`
+(`hours_to_end_time_weight`, `disposition_weight`; the TNT heads have none) the
+per-position weights it's scored with under `per_record`, which `forward` pops
+alongside the targets and `Head.forward` refuses to go without, or to take
+unasked. Inheritance is for what heads share: `TteHead` and `TntPointHead` are
+`Log1pHoursHead`s, and `TntPointHead` and `TntMixtureHead` are `TntHead`s, the
+interface sampling and extraction use. The combinations live in one class,
+`CotorraForCausalLM`, which builds a `ModuleDict` of the heads its config lists,
+so adding an objective takes a `Head` subclass in `HEADS` plus its two output
+fields, a `HEAD_COLUMNS` entry and an `extract` flag (tests hold both to
+`HEADS`'s keys), not a new model class; weighting one per record takes a
+`target_weight`, a `per_record` option, and a `SCORED` entry in
+[loader.py](src/cotorra/loader.py) (which positions its loss scores), which tests
+hold to the heads with a `target_weight`. `head_options` turns the training
+config's blocks into the heads' options (resolving the disposition `classes`
+patterns against the vocab) and is the one place `Trainer`, `Loader` and `Loss`
+read them from. `Trainer.model_init` builds a stock HF model when no objective is
+set. Importing `cotorra.model` registers `cotorra` with the HF auto classes, so
+anything that loads a saved `mdl-<run_name>/` (as `Extractor` does) has to import
+it first.
 
 Point heads (`Log1pHoursHead`: `TteHead`, and the default TNT head) are an
 `nn.Linear` read through a softplus, so their log1p-hours, and the hours `expm1`
@@ -258,7 +265,14 @@ token), and regenerates them when `tokens_times.parquet` is newer or a cache
 predates a derived column. The disposition target depends on the config's
 `classes`, so it isn't cached: `Loader` labels each record (its last matching
 `DSCG//*` token's class before that token, -100 from it on) with `datasets.map`
-before packing splits records across chunks. Token-set selectors
+before packing splits records across chunks. Under an objective's `per_record`
+(the TTE's or the disposition's) it weights each record the same way: `mean / n`
+on each of its tokens, `n` counting those its head scores (a finite
+`hours_to_end_time`; a disposition other than -100) and `mean` being `n`'s
+average over the split's records with any, so that a fragment keeps its whole
+record's weight, and the weights average 1 over each split's scored tokens,
+keeping the loss on its unweighted scale. It counts them off the dataset itself,
+the split caches lacking the disposition target. Token-set selectors
 (`tokens_of_interest`, `target_tokens`) support **fnmatch patterns** (e.g.
 `LABEL//*`), resolved against the tokenizer vocab.
 

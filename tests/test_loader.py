@@ -6,15 +6,30 @@ import math
 import shutil
 import time
 
+import numpy as np
 import polars as pl
 import pytest
 import torch as t
 from helpers import base_training_cfg, write_cfg
 from omegaconf import OmegaConf
 
-from cotorra.loader import Loader, disposition_targets
+from cotorra.loader import SCORED, Loader, disposition_targets, record_weights
+from cotorra.model import HEADS
 
 SEQ_LEN = 16  # `base_training_cfg`'s max_seq_len
+
+# the heads whose objectives can weight each record alike
+PER_RECORD = [name for name, head in HEADS.items() if head.target_weight]
+
+
+def commonest_disposition(home) -> str:
+    """the `DSCG//*` token that the most of `home`'s records end with"""
+    lookup = OmegaConf.load(home / "tokenizer.yaml").lookup
+    tokens = pl.read_parquet(home / "tokens_times.parquet")["tokens"].explode(
+        empty_as_null=True
+    )
+    dscg = {lookup[k]: k for k in lookup if k.startswith("DSCG//")}
+    return dscg[tokens.filter(tokens.is_in(list(dscg))).mode()[0]]
 
 
 @pytest.fixture(scope="module")
@@ -308,6 +323,121 @@ def test_packing_keeps_the_gap_across_a_record_boundary_masked(tnt_loader):
     assert (hours[ids != eos] >= 0).all()
 
 
+# --------------------------------------------------- the weights per record
+
+
+def test_record_weights_share_the_mean_among_a_records_scored_tokens():
+    """`mean / n` for a record with n tokens scored, `mean` being n's mean over
+    the records with any, so that each one's scored tokens weigh `mean` between
+    them; nothing for a record without any"""
+    assert record_weights([4, 2, 0, 6]).tolist() == pytest.approx(
+        [1.0, 2.0, 0.0, 2 / 3]
+    )
+    assert record_weights([0, 0]).tolist() == [0.0, 0.0]
+    assert record_weights([]).tolist() == []
+
+
+def test_each_head_counts_the_positions_its_loss_scores():
+    """
+    the time-to-event head's finite targets -- one past the end time included,
+    which it scores as 0 hours left, but not a missing end time, arriving as a
+    nan or a null -- and the disposition head's targets other than -100; every
+    head that can weight each record alike has its count
+    """
+    assert list(SCORED) == PER_RECORD
+    hours = pl.Series([[5.0, -1.0, math.nan, None], [None]])
+    assert hours.list.eval(SCORED["tte"]).list.sum().to_list() == [2, 0]
+    disposition = pl.Series([[2, 2, -100], [-100], [0]])
+    assert disposition.list.eval(SCORED["disposition"]).list.sum().to_list() == [
+        2,
+        0,
+        1,
+    ]
+
+
+# which of a record's tokens each head scores, as the tests see it
+IS_SCORED = {
+    "tte": lambda target: np.isfinite(np.asarray(target, dtype=np.float64)),
+    "disposition": lambda target: np.asarray(target) != -100,
+}
+
+
+@pytest.fixture(scope="module")
+def per_record_loader(tte_home, tmp_path_factory) -> Loader:
+    """every head that can weight each record alike, weighting it, the
+    disposition head with one class, so that the records ending otherwise go
+    unscored"""
+    cfg_path = write_cfg(
+        tmp_path_factory.mktemp("loader-per-record-cfg") / "training.yaml",
+        base_training_cfg(
+            tte_objective={"per_record": True},
+            disposition_objective={
+                "per_record": True,
+                "classes": [commonest_disposition(tte_home)],
+            },
+        ),
+    )
+    return Loader(training_cfg=cfg_path, processed_data_home=tte_home)
+
+
+def test_each_weight_joins_its_target(per_record_loader):
+    for s in per_record_loader.splits:
+        assert per_record_loader.dataset[s].column_names == [
+            "input_ids",
+            "s_elapsed",
+            "hours_to_end_time",
+            "disposition",
+            "hours_to_end_time_weight",
+            "disposition_weight",
+        ]
+
+
+@pytest.mark.parametrize("name", PER_RECORD)
+def test_every_record_weighs_the_same_however_long_it_runs(per_record_loader, name):
+    """
+    within each split, by its own records: a record's tokens share one weight,
+    and its scored tokens' weights total the same over every record with any,
+    and average 1 over the split's scored tokens; a record without any weighs
+    nothing
+    """
+    head = HEADS[name]
+    unscored = 0
+    for s in per_record_loader.splits:
+        counts, totals, weights = [], [], []
+        for row in per_record_loader.dataset[s]:
+            w = np.asarray(row[head.target_weight])
+            scored = IS_SCORED[name](row[head.target])
+            assert len(w) == len(row["input_ids"]) and len(set(w)) == 1
+            if scored.any():
+                counts.append(scored.sum())
+                totals.append(w[scored].sum())
+                weights.extend(w[scored])
+            else:
+                unscored += 1
+                assert (w == 0).all()
+        assert len(set(counts)) > 1
+        assert totals == pytest.approx([totals[0]] * len(totals), rel=1e-5)
+        assert np.mean(weights) == pytest.approx(1.0, rel=1e-5)
+    # every record has a finite end time, but not every one ends in the class
+    assert unscored == 0 if name == "tte" else unscored > 0
+
+
+@pytest.mark.parametrize("name", PER_RECORD)
+def test_packing_keeps_every_fragment_its_whole_records_weight(per_record_loader, name):
+    """
+    the tuning split packs in order, unshuffled, so its packed weights are its
+    records' own run together -- records running past a chunk included, whose
+    fragments weigh what they would whole
+    """
+    column = HEADS[name].target_weight
+    tuning = per_record_loader.dataset["tuning"]
+    assert max(len(row["input_ids"]) for row in tuning) > SEQ_LEN
+    expected = [w for row in tuning for w in row[column]]
+    packed = t.cat([eg[column] for eg in per_record_loader.get_tuning_data()])
+    assert len(packed) == len(expected) // SEQ_LEN * SEQ_LEN
+    assert t.allclose(packed, t.tensor(expected[: len(packed)], dtype=packed.dtype))
+
+
 # ------------------------------------------------------ the disposition target
 
 
@@ -351,20 +481,16 @@ def test_a_record_ending_in_none_of_the_classes_goes_unscored(
 ):
     """with `DSCG//missing`, say, left out of `classes`; here every disposition
     but the commonest is"""
-    lookup = OmegaConf.load(processed / "tokenizer.yaml").lookup
-    tokens = pl.read_parquet(processed / "tokens_times.parquet")["tokens"].explode(
-        empty_as_null=True
-    )
-    dscg = {lookup[k]: k for k in lookup if k.startswith("DSCG//")}
-    commonest = tokens.filter(tokens.is_in(list(dscg))).mode()[0]
+    commonest = commonest_disposition(processed)
     cfg_path = write_cfg(
         tmp_path_factory.mktemp("loader-one-class-cfg") / "training.yaml",
-        base_training_cfg(disposition_objective={"classes": [dscg[commonest]]}),
+        base_training_cfg(disposition_objective={"classes": [commonest]}),
     )
     loader = Loader(training_cfg=cfg_path, processed_data_home=processed)
+    commonest_id = loader.tokenizer_info.lookup[commonest]
     scored = []
     for row in loader.dataset["train"]:
-        scored.append(commonest in row["input_ids"])
+        scored.append(commonest_id in row["input_ids"])
         assert any(c != -100 for c in row["disposition"]) == scored[-1]
     assert any(scored) and not all(scored)
 

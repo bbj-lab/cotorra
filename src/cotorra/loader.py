@@ -13,8 +13,15 @@ import polars as pl
 from omegaconf import DictConfig, OmegaConf
 
 from cotorra.configurable import Configurable
-from cotorra.model import HEADS, head_options
+from cotorra.model import HEADS, DispositionHead, TteHead, head_options
 from cotorra.util import batched_iter
+
+# the positions of a record that each head with a `target_weight` scores -- the
+# ones its loss doesn't mask -- as a polars expression over the record's targets
+SCORED = {
+    TteHead.name: pl.element().is_finite(),
+    DispositionHead.name: pl.element() != -100,
+}
 
 
 def disposition_targets(
@@ -40,6 +47,34 @@ def label_dispositions(
     """`disposition_targets` for a batch of records, as `datasets.map` takes it"""
     return {
         "disposition": [disposition_targets(x, class_of) for x in batch["input_ids"]]
+    }
+
+
+def record_weights(counts: np.ndarray | collections.abc.Sequence[int]) -> np.ndarray:
+    """
+    each record's weight under a per-record objective, given how many of its
+    tokens the head scores: `mean / n` for a record with n of them, where `mean`
+    is n's mean over the records with any. A record's scored tokens then weigh
+    `mean` between them however many there are, and the weights average 1 over
+    every record's scored tokens; a record with none weighs nothing
+    """
+    counts = np.asarray(counts, dtype=np.float64)
+    scored = counts > 0
+    mean = counts[scored].mean() if scored.any() else 0.0
+    return np.divide(mean, counts, out=np.zeros_like(counts), where=scored)
+
+
+def weigh_records(
+    targets: list[list], indices: list[int], column: str, weights: np.ndarray
+) -> dict:
+    """each record's weight, from `weights`, on every one of its tokens, for a
+    batch of records as `datasets.map` hands over a head's target column and
+    their indices"""
+    return {
+        column: [
+            np.full(len(x), weights[i], dtype=np.float32)
+            for x, i in zip(targets, indices)
+        ]
     }
 
 
@@ -126,6 +161,32 @@ class Loader(Configurable):
             + (["s_elapsed"] if "time_based_rope" in self.cfg else [])
             + [HEADS[name].target for name in self.heads]
         )
+        for name, options in self.heads.items():
+            head = HEADS[name]
+            if head.target_weight is None or not options.get("per_record", False):
+                continue
+            # weighted per record before packing too, so that a record's every
+            # fragment carries its whole record's weight; each split by its own
+            # records, so that its loss -- the tuning split's `eval_loss`
+            # included -- averages over them alike. Counted off the dataset
+            # rather than the split caches, which lack the disposition target
+            for s in self.splits:
+                counts = (
+                    pl.Series(self.dataset[s].with_format("arrow")[head.target])
+                    .list.eval(SCORED[name])
+                    .list.sum()
+                    .to_numpy()
+                )
+                self.dataset[s] = self.dataset[s].map(
+                    weigh_records,
+                    input_columns=head.target,
+                    with_indices=True,
+                    batched=True,
+                    fn_kwargs={
+                        "column": head.target_weight,
+                        "weights": record_weights(counts),
+                    },
+                )
 
         self.inference_files = {
             s: str(f)

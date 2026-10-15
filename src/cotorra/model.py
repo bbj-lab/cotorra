@@ -43,18 +43,28 @@ MIRRORED_KEYS = (
 )
 
 
-def log1p_hours_mse(preds: t.Tensor, hours: t.Tensor) -> t.Tensor:
+def log1p_hours_mse(
+    preds: t.Tensor, hours: t.Tensor, weights: t.Tensor | None = None
+) -> t.Tensor:
     """mean squared error between `preds` and `log1p(hours)`, taken only over the
-    positions whose target is usable -- finite and non-negative. Summed and then
-    normalized rather than masked-then-averaged so that a batch holding no usable
-    target still yields a differentiable 0.0, keeping the head that made `preds`
-    off the list of parameters distributed training considers unused"""
+    positions whose target is usable -- finite and non-negative -- each error
+    weighted by its position's `weights` when given, and divided by the count of
+    usable positions either way, so that weights averaging 1 keep the loss on the
+    unweighted scale. Summed and then normalized rather than masked-then-averaged
+    so that a batch holding no usable target still yields a differentiable 0.0,
+    keeping the head that made `preds` off the list of parameters distributed
+    training considers unused"""
     preds = preds.to(dtype=t.float32)
     target = hours.to(device=preds.device, dtype=t.float32)
     keep = t.isfinite(target) & (target >= 0)
-    return t.nn.functional.mse_loss(
-        preds[keep], t.log1p(target[keep]), reduction="sum"
-    ) / keep.sum().clamp(min=1)
+    if weights is None:
+        total = t.nn.functional.mse_loss(
+            preds[keep], t.log1p(target[keep]), reduction="sum"
+        )
+    else:
+        weights = weights.to(device=preds.device, dtype=t.float32)
+        total = (weights[keep] * (preds[keep] - t.log1p(target[keep])) ** 2).sum()
+    return total / keep.sum().clamp(min=1)
 
 
 def standard_normal_quadrature(n: int) -> tuple[np.ndarray, np.ndarray]:
@@ -190,15 +200,31 @@ class Head(t.nn.Module):
     it is scored against, and implements `predict` and `loss`. A loss summed over
     the usable positions and then normalized leaves a batch with none of them a
     differentiable 0, so the head never goes without a gradient, which
-    `ddp_find_unused_parameters: false` would refuse
+    `ddp_find_unused_parameters: false` would refuse.
+
+    Unweighted, every scored position counts alike, so a record counts in
+    proportion to how many it has. A head whose objective can weight each record
+    alike instead also sets `target_weight`, the batch column of per-position
+    weights it is then scored with, and takes `per_record`, which asks for them.
+    The `Loader` sets them record by record, before packing splits records
+    across chunks, to mean / n on each of a record's tokens -- n counting those
+    the head scores, and `mean` n's mean over the split's records with any -- so
+    that every record's scored positions weigh the same between them however
+    many there are, and the weights average 1 over the split's scored positions:
+    a loss divides its weighted sum by the count of them, as it does its
+    unweighted one, which keeps it on its scale
     """
 
     name: ClassVar[str]
     target: ClassVar[str]
+    target_weight: ClassVar[str | None] = None
 
     def __init__(self, weight: float = 1.0) -> None:
         super().__init__()
         self.weight = weight
+        # whether each position is scored with its `target_weight`; set by a head
+        # whose objective takes `per_record`
+        self.per_record = False
 
     @classmethod
     def options_from(
@@ -222,17 +248,37 @@ class Head(t.nn.Module):
     def loss(self, pred: t.Tensor | None, target: t.Tensor, **context) -> t.Tensor:
         """`pred` scored against `target`; `context` carries the `hidden_states`
         it came from, the `input_ids`, and the backbone's `input_embeddings`, for
-        a head that needs more than its prediction"""
+        a head that needs more than its prediction, and the `weights` its
+        `target_weight` column holds, None unless the head is `per_record`"""
         raise NotImplementedError
 
     def forward(
-        self, hidden_states: t.Tensor, target: t.Tensor | None = None, **context
+        self,
+        hidden_states: t.Tensor,
+        target: t.Tensor | None = None,
+        weights: t.Tensor | None = None,
+        **context,
     ) -> tuple[t.Tensor | None, t.Tensor | None]:
-        """the prediction and, given a target, the loss"""
+        """the prediction and, given a target, the loss, weighted by `weights`
+        if the head is `per_record` -- and only then"""
         pred = self.predict(hidden_states)
         if target is None:
             return pred, None
-        return pred, self.loss(pred, target, hidden_states=hidden_states, **context)
+        # either mismatch would quietly train the other objective
+        if self.per_record and weights is None:
+            raise ValueError(
+                f"this model's `{self.name}` head weights each record alike, so "
+                f"scoring `{self.target}` needs `{self.target_weight}` too"
+            )
+        if weights is not None and not self.per_record:
+            raise ValueError(
+                f"got `{self.target_weight}` but this model's `{self.name}` head "
+                f"weights every token alike; set `per_record` in `{self.name}"
+                "_objective` to weight each record alike"
+            )
+        return pred, self.loss(
+            pred, target, weights=weights, hidden_states=hidden_states, **context
+        )
 
 
 class Log1pHoursHead(Head):
@@ -250,8 +296,14 @@ class Log1pHoursHead(Head):
     def predict(self, hidden_states: t.Tensor) -> t.Tensor:
         return t.nn.functional.softplus(self.linear(hidden_states)).squeeze(-1)
 
-    def loss(self, pred: t.Tensor, target: t.Tensor, **context) -> t.Tensor:
-        return log1p_hours_mse(pred, target)
+    def loss(
+        self,
+        pred: t.Tensor,
+        target: t.Tensor,
+        weights: t.Tensor | None = None,
+        **context,
+    ) -> t.Tensor:
+        return log1p_hours_mse(pred, target, weights)
 
 
 class TteHead(Log1pHoursHead):
@@ -262,14 +314,29 @@ class TteHead(Log1pHoursHead):
     hours remaining rather than being masked. A missing end time arrives as a
     nan, which stays masked (`clamp` keeps it a nan). Unshifted, which also keeps
     a packed sequence from scoring one record's last token against the next
-    record's first target
+    record's first target. With `per_record`, each position's error is weighted
+    by `hours_to_end_time_weight`, as `Head` describes, so that every record
+    counts alike rather than in proportion to its length
     """
 
     name = "tte"
     target = "hours_to_end_time"
+    target_weight = "hours_to_end_time_weight"
 
-    def loss(self, pred: t.Tensor, target: t.Tensor, **context) -> t.Tensor:
-        return super().loss(pred, target.clamp(min=0))
+    def __init__(
+        self, hidden_size: int, weight: float = 1.0, per_record: bool = False
+    ) -> None:
+        super().__init__(hidden_size, weight)
+        self.per_record = per_record
+
+    def loss(
+        self,
+        pred: t.Tensor,
+        target: t.Tensor,
+        weights: t.Tensor | None = None,
+        **context,
+    ) -> t.Tensor:
+        return super().loss(pred, target.clamp(min=0), weights)
 
 
 class TntHead(Head):
@@ -513,20 +580,29 @@ class DispositionHead(Head):
     discharge. Position i is scored against the disposition its record ends
     with, while that is still to come; from the disposition token on, and
     throughout a record whose disposition is none of `classes`, the target is
-    -100 and the position goes unscored
+    -100 and the position goes unscored. With `per_record`, each position's
+    cross-entropy is weighted by `disposition_weight`, as `Head` describes, so
+    that every record counts alike rather than in proportion to how long it runs
+    before its disposition
     """
 
     name = "disposition"
     target = "disposition"
+    target_weight = "disposition_weight"
     default_classes = ("DSCG//*",)
 
     def __init__(
-        self, hidden_size: int, classes: list[str], weight: float = 1.0
+        self,
+        hidden_size: int,
+        classes: list[str],
+        weight: float = 1.0,
+        per_record: bool = False,
     ) -> None:
         if not classes:
             raise ValueError("a disposition head needs at least one class")
         super().__init__(weight)
         self.classes = list(classes)
+        self.per_record = per_record
         self.linear = t.nn.Linear(hidden_size, len(self.classes))
 
     @classmethod
@@ -553,15 +629,28 @@ class DispositionHead(Head):
     def predict(self, hidden_states: t.Tensor) -> t.Tensor:
         return self.linear(hidden_states)
 
-    def loss(self, pred: t.Tensor, target: t.Tensor, **context) -> t.Tensor:
-        target = target.to(device=pred.device, dtype=t.long)
-        nll = t.nn.functional.cross_entropy(
-            pred.flatten(0, -2).to(dtype=t.float32),
-            target.flatten(),
-            ignore_index=-100,
-            reduction="sum",
-        )
-        return nll / (target != -100).sum().clamp(min=1)
+    def loss(
+        self,
+        pred: t.Tensor,
+        target: t.Tensor,
+        weights: t.Tensor | None = None,
+        **context,
+    ) -> t.Tensor:
+        logits = pred.flatten(0, -2).to(dtype=t.float32)
+        target = target.to(device=pred.device, dtype=t.long).flatten()
+        scored = target != -100
+        if weights is None:
+            total = t.nn.functional.cross_entropy(
+                logits, target, ignore_index=-100, reduction="sum"
+            )
+        else:
+            nll = t.nn.functional.cross_entropy(
+                logits, target, ignore_index=-100, reduction="none"
+            )
+            # zeroed where unscored, so that a weight there goes unread
+            weights = weights.to(device=pred.device, dtype=t.float32).flatten()
+            total = (t.where(scored, weights, 0.0) * nll).sum()
+        return total / scored.sum().clamp(min=1)
 
 
 # every secondary objective, by name; adding one takes a `Head` subclass here and
@@ -723,13 +812,27 @@ class CotorraForCausalLM(PreTrainedModel, GenerationMixin):
     ) -> CotorraCausalLMOutputWithPast:
         """the stock causal-lm forward, plus each head's prediction; a head's
         target, passed under the name its `target` gives (`hours_to_end_time`,
-        `hours_to_next_token`, `disposition`), scores it too"""
+        `hours_to_next_token`, `disposition`), scores it too, weighted by the
+        column its `target_weight` names (`hours_to_end_time_weight`,
+        `disposition_weight`) when the head is weighted per record"""
         # popped before `kwargs` reaches the backbone, whose own `**kwargs` would
-        # otherwise swallow a target meant for a head this model doesn't carry
+        # otherwise swallow a target, or its weights, meant for a head this model
+        # doesn't carry
         targets = {h.target: kwargs.pop(h.target, None) for h in HEADS.values()}
-        carried = {head.target for head in self.heads.values()}
+        weights = {
+            h.target_weight: kwargs.pop(h.target_weight, None)
+            for h in HEADS.values()
+            if h.target_weight is not None
+        }
+        carried = {
+            column
+            for head in self.heads.values()
+            for column in (head.target, head.target_weight)
+        }
         if stray := [
-            k for k, v in targets.items() if v is not None and k not in carried
+            k
+            for k, v in (targets | weights).items()
+            if v is not None and k not in carried
         ]:
             raise ValueError(
                 f"got `{stray[0]}` but this model carries no head scored against it; "
@@ -770,6 +873,7 @@ class CotorraForCausalLM(PreTrainedModel, GenerationMixin):
             pred, head_loss = head(
                 hidden_states,
                 targets[head.target],
+                weights=weights.get(head.target_weight),
                 input_ids=input_ids,
                 input_embeddings=self.get_input_embeddings(),
             )

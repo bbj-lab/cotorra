@@ -80,12 +80,14 @@ balanced_toi_loss: # emphasizes the tokens of interest without making them likel
 # independent, and any combination writes a `cotorra` model wrapping the preset above
 # tte_objective: # hours to the record's end; needs `hours_to_end_time` in `tokens_times.parquet`
 #   weight: !!float 1.0
+#   per_record: !!bool false # true weights each record alike, however long, not each token
 # tnt_objective: # hours to the next token (a marked point process), derived from `times`
 #   weight: !!float 1.0
 #   mixture_components: !!int 8 # a distribution over the gap given the next token, for generation
 # disposition_objective: # the record's discharge disposition, read off its timeline
 #   weight: !!float 1.0
 #   classes: ["DSCG//*"] # fnmatch patterns; a record whose disposition matches none goes unscored
+#   per_record: !!bool false # true weights each record alike, however long, not each token
 
 # note: this option is currently incompatible with generative inference
 time_based_rope:

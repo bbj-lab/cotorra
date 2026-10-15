@@ -11,6 +11,7 @@ from helpers import TINY_MODEL_ARGS, base_training_cfg, write_cfg
 from omegaconf import OmegaConf
 from transformers import AutoConfig, AutoModelForCausalLM
 
+from cotorra.loader import record_weights, weigh_records
 from cotorra.loss import Loss
 from cotorra.model import (
     HEADS,
@@ -590,6 +591,179 @@ def test_a_point_head_learns_its_target(name):
     assert loss.item() < first / 2
 
 
+# ----------------------------------------------- the heads weighted per record
+
+# the heads whose objectives can weight each record alike
+PER_RECORD = [name for name, head in HEADS.items() if head.target_weight]
+
+
+def build_per_record(name: str) -> CotorraForCausalLM:
+    """`name`'s head alone, weighting each record alike rather than each token"""
+    t.manual_seed(0)
+    return AutoModelForCausalLM.from_config(
+        CotorraConfig(
+            text_config=backbone_cfg(),
+            heads={name: {**OPTIONS[name], "per_record": True}},
+        )
+    )
+
+
+def loader_weights(records: list[list], counts: list[int]) -> t.Tensor:
+    """the weights the `Loader` gives `records`, of whose tokens the head scores
+    `counts`, run together as packing runs the records together"""
+    indices = list(range(len(records)))
+    spread = weigh_records(records, indices, "w", record_weights(counts))
+    return t.cat([t.from_numpy(w) for w in spread["w"]])
+
+
+def test_each_error_is_weighted_by_its_positions_weight():
+    """and divided by the count of usable positions, as unweighted, so weights
+    averaging 1 leave the loss on its scale; a masked position's weight goes
+    unread"""
+    per_record = build_per_record("tte")
+    emit(per_record.heads["tte"], 0.0)
+    out = per_record(
+        input_ids=ids(1, 5),
+        hours_to_end_time=t.tensor([[7.0, 3.0, NAN, 1.0, 0.0]]),
+        hours_to_end_time_weight=t.tensor([[2.0, 2.0, NAN, 0.5, 0.5]]),
+    )
+    usable, weights = t.tensor([7.0, 3.0, 1.0, 0.0]), t.tensor([2.0, 2.0, 0.5, 0.5])
+    expected = (weights * t.log1p(usable) ** 2).sum() / 4
+    assert out.tte_loss.item() == pytest.approx(expected.item(), rel=1e-5)
+
+
+def test_each_cross_entropy_is_weighted_by_its_positions_weight():
+    """the disposition head's likewise, an unscored position's weight unread"""
+    per_record = build_per_record("disposition")
+    target = t.tensor([[2, 2, -100, 0, 0]])
+    weights = t.tensor([[2.0, 2.0, NAN, 0.5, 0.5]])
+    out = per_record(
+        input_ids=ids(1, 5), disposition=target, disposition_weight=weights
+    )
+    scored = target[0] != -100
+    nll = t.nn.functional.cross_entropy(
+        out.disposition_pred[0].float()[scored], target[0][scored], reduction="none"
+    )
+    expected = (weights[0][scored] * nll).sum() / 4
+    assert out.disposition_loss.item() == pytest.approx(expected.item(), rel=1e-5)
+
+
+def test_weighting_per_record_counts_every_record_alike():
+    """
+    with the weights the `Loader` gives, a packed row holding a short record and
+    a long one scores the mean of their mean errors, where unweighted the long
+    one's six tokens outvote the short one's two
+    """
+    per_record = build_per_record("tte")
+    emit(per_record.heads["tte"], 0.0)
+    short, long = [5.0, 1.0], [40.0, 30.0, 20.0, 10.0, 5.0, 0.0]
+    out = per_record(
+        input_ids=ids(1, 8),
+        hours_to_end_time=t.tensor([short + long]),
+        hours_to_end_time_weight=loader_weights([short, long], [2, 6])[None],
+    )
+    per_record_mean = sum((t.log1p(t.tensor(r)) ** 2).mean() for r in (short, long))
+    per_record_mean = per_record_mean / 2
+    per_token_mean = (t.log1p(t.tensor(short + long)) ** 2).mean()
+    assert out.tte_loss.item() == pytest.approx(per_record_mean.item(), rel=1e-5)
+    assert per_record_mean.item() != pytest.approx(per_token_mean.item(), rel=1e-2)
+
+
+def test_weighting_per_record_counts_every_disposition_alike():
+    """
+    likewise for the disposition head, each record counting its positions before
+    its disposition: the long one's five outvote the short one's two unweighted
+    """
+    per_record = build_per_record("disposition")
+    logits = t.tensor([2.0, 0.0, 0.0])
+    with t.no_grad():  # the same logits at every position
+        per_record.heads["disposition"].linear.weight.zero_()
+        per_record.heads["disposition"].linear.bias.copy_(logits)
+    short, long = [0, 0, -100], [1, 1, 1, 1, 1, -100]
+    out = per_record(
+        input_ids=ids(1, 9),
+        disposition=t.tensor([short + long]),
+        disposition_weight=loader_weights([short, long], [2, 5])[None],
+    )
+    nll = -logits.log_softmax(dim=-1)  # each class's cross-entropy
+    per_record_mean = (nll[0] + nll[1]) / 2
+    per_token_mean = (2 * nll[0] + 5 * nll[1]) / 7
+    assert out.disposition_loss.item() == pytest.approx(
+        per_record_mean.item(), rel=1e-5
+    )
+    assert per_record_mean.item() != pytest.approx(per_token_mean.item(), rel=1e-2)
+
+
+@pytest.mark.parametrize("name", PER_RECORD)
+def test_unit_weights_score_as_the_unweighted_head_does(name):
+    weighted, unweighted = build_per_record(name), build(name)
+    unweighted.load_state_dict(weighted.state_dict())
+    head, x = HEADS[name], ids(2, 6)
+    target = TARGETS[name](2, 6)
+    target[:, -2:] = UNSCORED[name](2, 2)
+    loss = getattr(
+        weighted(
+            input_ids=x, **{head.target: target, head.target_weight: t.ones(2, 6)}
+        ),
+        f"{name}_loss",
+    )
+    expected = getattr(unweighted(input_ids=x, **{head.target: target}), f"{name}_loss")
+    assert loss.item() == pytest.approx(expected.item(), rel=1e-6)
+
+
+@pytest.mark.parametrize("name", PER_RECORD)
+def test_weighted_a_batch_with_nothing_to_score_is_still_a_differentiable_zero(name):
+    per_record, head, x = build_per_record(name), HEADS[name], ids(2, 6)
+    out = per_record(
+        input_ids=x,
+        labels=x,
+        **{head.target: UNSCORED[name](2, 6), head.target_weight: t.zeros(2, 6)},
+    )
+    loss = getattr(out, f"{name}_loss")
+    assert loss.item() == 0.0 and loss.requires_grad
+    out.loss.backward()
+    assert all(t.isfinite(p.grad).all() for p in per_record.heads.parameters())
+
+
+@pytest.mark.parametrize("name", PER_RECORD)
+def test_a_per_record_head_needs_its_weights(name):
+    """without them, it would quietly weight every token alike"""
+    with pytest.raises(ValueError, match=f"needs `{HEADS[name].target_weight}`"):
+        build_per_record(name)(input_ids=ids(2, 6), **targets([name], 2, 6))
+
+
+@pytest.mark.parametrize("name", PER_RECORD)
+def test_weights_for_a_head_weighting_every_token_alike_are_refused(name):
+    """rather than quietly weighting a head trained without `per_record`"""
+    with pytest.raises(ValueError, match=f"set `per_record` in `{name}_objective`"):
+        build(name)(
+            input_ids=ids(2, 6),
+            **targets([name], 2, 6),
+            **{HEADS[name].target_weight: t.ones(2, 6)},
+        )
+
+
+@pytest.mark.parametrize("name", PER_RECORD)
+def test_weights_for_a_head_the_model_lacks_are_refused(name):
+    """rather than swallowed by the backbone's `**kwargs`"""
+    column = HEADS[name].target_weight
+    with pytest.raises(ValueError, match=f"got `{column}`"):
+        build("tnt")(input_ids=ids(2, 6), **{column: t.ones(2, 6)})
+
+
+@pytest.mark.parametrize("name", PER_RECORD)
+def test_per_record_is_saved_with_the_model_and_off_without_it(name, tmp_path):
+    """a checkpoint saved before the option existed has no `per_record` in its
+    head's options, as one built without it hasn't, and loads weighting every
+    token alike, as it was trained"""
+    unweighted = build(name)
+    assert "per_record" not in unweighted.config.heads[name]
+    for mdl, expected in ((build_per_record(name), True), (unweighted, False)):
+        mdl.save_pretrained(tmp_path / str(expected))
+        reloaded = AutoModelForCausalLM.from_pretrained(tmp_path / str(expected))
+        assert reloaded.heads[name].per_record is expected
+
+
 # ---------------------------------------------- the time-to-next-token heads
 
 
@@ -1117,16 +1291,19 @@ TRAINER_VARIANTS = [
 
 def rows(n_vocab: int, n_classes: int, seq_len: int = 8, n: int = 2) -> list[dict]:
     """rows as `Loader.get_train_data` yields them with every objective
-    configured; the collator picks out the ones its config asks for"""
+    configured, each that can be per record so; the collator picks out the ones
+    its config asks for"""
     return [
         {
             "input_ids": t.randint(3, n_vocab - 1, (seq_len,)),
             "s_elapsed": t.arange(seq_len, dtype=t.float32) * 300,
             "hours_to_end_time": t.rand(seq_len) * 100,
+            "hours_to_end_time_weight": t.rand(seq_len) + 0.5,
             "hours_to_next_token": t.rand(seq_len),
             "disposition": t.randint(0, n_classes, (seq_len,)).index_fill(
                 0, t.tensor([seq_len - 1]), -100
             ),
+            "disposition_weight": t.rand(seq_len) + 0.5,
         }
         for _ in range(n)
     ]
@@ -1226,6 +1403,30 @@ def test_the_model_consumes_what_the_trainers_collator_produces(configured):
     assert all(
         t.isfinite(getattr(out, f"{name}_loss")) for name in configured.head_options
     )
+
+
+@pytest.mark.parametrize("name", PER_RECORD)
+def test_a_per_record_objective_batches_its_weights_beside_its_target(
+    name, built_trainer, monkeypatch
+):
+    """the head that the same block builds expects them"""
+    monkeypatch.setitem(built_trainer.cfg, f"{name}_objective", {"per_record": True})
+    lookup = built_trainer.tkzr_cfg.lookup
+    monkeypatch.setattr(
+        built_trainer, "head_options", head_options(built_trainer.cfg, lookup)
+    )
+    collated = built_trainer.collate_fn(rows(len(lookup), n_classes(built_trainer), 4))
+    assert set(collated) == {
+        "input_ids",
+        "labels",
+        "position_ids",
+        HEADS[name].target,
+        HEADS[name].target_weight,
+    }
+
+    mdl = built_trainer.model_init()
+    assert mdl.heads[name].per_record
+    assert t.isfinite(getattr(mdl(**collated), f"{name}_loss"))
 
 
 def test_the_custom_loss_path_reaches_every_head(configured):
