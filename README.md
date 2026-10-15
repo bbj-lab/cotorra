@@ -39,17 +39,6 @@ pip install "cotorra" \
 This installs the `cotorra` command. To see it run end to end on public data,
 follow the
 [MIMIC-IV demo](https://github.com/bbj-lab/cotorra/blob/main/recipes/mimic-iv-demo.md).
-To work from source instead (e.g. to use generative scoring or for development):
-
-```sh
-git clone git@github.com:bbj-lab/cotorra.git
-cd cotorra
-python -m venv .venv
-. .venv/bin/activate
-pip install -e ".[gen]" \
-  --index-url https://download.pytorch.org/whl/cu128 \
-  --extra-index-url https://pypi.org/simple
-```
 
 ## Inputs
 
@@ -495,19 +484,18 @@ that specifies:
     model and carries none.
 
     `--token-nll` adds one more column, last: `token_nll_bits`, a float32 list
-    per row as long as its `input_ids` (the row's `tokens_past`). Entry i is
-    that token's negative log2-likelihood in bits given the tokens before it,
-    −log₂ p(tokenᵢ | token₀, …, tokenᵢ₋₁), from the model's own next-token
+    per row as long as its `input_ids` (the row's `tokens_past`). Entry i is that
+    token's negative log2-likelihood in bits given the tokens before it, −log₂
+    p(tokenᵢ | token₀, …, tokenᵢ₋₁), from the model's own next-token
     probabilities. Entry 0 is zero: the first token is always `BOS`, so it
     carries no information. Every entry past `extract.max_len` is NaN, since the
     model never sees those tokens. The column is the same with or without
     `--all-times`, and every model has it, stock HuggingFace models included.
     Skipping any NaNs (e.g. with `np.nansum`), a row's sum is the context's total
-    surprisal in bits, and the mean of its entries after the first is log₂ of
-    the model's perplexity on it. The probabilities are the
-    model's as trained: a model trained with the deprecated
-    `label_weighted_loss` overpredicts its tokens of interest, so it scores
-    them as less surprising than they are.
+    surprisal in bits, and the mean of its entries after the first is log₂ of the
+    model's perplexity on it. The probabilities are the model's as trained: a
+    model trained with the deprecated `label_weighted_loss` overpredicts its
+    tokens of interest, so it scores them as less surprising than they are.
 
 ## (3) Scoring
 
