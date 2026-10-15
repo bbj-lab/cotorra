@@ -75,5 +75,6 @@ nav:
       - Scoring: api/scoring.md
   - Recipes:
       - Overview: recipes/index.md
+      - MIMIC-IV Demo: recipes/mimic-iv-demo.md
       - Development Workflow: recipes/development-workflow.md
       - Transfer Learning: recipes/transfer-learning.md

@@ -3,7 +3,6 @@
         { name = "Michael C. Burkhart <burkh4rt@uchicago.edu>, Luke Solo <lsolo@uchicago.edu>, Inhyeok Lee <ihlee@uchicago.edu>, S'Khaja Charles <skhaja@uchicago.edu>, & Brett K. Beaulieu-Jones <beaulieujones@uchicago.edu>" },
     ]
     classifiers = [
-        "Development Status :: 2 - Pre-Alpha",
         "Intended Audience :: Science/Research",
         "Natural Language :: English",
         "Programming Language :: Python :: 3",
@@ -14,7 +13,7 @@
         "datasets>=4.4",
         "huggingface-hub>=1.5",
         "joblib>=1.5.2",
-        "lightgbm>=4.6",
+        "lightgbm>=4.7",
         "numpy>=2.0",
         "omegaconf>=2.2.1",
         "optuna>=3.1",
@@ -87,7 +86,7 @@
         select = [ "E", "F", "I" ]
 
         [tool.ruff.lint.isort]
-            known-first-party       = [ "cocoa", "cotorra", "coreopsis" ]
+            known-first-party       = [ "cocoa", "cotorra" ]
             split-on-trailing-comma = false
 
 [tool.setuptools]

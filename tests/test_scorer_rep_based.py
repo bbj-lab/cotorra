@@ -216,8 +216,10 @@ EXPECTED_ESTIMATOR = {
     "XGBoost": ["XGBClassifier"],
 }
 
-# only the two boosting estimators are handed a tuning-split `eval_set`
-EVAL_SET_ESTIMATORS = {"lightGBM", "XGBoost"}
+# only the two boosting estimators are handed the tuning split to evaluate on:
+# lightgbm 4.7 deprecates `eval_set` for `eval_X` and `eval_y`, which xgboost's
+# `fit` doesn't take
+EVAL_KWARGS = {"lightGBM": {"eval_X", "eval_y"}, "XGBoost": {"eval_set"}}
 
 
 @pytest.fixture
@@ -269,8 +271,8 @@ def test_each_estimator_value_selects_its_own_estimator(
     scorer.score_label(target_token=target_token)
 
     assert fit_spy["chosen"] == EXPECTED_ESTIMATOR[estimator_type]
-    assert ("eval_set" in fit_spy["fit_kwargs"]) == (
-        estimator_type in EVAL_SET_ESTIMATORS
+    assert set(fit_spy["fit_kwargs"]) & {"eval_set", "eval_X", "eval_y"} == (
+        EVAL_KWARGS.get(estimator_type, set())
     )
     # xgboost's `fit` no longer takes `eval_metric`; it raises a TypeError
     assert ("eval_metric" in fit_spy["fit_kwargs"]) == (estimator_type == "lightGBM")
@@ -284,7 +286,7 @@ def test_an_estimator_type_member_silently_falls_back_to_lightgbm(
     `(str, enum.Enum)` member that is `"estimatortype.logistic"`, not
     `"logistic"` -- so handing the constructor an `EstimatorType` rather than
     its `.value` lands in the catch-all and trains LightGBM instead, without
-    even the `eval_set` a real `--estimator lightGBM` run would get. `cli.py`
+    even the `eval_X`/`eval_y` a real `--estimator lightGBM` run would get. `cli.py`
     passes `.value` and is unaffected; pinned because the constructor's own
     type hint invites the enum.
     """
