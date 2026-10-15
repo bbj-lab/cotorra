@@ -3,7 +3,7 @@
 [cocoa's MIMIC-IV demo](https://github.com/bbj-lab/cocoa/blob/master/recipes/mimic-iv-demo.md)
 turns the
 [MIMIC-IV Clinical Database Demo](https://physionet.org/content/mimic-iv-demo/2.2/),
-which anyone can download, into tokenized timelines, one for each of its 275
+[^1] which anyone can download, into tokenized timelines, one for each of its 275
 hospitalizations. This recipe picks up where that one leaves off. We'll train a
 small model on the timelines and tune its hyperparameters, take from the model a
 representation of each hospitalization's first 24 hours, and fit classifiers that
@@ -14,17 +14,14 @@ laptop's GPU, 14 of them tuning.
 
 With 187 hospitalizations to learn from, a model can only learn so much, and with
 50 held out, among which most outcomes come a handful of times or not at all, its
-scores can only tell us so much. The point is to run each stage of cotorra on
-data that anyone can get, and to see what each one makes. The demo's license,
-which cocoa's recipe describes, covers what you make from it here too; if you
-publish anything made from it, cite it, along with MIMIC-IV and PhysioNet, as its
-page asks.[^1]
+scores can only tell us so much. This demo exists more to illustrate the process
+than to obtain a working model.
 
 You'll need the `mimic-iv-demo` working directory that cocoa's recipe leaves,
 with the timelines in `processed/demo`; every command below runs from there.
 You'll also need Python 3.11 or later, Apple silicon if you're on a Mac (PyTorch
-no longer builds for Intel Macs), and cotorra 26.10.1 or later. The numbers below
-come from cotorra 26.10.1 on an Apple M5 Pro. Yours will differ with your
+no longer builds for Intel Macs), and cotorra 26.10 or later. The numbers below
+come from cotorra 26.10.0 on an Apple M5 Pro. Yours will differ with your
 hardware, a little even from run to run on the same GPU, and from step 2 on with
 the hyperparameters that tuning happens to try. On a Mac, the environment takes
 about 1.6 GB of disk, and on Linux several times that, for PyTorch's CUDA
@@ -56,12 +53,7 @@ and else on the CPU, so on a machine with an NVIDIA GPU, check that
 `python -c 'import torch; print(torch.ones(1, device="cuda"))'` prints
 `tensor([1.], device='cuda:0')`. If it fails instead, install again, best in a
 new environment, since pip would leave behind the CUDA 13 libraries it installed
-first. On a GPU older than Turing (a V100, say), for which PyTorch warns that it
-`does not include kernels for this GPU`, make
-`https://download.pytorch.org/whl/cu126` the first index: PyTorch's builds for
-CUDA 12.6 are the only ones that still run on such a GPU. On a newer GPU with a
-driver older than the 580 series, add `'torch<2.12'` after `'cotorra>=26.10.0'`:
-pip then takes PyTorch 2.11's build for CUDA 12.8 from the first index.
+first.
 
 On a Mac, run one more command. cotorra imports LightGBM and XGBoost, whose
 builds for macOS look for Homebrew's OpenMP runtime (its `libomp` package), while
