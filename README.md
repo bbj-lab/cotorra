@@ -202,6 +202,15 @@ that specifies:
   `hours_to_end_time` column in `tokens_times.parquet`. See
   [Training secondary heads](#training-secondary-heads).
     - **weight**: Weight on the term (default: `1.0`).
+    - **per_record**: Weights each record alike, rather than each token (default:
+      `false`). Unweighted, every token's error counts the same, so a record
+      counts in proportion to its length. With `true`, each of a record's `n`
+      tokens is weighted by `mean / n`, where `mean` is the average `n` across
+      that split's records. Every record then counts the same however long it
+      runs, and the loss stays on its usual scale, since the weights average 1
+      over each split's tokens. A short record's tokens each weigh more. The
+      tuning split is weighted the same way, so in `eval_loss`, which
+      `cotorra tune` minimizes, the term averages over records as well.
 - **tnt_objective** _(optional)_: Trains a time-to-next-token (TNT) head that
   predicts, at each token, the log1p-hours until the next token, making the model
   a marked point process. Its target is derived from `times`, and a record's last
@@ -220,6 +229,12 @@ that specifies:
     - **classes**: The dispositions to predict among, as token labels or fnmatch
       patterns (default: `["DSCG//*"]`). A record whose disposition matches none
       of them isn't scored.
+    - **per_record**: Weights each record alike, rather than each token (default:
+      `false`), as for `tte_objective`. The head is scored on the tokens before a
+      record's disposition token, so unweighted, a record counts in proportion to
+      how many there are. With `true`, each of them is weighted by `mean / n`,
+      `n` counting them and `mean` averaging `n` across that split's scored
+      records.
 - **time_based_rope** _(optional)_: Enables time-aware rotary position
   embeddings.
     - **sec_per_pos_id**: Number of seconds represented by one position id
@@ -307,12 +322,14 @@ To train one or more:
     ```yaml
     tte_objective:
         weight: !!float 1.0
+        per_record: !!bool false # optional: true weights each record alike
     tnt_objective:
         weight: !!float 1.0
         mixture_components: !!int 8 # optional: a distribution over the gap
     disposition_objective:
         weight: !!float 1.0
         classes: ["DSCG//*"] # optional: fnmatch patterns
+        per_record: !!bool false # optional: true weights each record alike
     ```
 
     Each weight defaults to `1.0`, so empty blocks work too. With
@@ -828,6 +845,13 @@ A few things to know:
 - Quote anything containing `$`, which the shell would otherwise expand, and, in
   zsh, anything starting with `~`, which zsh reads as a directory name and fails
   on.
+
+## Contributing
+
+Bug reports, fixes, recipes, and new features are all welcome. The
+[contributing guide](https://github.com/bbj-lab/cotorra/blob/main/CONTRIBUTING.md)
+explains how to report an issue, set up a development install, and open a pull
+request.
 
 [^1]:
     L. Gersony, "The Quiet Victory of Chicago’s Monk Parakeets," _The Chicago

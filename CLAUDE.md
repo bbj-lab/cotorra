@@ -41,9 +41,9 @@ train / tune   →  extract  →  rep-based-score
   `<class>_prob` per disposition class; `HEAD_COLUMNS` in
   [extractor.py](src/cotorra/extractor.py) maps each head name to its columns.
   `-l` (`--token-nll`) adds `token_nll_bits` last, from the LM's logits rather
-  than a head, so any model has it: each token's −log₂ p given those before it,
-  a float32 list as long as the row's `input_ids` whatever `--all-times` (0 at
-  the first token, a `BOS` carrying no information; NaN past `extract.max_len`).
+  than a head, so any model has it: each token's −log₂ p given those before it, a
+  float32 list as long as the row's `input_ids` whatever `--all-times` (0 at the
+  first token, a `BOS` carrying no information; NaN past `extract.max_len`).
 - **rep-based-score** — fit a lightweight sklearn/boosting estimator on extracted
   features (requires `extract` first). It globs `features-<split>*-…` from
   `--processed-data-home`, so features extracted to another `--output-home`
@@ -82,19 +82,26 @@ of secondary heads, each a `Head` subclass registered in `HEADS` by its `name`
 (`tte`, `tnt`, `disposition`). That name keys the head's `<name>_objective`
 training block, its entry in `CotorraConfig.heads`, its `<name>_pred` /
 `<name>_loss` output fields, and its `extract` columns in `HEAD_COLUMNS`; its
-`target` names the batch column it's scored against. Inheritance is for what
-heads share: `TteHead` and `TntPointHead` are `Log1pHoursHead`s, and
-`TntPointHead` and `TntMixtureHead` are `TntHead`s, the interface sampling and
-extraction use. The combinations live in one class, `CotorraForCausalLM`, which
-builds a `ModuleDict` of the heads its config lists, so adding an objective takes
-a `Head` subclass in `HEADS` plus its two output fields, a `HEAD_COLUMNS` entry
-and an `extract` flag (tests hold both to `HEADS`'s keys), not a new model class.
-`head_options` turns the training config's blocks into the heads' options
-(resolving the disposition `classes` patterns against the vocab) and is the one
-place `Trainer`, `Loader` and `Loss` read them from. `Trainer.model_init` builds
-a stock HF model when no objective is set. Importing `cotorra.model` registers
-`cotorra` with the HF auto classes, so anything that loads a saved
-`mdl-<run_name>/` (as `Extractor` does) has to import it first.
+`target` names the batch column it's scored against, and its `target_weight`
+(`hours_to_end_time_weight`, `disposition_weight`; the TNT heads have none) the
+per-position weights it's scored with under `per_record`, which `forward` pops
+alongside the targets and `Head.forward` refuses to go without, or to take
+unasked. Inheritance is for what heads share: `TteHead` and `TntPointHead` are
+`Log1pHoursHead`s, and `TntPointHead` and `TntMixtureHead` are `TntHead`s, the
+interface sampling and extraction use. The combinations live in one class,
+`CotorraForCausalLM`, which builds a `ModuleDict` of the heads its config lists,
+so adding an objective takes a `Head` subclass in `HEADS` plus its two output
+fields, a `HEAD_COLUMNS` entry and an `extract` flag (tests hold both to
+`HEADS`'s keys), not a new model class; weighting one per record takes a
+`target_weight`, a `per_record` option, and a `SCORED` entry in
+[loader.py](src/cotorra/loader.py) (which positions its loss scores), which tests
+hold to the heads with a `target_weight`. `head_options` turns the training
+config's blocks into the heads' options (resolving the disposition `classes`
+patterns against the vocab) and is the one place `Trainer`, `Loader` and `Loss`
+read them from. `Trainer.model_init` builds a stock HF model when no objective is
+set. Importing `cotorra.model` registers `cotorra` with the HF auto classes, so
+anything that loads a saved `mdl-<run_name>/` (as `Extractor` does) has to import
+it first.
 
 Point heads (`Log1pHoursHead`: `TteHead`, and the default TNT head) are an
 `nn.Linear` read through a softplus, so their log1p-hours, and the hours `expm1`
@@ -215,14 +222,31 @@ reusable `model_presets` (YAML anchors) and selects one via the `model:` key.
   [recipes/mimic-iv-demo.md](recipes/mimic-iv-demo.md) trains on) and a trailing
   `# breakpoint()`. Leave them; they're for interactive debugging.
 - **Tests: `pytest`** (config in [pyproject.toml](pyproject.toml); install with
-  `pip install -e ".[test]"`). No CI, so run it locally before committing;
-  `-m "not slow"` drops the handful of real (tiny) training loops. `pythonpath`
-  puts `src` ahead of site-packages so a run always exercises the working tree
-  even when a non-editable `cotorra` sits in the venv — don't drop it. The suite
-  needs neither network nor real data: [tests/synth.py](tests/synth.py) writes
-  CLIF-like raw tables the fixtures push through the real cocoa collate →
-  tokenize → winnow pipeline, and the model under test is a tiny
-  randomly-initialized `LlamaForCausalLM`.
+  `pip install -e ".[test]"`). CI
+  ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs it on every
+  push and pull request, and weekly, on Python 3.11 through 3.14, and once more
+  on 3.11 with each dependency at the lowest version
+  [pyproject.toml](pyproject.toml) allows; it also lints with `ruff check`, but
+  doesn't check formatting. It installs torch's CPU wheels from PyTorch's own
+  index, so it never runs CUDA or MPS code, nor the `[gen]` tests (hence
+  `scorer_generative.py`'s 0%). The 3.11–3.14 jobs also install `pytest-cov`
+  (CI-only, not in the `test` extra) and upload coverage to Codecov, strictly
+  informatively: [codecov.yml](codecov.yml) makes its checks `informational`, and
+  the upload step can't fail the job. Don't add a coverage threshold
+  (`--cov-fail-under`, a status `target`) or make the upload required. Keep the
+  matrix in step with `requires-python`, and raise a floor in `pyproject.toml`
+  when code starts needing a newer dependency, or the lowest job fails. On Linux
+  that job gets torch 2.6; the darwin-only 2.8 floor is for MPS, where 12
+  extraction and sampling tests fail under 2.6. `requires-python` stops short of
+  3.15 because PyPI and the CUDA index have no torch wheels for it, and the CPU
+  index's segfault loading a saved model (seen on macOS with 3.15.0rc2). Still
+  run the suite locally before committing; `-m "not slow"` drops the handful of
+  real (tiny) training loops. `pythonpath` puts `src` ahead of site-packages so a
+  run always exercises the working tree even when a non-editable `cotorra` sits
+  in the venv — don't drop it. The suite needs neither network nor real data:
+  [tests/synth.py](tests/synth.py) writes CLIF-like raw tables the fixtures push
+  through the real cocoa collate → tokenize → winnow pipeline, and the model
+  under test is a tiny randomly-initialized `LlamaForCausalLM`.
   [tests/test_scorer_generative.py](tests/test_scorer_generative.py) skips
   without the `[gen]` extra.
 - **Logging** goes through `self.logger` (the parrot-emoji `Logger`), not
@@ -258,7 +282,14 @@ token), and regenerates them when `tokens_times.parquet` is newer or a cache
 predates a derived column. The disposition target depends on the config's
 `classes`, so it isn't cached: `Loader` labels each record (its last matching
 `DSCG//*` token's class before that token, -100 from it on) with `datasets.map`
-before packing splits records across chunks. Token-set selectors
+before packing splits records across chunks. Under an objective's `per_record`
+(the TTE's or the disposition's) it weights each record the same way: `mean / n`
+on each of its tokens, `n` counting those its head scores (a finite
+`hours_to_end_time`; a disposition other than -100) and `mean` being `n`'s
+average over the split's records with any, so that a fragment keeps its whole
+record's weight, and the weights average 1 over each split's scored tokens,
+keeping the loss on its unweighted scale. It counts them off the dataset itself,
+the split caches lacking the disposition target. Token-set selectors
 (`tokens_of_interest`, `target_tokens`) support **fnmatch patterns** (e.g.
 `LABEL//*`), resolved against the tokenizer vocab.
 

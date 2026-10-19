@@ -233,9 +233,12 @@ class Trainer(Configurable):
             )
             p_ids += t.arange(p_ids.shape[-1], device=p_ids.device, dtype=p_ids.dtype)
             f_set["position_ids"] = p_ids
-        for name in self.head_options:
-            target = HEADS[name].target
+        for name, options in self.head_options.items():
+            target, weights = HEADS[name].target, HEADS[name].target_weight
             f_set[target] = t.stack([x[target] for x in batch])
+            if weights is not None and options.get("per_record", False):
+                # the weights the loader gives each record, beside its target
+                f_set[weights] = t.stack([x[weights] for x in batch])
         return f_set
 
     def train(

@@ -2,6 +2,7 @@
 
 """tests for cotorra.trainer.Trainer"""
 
+import math
 import os
 
 import pytest
@@ -10,6 +11,7 @@ from helpers import base_training_cfg, default_cfg, write_cfg
 from omegaconf import OmegaConf
 from transformers import AutoModelForCausalLM
 
+from cotorra.model import HEADS
 from cotorra.trainer import Trainer
 from cotorra.tuner import Tuner
 
@@ -319,6 +321,40 @@ def test_every_objective_trains_on_what_cocoa_and_the_loader_produce(
     assert all(p.grad is not None for p in mdl.parameters() if p.requires_grad)
     for head in mdl.heads.values():
         assert max(p.grad.abs().max().item() for p in head.parameters()) > 0
+
+
+@pytest.mark.parametrize(
+    "name", [name for name, head in HEADS.items() if head.target_weight]
+)
+def test_a_per_record_objective_trains_and_evaluates_on_what_cocoa_produces(
+    name, processed_with_end_times, tmp_path
+):
+    """
+    `per_record` set by an override, as the cli passes one: the loader weights
+    each record, the collator batches the weights beside the target, and both
+    training's loss and evaluation's reach the head
+    """
+    trainer = Trainer(
+        training_cfg=write_cfg(
+            tmp_path / "training.yaml", base_training_cfg(**{f"{name}_objective": {}})
+        ),
+        processed_data_home=processed_with_end_times,
+        output_home=tmp_path / "out",
+        overrides=[f"{name}_objective.per_record=true"],
+    )
+    assert trainer.head_options[name]["per_record"] is True
+    assert trainer.loader.dataset["train"].column_names[-1] == (
+        HEADS[name].target_weight
+    )
+
+    mdl = trainer.model_init()
+    assert mdl.heads[name].per_record
+    batch = trainer.collate_fn([trainer.trainer.train_dataset[i] for i in range(8)])
+    loss = trainer.trainer.compute_loss(mdl, batch)
+    loss.backward()
+    assert t.isfinite(loss)
+    assert max(p.grad.abs().max().item() for p in mdl.heads[name].parameters()) > 0
+    assert math.isfinite(trainer.trainer.evaluate()[f"eval_{name}_loss"])
 
 
 def test_the_custom_loss_is_averaged_over_gradient_accumulation(
