@@ -123,7 +123,8 @@ pull request against `main` on
 - CI runs `pytest` on Python 3.11 through 3.14 and again with each dependency at
   the oldest version [pyproject.toml](pyproject.toml) allows, plus `ruff check`.
   It runs on CPUs only, so if your change touches GPU code, say how you tested it
-  there.
+  there. Codecov then reports the change in coverage, but only for information:
+  its checks always pass.
 - A maintainer will review it and may suggest changes or leave comments. Mark
   each conversation as resolved once you've addressed it.
 

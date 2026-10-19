@@ -41,9 +41,9 @@ train / tune   →  extract  →  rep-based-score
   `<class>_prob` per disposition class; `HEAD_COLUMNS` in
   [extractor.py](src/cotorra/extractor.py) maps each head name to its columns.
   `-l` (`--token-nll`) adds `token_nll_bits` last, from the LM's logits rather
-  than a head, so any model has it: each token's −log₂ p given those before it,
-  a float32 list as long as the row's `input_ids` whatever `--all-times` (0 at
-  the first token, a `BOS` carrying no information; NaN past `extract.max_len`).
+  than a head, so any model has it: each token's −log₂ p given those before it, a
+  float32 list as long as the row's `input_ids` whatever `--all-times` (0 at the
+  first token, a `BOS` carrying no information; NaN past `extract.max_len`).
 - **rep-based-score** — fit a lightweight sklearn/boosting estimator on extracted
   features (requires `extract` first). It globs `features-<split>*-…` from
   `--processed-data-home`, so features extracted to another `--output-home`
@@ -228,7 +228,12 @@ reusable `model_presets` (YAML anchors) and selects one via the `model:` key.
   on 3.11 with each dependency at the lowest version
   [pyproject.toml](pyproject.toml) allows; it also lints with `ruff check`, but
   doesn't check formatting. It installs torch's CPU wheels from PyTorch's own
-  index, so it never runs CUDA or MPS code, nor the `[gen]` tests. Keep the
+  index, so it never runs CUDA or MPS code, nor the `[gen]` tests (hence
+  `scorer_generative.py`'s 0%). The 3.11–3.14 jobs also install `pytest-cov`
+  (CI-only, not in the `test` extra) and upload coverage to Codecov, strictly
+  informatively: [codecov.yml](codecov.yml) makes its checks `informational`, and
+  the upload step can't fail the job. Don't add a coverage threshold
+  (`--cov-fail-under`, a status `target`) or make the upload required. Keep the
   matrix in step with `requires-python`, and raise a floor in `pyproject.toml`
   when code starts needing a newer dependency, or the lowest job fails. On Linux
   that job gets torch 2.6; the darwin-only 2.8 floor is for MPS, where 12

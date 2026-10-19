@@ -35,10 +35,20 @@ jobs:
       # the readme's install, with torch's cpu wheels for its cuda ones, which are
       # gigabytes and of no use on a runner without a gpu
       - run: >-
-          pip install '.[test]'
+          pip install '.[test]' pytest-cov
           --index-url https://download.pytorch.org/whl/cpu
           --extra-index-url https://pypi.org/simple
-      - run: pytest
+      - run: pytest --cov --cov-report=xml
+      # coverage is informative only: codecov.yml keeps its checks from failing, and
+      # neither a failed upload nor codecov being down fails the job
+      - uses: codecov/codecov-action@v7
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          disable_search: true
+          name: python-${{ matrix.python-version }}
+          fail_ci_if_error: false
 
   pytest-lowest:
     # each dependency at the oldest version pyproject.toml allows

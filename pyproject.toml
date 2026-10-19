@@ -110,3 +110,12 @@
     ]
     pythonpath = [ "src", "tests" ]
     testpaths = [ "tests" ]
+
+# read by pytest-cov, which ci installs on its own to report coverage to codecov
+[tool.coverage.run]
+    branch = true
+    source = [ "cotorra" ]
+
+[tool.coverage.report]
+    # dev scratch harnesses, not code under test
+    exclude_also = [ 'if __name__ == "__main__":' ]
