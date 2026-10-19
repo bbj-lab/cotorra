@@ -222,14 +222,26 @@ reusable `model_presets` (YAML anchors) and selects one via the `model:` key.
   [recipes/mimic-iv-demo.md](recipes/mimic-iv-demo.md) trains on) and a trailing
   `# breakpoint()`. Leave them; they're for interactive debugging.
 - **Tests: `pytest`** (config in [pyproject.toml](pyproject.toml); install with
-  `pip install -e ".[test]"`). No CI, so run it locally before committing;
-  `-m "not slow"` drops the handful of real (tiny) training loops. `pythonpath`
-  puts `src` ahead of site-packages so a run always exercises the working tree
-  even when a non-editable `cotorra` sits in the venv — don't drop it. The suite
-  needs neither network nor real data: [tests/synth.py](tests/synth.py) writes
-  CLIF-like raw tables the fixtures push through the real cocoa collate →
-  tokenize → winnow pipeline, and the model under test is a tiny
-  randomly-initialized `LlamaForCausalLM`.
+  `pip install -e ".[test]"`). CI
+  ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs it on every
+  push and pull request, and weekly, on Python 3.11 through 3.14, and once more
+  on 3.11 with each dependency at the lowest version
+  [pyproject.toml](pyproject.toml) allows; it also lints with `ruff check`, but
+  doesn't check formatting. It installs torch's CPU wheels from PyTorch's own
+  index, so it never runs CUDA or MPS code, nor the `[gen]` tests. Keep the
+  matrix in step with `requires-python`, and raise a floor in `pyproject.toml`
+  when code starts needing a newer dependency, or the lowest job fails. On Linux
+  that job gets torch 2.6; the darwin-only 2.8 floor is for MPS, where 12
+  extraction and sampling tests fail under 2.6. `requires-python` stops short of
+  3.15 because PyPI and the CUDA index have no torch wheels for it, and the CPU
+  index's segfault loading a saved model (seen on macOS with 3.15.0rc2). Still
+  run the suite locally before committing; `-m "not slow"` drops the handful of
+  real (tiny) training loops. `pythonpath` puts `src` ahead of site-packages so a
+  run always exercises the working tree even when a non-editable `cotorra` sits
+  in the venv — don't drop it. The suite needs neither network nor real data:
+  [tests/synth.py](tests/synth.py) writes CLIF-like raw tables the fixtures push
+  through the real cocoa collate → tokenize → winnow pipeline, and the model
+  under test is a tiny randomly-initialized `LlamaForCausalLM`.
   [tests/test_scorer_generative.py](tests/test_scorer_generative.py) skips
   without the `[gen]` extra.
 - **Logging** goes through `self.logger` (the parrot-emoji `Logger`), not

@@ -846,6 +846,13 @@ A few things to know:
   zsh, anything starting with `~`, which zsh reads as a directory name and fails
   on.
 
+## Contributing
+
+Bug reports, fixes, recipes, and new features are all welcome. The
+[contributing guide](https://github.com/bbj-lab/cotorra/blob/main/CONTRIBUTING.md)
+explains how to report an issue, set up a development install, and open a pull
+request.
+
 [^1]:
     L. Gersony, "The Quiet Victory of Chicago’s Monk Parakeets," _The Chicago
     Maroon_, 23 January 2022,

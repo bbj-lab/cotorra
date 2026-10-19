@@ -19,7 +19,7 @@ than to obtain a working model.
 
 You'll need the `mimic-iv-demo` working directory that cocoa's recipe leaves,
 with the timelines in `processed/demo`; every command below runs from there.
-You'll also need Python 3.11 or later, Apple silicon if you're on a Mac (PyTorch
+You'll also need Python 3.11 to 3.14, Apple silicon if you're on a Mac (PyTorch
 no longer builds for Intel Macs), and cotorra 26.10 or later. The numbers below
 come from cotorra 26.10.0 on an Apple M5 Pro. Yours will differ with your
 hardware, a little even from run to run on the same GPU, and from step 2 on with
