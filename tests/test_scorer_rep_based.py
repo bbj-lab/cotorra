@@ -307,3 +307,142 @@ def test_a_scorer_without_its_directories_is_refused_by_name(tmp_path):
         match=r"^RepBasedScorer needs `processed_data_home` and `model_home`$",
     ):
         RepBasedScorer()
+
+
+# ------------------------------------------- transfer, outputs, and outcomes
+
+
+def write_features(home, model_home, split: str, features: np.ndarray) -> None:
+    pl.DataFrame({"features": features.tolist()}).write_parquet(
+        home / f"features-{split}-{model_home.name}.parquet"
+    )
+
+
+def keyed(labels: np.ndarray, sign: float, seed: int) -> np.ndarray:
+    """features that tell `labels` apart, or with a negative sign do the reverse"""
+    noise = np.random.default_rng(seed).normal(0, 0.5, size=(len(labels), N_FEATURES))
+    return sign * 5.0 * labels[:, None] + noise
+
+
+@pytest.fixture
+def transfer_homes(processed, fake_model_home, target_token, tmp_path):
+    """
+    two copies of `processed` for the two kinds of transfer to tell apart:
+    `here`, scored, whose held-out features predict the target and whose train
+    and tuning features predict the reverse; and `there`, trained on, whose
+    train labels are flipped, and whose train and tuning features predict
+    those flipped labels. Fit on `there` alone -- its features with its own
+    labels -- an estimator scores `here`'s held-out split well; fit on `here`'s
+    features or labels, or on a mix, it scores it backwards
+    """
+    homes = {name: tmp_path / name for name in ("here", "there")}
+    for home in homes.values():
+        shutil.copytree(processed, home)
+    there_train = homes["there"] / "train_for_inference.parquet"
+    flipped = pl.read_parquet(there_train).with_columns(
+        ~pl.col(f"{target_token}_future")
+    )
+    flipped.write_parquet(there_train)
+    for split in ("train", "tuning", "held_out"):
+        labels = {
+            name: pl.read_parquet(home / f"{split}_for_inference.parquet")[
+                f"{target_token}_future"
+            ]
+            .to_numpy()
+            .astype(float)
+            for name, home in homes.items()
+        }
+        write_features(
+            homes["here"],
+            fake_model_home,
+            split,
+            keyed(labels["here"], 1.0 if split == "held_out" else -1.0, seed=0),
+        )
+        write_features(
+            homes["there"], fake_model_home, split, keyed(labels["there"], 1.0, seed=1)
+        )
+    return homes
+
+
+def held_out_auc(scorer, home, target_token) -> float:
+    held_out = pl.read_parquet(home / "held_out_for_inference.parquet")
+    valid = ~held_out[f"{target_token}_past"].to_numpy().astype(bool)
+    y_true = held_out[f"{target_token}_future"].to_numpy().astype(int)
+    scores = scorer.score_label(target_token=target_token)
+    return roc_auc_score(y_true[valid], scores[valid])
+
+
+def test_a_training_home_lends_the_estimator_its_features_and_labels(
+    transfer_homes, fake_model_home, target_token, single_token_cfg_path
+):
+    """
+    `--training-home`, the second kind of transfer: the train and tuning
+    features and labels come from it, the held-out ones from
+    `processed_data_home`, where the scores are written too
+    """
+    here, there = transfer_homes["here"], transfer_homes["there"]
+    transferred = RepBasedScorer(
+        scoring_cfg=single_token_cfg_path,
+        processed_data_home=here,
+        model_home=fake_model_home,
+        training_home=there,
+        estimator_type="logistic",
+    )
+    for split in ("train", "tuning", "held_out"):
+        home = here if split == "held_out" else there
+        written = pl.read_parquet(
+            home / f"features-{split}-{fake_model_home.name}.parquet"
+        )
+        np.testing.assert_array_equal(
+            transferred.features[split], np.vstack(written["features"].to_list())
+        )
+        assert (
+            transferred.labels[split]
+            .collect()
+            .equals(pl.read_parquet(home / f"{split}_for_inference.parquet"))
+        )
+    assert held_out_auc(transferred, here, target_token) > 0.9
+    assert transferred.output_home.parent == here.resolve()
+    at_home = make_scorer(here, fake_model_home, cfg=single_token_cfg_path)
+    assert held_out_auc(at_home, here, target_token) < 0.1
+
+
+def test_scores_go_to_the_output_home_when_one_is_given(
+    scorer_data, fake_model_home, single_token_cfg_path, target_token, tmp_path
+):
+    out = tmp_path / "scores"
+    out.mkdir()
+    scorer = RepBasedScorer(
+        scoring_cfg=single_token_cfg_path,
+        processed_data_home=scorer_data,
+        model_home=fake_model_home,
+        output_home=out,
+        estimator_type="logistic",
+    )
+    assert scorer.output_home == (
+        out.resolve() / f"scores-rep-based-{fake_model_home.name}.parquet"
+    )
+    beside = {p: p.stat().st_mtime_ns for p in scorer_data.glob("scores-*")}
+    scorer.save_all()
+    held_out = pl.read_parquet(scorer_data / "held_out_for_inference.parquet")
+    scores = pl.read_parquet(scorer.output_home)
+    assert scores.columns == held_out.columns + [f"{target_token}_rep_score"]
+    # nothing written beside the inference tables, where the scores go by default
+    assert {p: p.stat().st_mtime_ns for p in scorer_data.glob("scores-*")} == beside
+
+
+def test_target_tokens_give_a_score_column_per_matching_token_in_vocab_order(
+    scorer_data, fake_model_home, tokenizer_cfg, tmp_path, fit_spy
+):
+    """fnmatch patterns and plain names alike, resolved against the vocabulary
+    in its order, whatever order they came in"""
+    patterns = ["XFR-IN//icu", "DSCG//exp*", "RESP//imv"]
+    cfg = base_scoring_cfg(score={"target_tokens": patterns})
+    scorer = make_scorer(
+        scorer_data, fake_model_home, cfg=write_cfg(tmp_path / "scoring.yaml", cfg)
+    )
+    names = sorted(
+        ["DSCG//expired", "RESP//imv", "XFR-IN//icu"], key=tokenizer_cfg.lookup.get
+    )
+    assert scorer.grokked_outcome_tokens == names
+    assert list(scorer.score()) == [f"{name}_rep_score" for name in names]

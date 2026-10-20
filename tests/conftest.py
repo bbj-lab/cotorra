@@ -10,10 +10,12 @@ running full-size training
 
 import collections.abc
 import fnmatch
+import importlib
 import logging
 import pathlib
 import subprocess
 import sys
+import types
 import typing
 
 import joblib as jl
@@ -293,6 +295,43 @@ def model_with_heads(
         return built[key]
 
     return make
+
+
+@pytest.fixture
+def scorer_generative() -> collections.abc.Iterator[types.ModuleType]:
+    """
+    `cotorra.scorer_generative`, which imports `quick_sco_re` at load: imported
+    against the real package where the `[gen]` extra is installed, and otherwise
+    against `fake_quick_sco_re`, so that its tests run without it -- as in CI,
+    which can't install it. A test swaps the engine and the generation for fakes
+    on the module this gives (with `monkeypatch`); the fake, and the module
+    imported against it, are taken back out of `sys.modules` afterwards, so that
+    nothing else in the session sees either, and an import of the scorer there
+    fails without the extra as it would anywhere
+    """
+    try:
+        importlib.import_module("quick_sco_re")
+    except ImportError:
+        pass
+    else:
+        yield importlib.import_module("cotorra.scorer_generative")
+        return
+    names = ("quick_sco_re", "cotorra.scorer_generative")
+    saved = {name: sys.modules.pop(name) for name in names if name in sys.modules}
+    package = importlib.import_module("cotorra")
+    sys.modules["quick_sco_re"] = importlib.import_module("fake_quick_sco_re")
+    try:
+        yield importlib.import_module("cotorra.scorer_generative")
+    finally:
+        for name in names:
+            sys.modules.pop(name, None)
+        sys.modules.update(saved)
+        # importing a submodule also sets it on its package, which a later
+        # `from cotorra import scorer_generative` would find there
+        if "cotorra.scorer_generative" in saved:
+            package.scorer_generative = saved["cotorra.scorer_generative"]
+        elif hasattr(package, "scorer_generative"):
+            del package.scorer_generative
 
 
 @pytest.fixture

@@ -2,12 +2,16 @@
 
 """tests for cotorra.cli, the package's only public entry point"""
 
+import importlib.metadata
 import json
+import pathlib
 import re
 import shutil
+import sys
 import types
 
 import click
+import numpy as np
 import polars as pl
 import pytest
 from helpers import base_scoring_cfg, base_training_cfg, write_cfg
@@ -17,6 +21,7 @@ from typer.testing import CliRunner
 import cotorra.cli
 from cotorra.cli import app
 from cotorra.model import HEADS
+from cotorra.scorer_rep_based import EstimatorType
 
 runner = CliRunner()
 
@@ -54,10 +59,10 @@ def test_each_command_takes_config_overrides(command):
 
 
 @pytest.mark.parametrize("command", COMMANDS)
-def test_each_command_hands_its_overrides_to_its_config(command, tmp_path):
+def test_each_command_hands_its_overrides_to_its_config(command, tmp_path, request):
     """an unreadable override fails as the config loads, before any data is read"""
-    if command == "generative-score":
-        pytest.importorskip("quick_sco_re", reason="requires the [gen] extra")
+    if command == "generative-score":  # importable without the [gen] extra
+        request.getfixturevalue("scorer_generative")
     second = "-o" if command in ("train", "tune") else "-m"
     result = runner.invoke(
         app,
@@ -472,3 +477,287 @@ def test_the_model_is_reported_under_the_name_it_was_saved_by(
     assert result.exit_code == 0, result.output
     report = _report(result.output, "completed in")
     assert "".join(str(tmp_path / "mdl-from-wandb").split()) in report
+
+
+# ------------------------------------------- every option reaches its stage
+
+
+class Recording:
+    """
+    a stand-in for a stage a command builds -- `Trainer`, `Tuner`, either
+    scorer -- that records what it was built with and what it was then asked to
+    do, so what each flag hands on can be checked without a model or any data
+    """
+
+    built: list["Recording"] = []
+
+    def __init__(self, **kwargs):
+        self.built_with, self.asked = kwargs, []
+        self.run_name = "recorded"
+        self.output_home = pathlib.Path(kwargs.get("output_home") or "default-home")
+        self.built.append(self)
+
+    def train(self, **kwargs):
+        self.asked.append(("train", kwargs))
+
+    def save_all(self, **kwargs):
+        self.asked.append(("save_all", kwargs))
+
+
+@pytest.fixture
+def recorded(monkeypatch, request) -> list[Recording]:
+    """every stage a command builds swapped for a `Recording`, the generative
+    scorer's on the module `scorer_generative` gives, from which the command
+    imports it once it runs"""
+    built = []
+    monkeypatch.setattr(Recording, "built", built)
+    for stage in ("Trainer", "Tuner", "RepBasedScorer"):
+        monkeypatch.setattr(cotorra.cli, stage, Recording)
+    scorer_generative = request.getfixturevalue("scorer_generative")
+    monkeypatch.setattr(scorer_generative, "GenerativeScorer", Recording)
+    return built
+
+
+TRAINING_FLAGS = {
+    "short": {"config": "-t", "resume": "-r", "verbose": "-v"},
+    "long": {
+        "config": "--training-config",
+        "resume": "--resume-from-checkpoint",
+        "verbose": "--verbose",
+    },
+}
+
+
+@pytest.mark.parametrize("spelled", list(TRAINING_FLAGS))
+@pytest.mark.parametrize("command", ["train", "tune"])
+def test_every_training_option_reaches_its_stage(command, spelled, recorded, tmp_path):
+    """the config as a path, both directories, the overrides, and `--verbose`
+    -- and for `train`, `--resume-from-checkpoint` -- in short or long form"""
+    flags, cfg = TRAINING_FLAGS[spelled], tmp_path / "training.yaml"
+    args = [command, flags["config"], str(cfg), "-p", "data", "-o", "out"]
+    args += [flags["verbose"], "n_epochs=2", "~wandb"]
+    args += [flags["resume"]] if command == "train" else []
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    [stage] = recorded
+    assert stage.built_with == {
+        "training_cfg": cfg,
+        "processed_data_home": "data",
+        "output_home": "out",
+        "overrides": ["n_epochs=2", "~wandb"],
+    }
+    assert isinstance(stage.built_with["training_cfg"], pathlib.Path)
+    trained = {"verbose": True} | (
+        {"resume_from_checkpoint": True} if command == "train" else {}
+    )
+    assert stage.asked == [("train", trained)]
+    report = _report(result.output, "completed in")
+    assert "".join(str(pathlib.Path("out") / "mdl-recorded").split()) in report
+
+
+@pytest.mark.parametrize("command", ["train", "tune"])
+def test_a_training_option_left_out_takes_its_default(command, recorded):
+    """the packaged config, a fresh start rather than a resumed one, and quiet"""
+    result = runner.invoke(app, [command, "-p", "data", "-o", "out"])
+    assert result.exit_code == 0, result.output
+    [stage] = recorded
+    assert stage.built_with["training_cfg"] is None
+    assert not stage.built_with["overrides"]
+    trained = {"verbose": False} | (
+        {"resume_from_checkpoint": False} if command == "train" else {}
+    )
+    assert stage.asked == [("train", trained)]
+
+
+@pytest.mark.parametrize("command", ["generative-score", "rep-based-score"])
+def test_every_scoring_option_reaches_its_scorer(command, recorded, tmp_path):
+    """the config as a path, the three directories -- and for `rep-based-score`
+    the one to train on, and the estimator -- the overrides, and `--verbose`"""
+    cfg = tmp_path / "scoring.yaml"
+    args = [command, "-s", str(cfg), "-p", "data", "-m", "mdl", "-o", "out", "-v"]
+    extra = (
+        ["-t", "elsewhere", "-e", "logistic-z"] if command == "rep-based-score" else []
+    )
+    result = runner.invoke(app, args + extra + ["score.max_len=8"])
+    assert result.exit_code == 0, result.output
+    [scorer] = recorded
+    expected = {
+        "scoring_cfg": cfg,
+        "processed_data_home": "data",
+        "model_home": "mdl",
+        "output_home": "out",
+        "overrides": ["score.max_len=8"],
+    }
+    if command == "rep-based-score":
+        expected |= {"training_home": "elsewhere", "estimator_type": "logistic-z"}
+    assert scorer.built_with == expected
+    assert isinstance(scorer.built_with["scoring_cfg"], pathlib.Path)
+    assert scorer.asked == [("save_all", {"verbose": True})]
+    report = _report(result.output, "scoring completed in")
+    assert "".join(str(pathlib.Path("out")).split()) in report
+
+
+@pytest.mark.parametrize("command", ["generative-score", "rep-based-score"])
+def test_a_scoring_option_left_out_takes_its_default(command, recorded):
+    """the packaged config, scores beside the inference tables (the scorer's
+    own default, which None leaves it to), trained on the same directory, by
+    lightGBM, and quiet"""
+    result = runner.invoke(app, [command, "-p", "data", "-m", "mdl"])
+    assert result.exit_code == 0, result.output
+    [scorer] = recorded
+    assert scorer.built_with["scoring_cfg"] is None
+    assert scorer.built_with["output_home"] is None
+    assert not scorer.built_with["overrides"]
+    if command == "rep-based-score":
+        assert scorer.built_with["training_home"] is None
+        assert scorer.built_with["estimator_type"] == "lightGBM"
+    assert scorer.asked == [("save_all", {"verbose": False})]
+
+
+@pytest.mark.parametrize("estimator", list(EstimatorType), ids=lambda e: e.value)
+def test_each_estimator_reaches_the_scorer_as_its_value(estimator, recorded):
+    """a plain string: `score_label` dispatches on `str(estimator_type).lower()`,
+    and an `EstimatorType` member would fall through to lightGBM there"""
+    result = runner.invoke(
+        app, ["rep-based-score", "-p", "data", "-m", "mdl", "-e", estimator.value]
+    )
+    assert result.exit_code == 0, result.output
+    [scorer] = recorded
+    assert type(scorer.built_with["estimator_type"]) is str
+    assert scorer.built_with["estimator_type"] == estimator.value
+
+
+def test_extract_takes_its_config_and_directories_in_long_form(extractions, tmp_path):
+    """the config as a path, and `--output-home` None when left out, so that the
+    extractor writes beside the inference tables"""
+    cfg = tmp_path / "extraction.yaml"
+    result = runner.invoke(
+        app,
+        # fmt: off
+        [
+            "extract",
+            "--extraction-config",
+            str(cfg),
+            "--processed-data-home",
+            "data",
+            "--model-home",
+            "mdl",
+        ],
+        # fmt: on
+    )
+    assert result.exit_code == 0, result.output
+    [call] = extractions
+    assert call["built_with"] == {
+        "extraction_cfg": cfg,
+        "processed_data_home": "data",
+        "model_home": "mdl",
+        "output_home": None,
+        "overrides": call["built_with"]["overrides"],
+    }
+    assert isinstance(call["built_with"]["extraction_cfg"], pathlib.Path)
+    assert not call["built_with"]["overrides"]
+
+
+REQUIRED = {
+    "train": ("--processed-data-home", "--output-home"),
+    "tune": ("--processed-data-home", "--output-home"),
+    "extract": ("--processed-data-home", "--model-home"),
+    "generative-score": ("--processed-data-home", "--model-home"),
+    "rep-based-score": ("--processed-data-home", "--model-home"),
+}
+
+
+@pytest.mark.parametrize("command", list(REQUIRED))
+def test_each_required_option_left_out_is_refused_by_name(command, tmp_path):
+    """before anything is built, with click's usage error naming the flag"""
+    for missing in REQUIRED[command]:
+        given = [
+            arg
+            for flag in REQUIRED[command]
+            if flag != missing
+            for arg in (flag, str(tmp_path))
+        ]
+        result = runner.invoke(app, [command, *given], env={"COLUMNS": "200"})
+        assert result.exit_code == 2, result.output
+        output = click.unstyle(result.output)
+        assert "Missing option" in output and missing in output, output
+
+
+def test_the_top_level_help_names_the_installed_version():
+    result = runner.invoke(app, ["--help"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    assert f"(v{importlib.metadata.version('cotorra')})" in result.output
+
+
+def test_main_runs_the_app(monkeypatch, capsys):
+    """the `cotorra` entry point pyproject.toml names"""
+    monkeypatch.setattr(sys, "argv", ["cotorra", "--help"])
+    with pytest.raises(SystemExit) as exited:
+        cotorra.cli.main()
+    assert exited.value.code == 0
+    out = capsys.readouterr().out
+    assert "Usage" in out and all(command in out for command in COMMANDS)
+
+
+def test_generative_score_writes_its_scores_and_reports_where(
+    scorer_generative, processed, target_token, tmp_path, monkeypatch
+):
+    """
+    end to end on the synthetic data, sglang faked: every M1 trajectory gives
+    each outcome an inline SCOPE estimate of 0.25 and REACH of 0.5, and no
+    outcome is ever generated, so each patient's mc, scope and reach are 0,
+    0.25 and 0.5, written under `--output-home` and reported there
+    """
+    qsr = sys.modules[scorer_generative.GeneratedTrajectory.__module__]
+
+    async def generate(engine, config, prompts, methods, stop_at_tracked_events=True):
+        n = len(config.tracked_ids)
+        return [
+            qsr.GeneratedTrajectory(
+                patient_idx=i,
+                sample_idx=s,
+                traj_type=qsr.TrajectoryType.M1,
+                prompt_len=len(prompt),
+                output_ids=[],
+                timeline_terminating_id=None,
+                scope_estimates=np.full(n, 0.25),
+                reach_estimates=np.full(n, 0.5),
+                occurred_flag=np.zeros(n, dtype=bool),
+                inline_tracked_ids=list(config.tracked_ids),
+            )
+            for i, prompt in enumerate(prompts)
+            for s in range(config.n_samp)
+        ]
+
+    monkeypatch.setattr(scorer_generative, "create_engine", lambda **kwargs: kwargs)
+    monkeypatch.setattr(scorer_generative, "generate_trajectories", generate)
+    cfg = base_scoring_cfg(score={"target_tokens": [target_token], "n_samp": 2})
+    out = tmp_path / "scores"
+    out.mkdir()
+    result = runner.invoke(
+        app,
+        # fmt: off
+        [
+            "generative-score",
+            "-s",
+            str(write_cfg(tmp_path / "scoring.yaml", cfg)),
+            "-p",
+            str(processed),
+            "-m",
+            str(tmp_path / "mdl-stub"),
+            "-o",
+            str(out),
+        ],
+        # fmt: on
+    )
+    assert result.exit_code == 0, result.output
+    scores = out / "scores-generative-mdl-stub.parquet"
+    table = pl.read_parquet(scores)
+    held_out = pl.read_parquet(processed / "held_out_for_inference.parquet")
+    assert table.height == held_out.height
+    unhad = table.filter(~held_out[f"{target_token}_past"])
+    assert unhad.height > 0
+    for kind, value in {"mc": 0.0, "scope": 0.25, "reach": 0.5}.items():
+        assert unhad[f"{target_token}_{kind}_score"].to_list() == [value] * unhad.height
+    report = _report(result.output, "Generative scoring completed")
+    assert "".join(str(scores).split()) in report

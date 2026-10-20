@@ -97,3 +97,56 @@ def test_summarize_preds_warns_on_non_finite_scores(logger, capture):
     )
     logger.summarize_preds(df, ["foo//bar"])
     assert any("non-finite" in m for m in capture.messages)
+
+
+@pytest.fixture
+def fast_bootstrap(monkeypatch) -> list[dict]:
+    """`summarize_preds`'s bootstrap cut to a few resamples, recording how it's
+    asked for each interval"""
+    import cotorra.logger
+    from cotorra.util import bootstrap_ci
+
+    asked = []
+
+    def bootstrap(y_true, y_score, **kwargs):
+        asked.append(kwargs)
+        return bootstrap_ci(y_true, y_score, **kwargs | {"n_samples": 20})
+
+    monkeypatch.setattr(cotorra.logger, "bootstrap_ci", bootstrap)
+    return asked
+
+
+def test_summarize_preds_stratifies_the_bootstrap_for_a_rare_outcome(
+    logger, capture, fast_bootstrap
+):
+    """under one positive in a thousand, a resample could easily hold none, so
+    each class is resampled on its own; the intervals still get logged"""
+    n = 2_000
+    future = [i == 7 for i in range(n)]
+    df = pl.LazyFrame(
+        {
+            "foo//bar_past": [False] * n,
+            "foo//bar_future": future,
+            "foo//bar_rep_score": [0.9 if f else 0.1 for f in future],
+        }
+    )
+    logger.summarize_preds(df, ["foo//bar"])
+    assert "using stratified sampling due to rarity" in capture.messages
+    assert [kwargs["stratified"] for kwargs in fast_bootstrap] == [True]
+    assert any(m.startswith("roc_auc") for m in capture.messages)
+
+
+def test_summarize_preds_summarizes_each_method_it_has_scores_for(
+    preds_df, logger, capture, fast_bootstrap
+):
+    """in the order mc, scope, reach, rep, each method a `<token>_<method>_score`
+    column holds; a common outcome resampled as a whole"""
+    df = preds_df.with_columns(
+        pl.col("foo//bar_rep_score").alias(f"foo//bar_{method}_score")
+        for method in ("mc", "reach")
+    )
+    logger.summarize_preds(df, ["foo//bar"])
+    methods = [m for m in capture.messages if m.startswith("method=")]
+    assert methods == ["method='mc'", "method='reach'", "method='rep'"]
+    assert [kwargs["stratified"] for kwargs in fast_bootstrap] == [False] * 3
+    assert "using stratified sampling due to rarity" not in capture.messages

@@ -1,5 +1,10 @@
-# coverage is reported, never enforced: both checks pass whatever the coverage, or
-# its change, and a pull request's comment only describes it
+# informational only: codecov reports coverage but never fails a check
+codecov:
+  require_ci_to_pass: false
+  notify:
+    # one upload per python version in .github/workflows/tests.yml
+    after_n_builds: 4
+
 coverage:
   status:
     project:
@@ -8,3 +13,8 @@ coverage:
     patch:
       default:
         informational: true
+
+comment:
+  layout: "condensed_header, diff, files"
+  require_changes: true
+  after_n_builds: 4

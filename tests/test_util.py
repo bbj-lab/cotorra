@@ -216,3 +216,56 @@ def test_bootstrap_ci_brackets_the_point_estimate(rng):
         y_true, y_score, n_samples=400, rng=rng, n_jobs=1, metrics=("roc_auc",)
     )["roc_auc"]
     assert lo <= roc_auc_score(y_true, y_score) <= hi
+
+
+def _labels_and_scores(seed: int = 0):
+    """a label, two scores of it -- one useful, one not -- and a second, shorter
+    label scored usefully, for the aggregate functions"""
+    rng = np.random.default_rng(seed)
+    y_true = (rng.random(80) > 0.5).astype(int)
+    useful = np.clip(y_true + rng.normal(0, 0.4, size=80), 0, 1)
+    other = (rng.random(50) > 0.4).astype(int)
+    other_score = np.clip(other + rng.normal(0, 0.4, size=50), 0, 1)
+    return y_true, rng.random(80), useful, other, other_score
+
+
+BOOTSTRAPS = {
+    "bootstrap_ci": (
+        bootstrap_ci,
+        ("roc_auc", "pr_auc", "brier"),
+        lambda y, noise, useful, o, o_score: (y, useful),
+    ),
+    "bootstrap_aggregate_ci": (
+        bootstrap_aggregate_ci,
+        ("avg_roc_auc", "avg_pr_auc", "avg_brier"),
+        lambda y, noise, useful, o, o_score: ([y, o], [useful, o_score]),
+    ),
+    "bootstrap_pval": (
+        bootstrap_pval,
+        ("roc_auc", "pr_auc", "brier"),
+        lambda y, noise, useful, o, o_score: (y, noise, useful),
+    ),
+    "bootstrap_aggregate_pval": (
+        bootstrap_aggregate_pval,
+        ("avg_roc_auc", "avg_pr_auc", "avg_brier"),
+        lambda y, noise, useful, o, o_score: ([y, o], [noise, o], [useful, o_score]),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(BOOTSTRAPS))
+def test_each_metric_comes_out_alike_alone_and_among_the_others(name):
+    """
+    every function computes each of its metrics, by default all of them, and
+    the resamples don't depend on which are asked for, so a metric computed
+    alone matches its value computed alongside the rest
+    """
+    fn, metrics, args = BOOTSTRAPS[name]
+    data = args(*_labels_and_scores())
+    common = dict(n_samples=40, n_jobs=1)
+    together = fn(*data, rng=np.random.default_rng(3), **common)
+    assert list(together) == list(metrics)
+    for metric in metrics:
+        alone = fn(*data, rng=np.random.default_rng(3), metrics=(metric,), **common)
+        assert list(alone) == [metric]
+        np.testing.assert_array_equal(alone[metric], together[metric])
