@@ -20,12 +20,16 @@ jobs:
     name: pytest (python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # lets the codecov upload authenticate by oidc, with no secret
     strategy:
       fail-fast: false
       matrix:
         # every version requires-python in pyproject.toml allows; it stops short of
         # 3.15, for which only pytorch's cpu index has torch wheels, and those
-        # segfault loading a saved model
+        # segfault loading a saved model. If this list changes length, update
+        # after_n_builds in codecov.yml
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
@@ -38,17 +42,16 @@ jobs:
           pip install '.[test]' pytest-cov
           --index-url https://download.pytorch.org/whl/cpu
           --extra-index-url https://pypi.org/simple
-      - run: pytest --cov --cov-report=xml
-      # coverage is informative only: codecov.yml keeps its checks from failing, and
-      # neither a failed upload nor codecov being down fails the job
+      - run: pytest --cov --cov-report=term --cov-report=xml
       - uses: codecov/codecov-action@v7
+        # coverage is informational: nothing in this step can fail the job
         continue-on-error: true
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
           disable_search: true
           name: python-${{ matrix.python-version }}
-          fail_ci_if_error: false
+          # fork prs can't get an oidc token; the action uploads those tokenless
+          use_oidc: true
 
   pytest-lowest:
     # each dependency at the oldest version pyproject.toml allows

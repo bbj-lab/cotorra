@@ -77,8 +77,9 @@ questions there.
     Without an NVIDIA GPU, use `https://download.pytorch.org/whl/cpu` as the
     index. To work on `generative-score`, install `'.[all,gen]'`, which needs
     Linux, Python 3.11 to 3.13, and an NVIDIA GPU (see the
-    [MIMIC-IV demo](recipes/mimic-iv-demo.md)); the tests that need it skip
-    without it.
+    [MIMIC-IV demo](recipes/mimic-iv-demo.md)); without it, its tests run against
+    a stand-in, `tests/fake_quick_sco_re.py`, and only the one holding that
+    stand-in to the real package skips.
 
 As you work:
 

@@ -4,10 +4,12 @@
 
 import math
 import os
+import pathlib
+import shutil
 
 import pytest
 import torch as t
-from helpers import base_training_cfg, default_cfg, write_cfg
+from helpers import TINY_MODEL_ARGS, base_training_cfg, default_cfg, write_cfg
 from omegaconf import OmegaConf
 from transformers import AutoModelForCausalLM
 
@@ -560,3 +562,272 @@ def test_a_custom_loss_can_score_a_batch_without_labels(built_trainer, monkeypat
     assert trainer.term_rows["eval"] == 3
     assert set(trainer.term_sums["eval"]) == {"mean_logit"}
     trainer.reset_terms("eval")
+
+
+def trainer_with(cfg: dict, processed, tmp_path, **kwargs) -> Trainer:
+    """a `Trainer` built from `cfg`, writing under `tmp_path / "out"`"""
+    return Trainer(
+        training_cfg=write_cfg(tmp_path / "training.yaml", cfg),
+        processed_data_home=processed,
+        output_home=tmp_path / "out",
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    "block, project, name",
+    [
+        (
+            {"project": "elsewhere", "run_name": "a-wandb-run"},
+            "elsewhere",
+            "a-wandb-run",
+        ),
+        ({"project": "elsewhere"}, "elsewhere", "cotorra"),
+        ({"run_name": "a-wandb-run"}, "cotorra", "a-wandb-run"),
+    ],
+    ids=["both", "project-only", "run-name-only"],
+)
+def test_the_wandb_block_names_the_project_and_run_wandb_records(
+    block, project, name, processed, tmp_path, monkeypatch
+):
+    """through the environment, which hf's wandb callback reads as training
+    starts; each key `cotorra` without it"""
+    monkeypatch.setenv("WANDB_PROJECT", "unset")
+    monkeypatch.setenv("WANDB_NAME", "unset")
+    cfg = base_training_cfg()
+    cfg["wandb"] = block
+    trainer_with(cfg, processed, tmp_path)
+    assert (os.environ["WANDB_PROJECT"], os.environ["WANDB_NAME"]) == (project, name)
+
+
+@pytest.mark.parametrize(
+    "names, run_name",
+    [
+        ({"run_name": "the-run", "wandb": {"run_name": "the-wandb-run"}}, "the-run"),
+        ({"wandb": {"run_name": "the-wandb-run"}}, "the-wandb-run"),
+    ],
+    ids=["run-name", "wandb-run-name"],
+)
+def test_the_model_and_its_config_are_saved_under_the_run_name(
+    names, run_name, processed, tmp_path, monkeypatch
+):
+    """the top-level `run_name`, or without it the wandb block's"""
+    cfg = base_training_cfg()
+    del cfg["run_name"]
+    cfg["wandb"] = {"project": "cotorra-tests"} | names.get("wandb", {})
+    cfg |= {k: v for k, v in names.items() if k != "wandb"}
+    trainer = trainer_with(cfg, processed, tmp_path)
+    assert trainer.run_name == run_name
+    monkeypatch.setattr(trainer.trainer, "train", lambda **kwargs: None)
+    trainer.train()
+    assert (tmp_path / "out" / f"mdl-{run_name}" / "config.json").is_file()
+    assert (tmp_path / "out" / f"mdl-{run_name}-training.yaml").is_file()
+
+
+def test_every_model_arg_lands_on_the_built_models_config(processed, tmp_path):
+    """over what the named model's config says, beside the vocabulary size and
+    special tokens the tokenizer gives"""
+    args = TINY_MODEL_ARGS | {"num_hidden_layers": 2, "intermediate_size": 48}
+    args |= {"rms_norm_eps": 1e-3}
+    trainer = trainer_with(
+        base_training_cfg(model={"model_args": args}), processed, tmp_path
+    )
+    model = trainer.model_init()
+    for key, value in args.items():
+        assert getattr(model.config, key) == value, key
+    assert len(model.model.layers) == 2
+    assert model.model.layers[0].mlp.up_proj.out_features == 48
+    lookup = trainer.tkzr_cfg.lookup
+    assert model.config.vocab_size == len(lookup)
+    assert (model.config.bos_token_id, model.config.eos_token_id) == (
+        lookup.BOS,
+        lookup.EOS,
+    )
+
+
+PACKAGED_TRAINING_ARGS = default_cfg("cotorra", "training")["training_args"]
+
+
+@pytest.fixture(scope="module")
+def shipped_args_trainer(processed, tmp_path_factory) -> Trainer:
+    """a trainer given the packaged `training_args` as they ship, `report_to:
+    wandb` included, which only installs hf's callback until training starts"""
+    cfg = base_training_cfg()
+    cfg["training_args"] = dict(PACKAGED_TRAINING_ARGS)
+    return trainer_with(cfg, processed, tmp_path_factory.mktemp("shipped-args"))
+
+
+@pytest.mark.parametrize("key", list(PACKAGED_TRAINING_ARGS))
+def test_every_packaged_training_arg_reaches_hfs_training_arguments(
+    key, shipped_args_trainer
+):
+    """as it's written -- hf only wraps `report_to` in a list, and takes the
+    strategies as enums that compare equal to their names -- rather than
+    dropped along the way or overridden"""
+    value = PACKAGED_TRAINING_ARGS[key]
+    expected = [value] if key == "report_to" else value
+    assert getattr(shipped_args_trainer.trainer.args, key) == expected
+
+
+def test_the_batch_sizes_set_the_batches_training_and_evaluation_take(
+    processed, tmp_path
+):
+    cfg = base_training_cfg(
+        training_args={
+            "per_device_train_batch_size": 3,
+            "per_device_eval_batch_size": 5,
+        }
+    )
+    hf = trainer_with(cfg, processed, tmp_path).trainer
+    assert next(iter(hf.get_train_dataloader()))["input_ids"].shape == (3, 16)
+    assert next(iter(hf.get_eval_dataloader()))["input_ids"].shape == (5, 16)
+
+
+@pytest.mark.slow
+def test_the_packaged_checkpointing_keeps_and_saves_the_best_model(
+    processed, tmp_path, monkeypatch
+):
+    """
+    the packaged scheme: evaluating and saving every tenth of the run, keeping
+    the best checkpoint by `eval_loss`, lowest best -- by the end, it alone --
+    and loading it then, which makes it the model saved as mdl-<run_name>. Its
+    evaluations report losses scripted so that the best comes mid-run, which
+    real ones at this scale wouldn't reliably do, and each checkpoint is
+    copied aside as it's saved, to tell them apart afterwards
+    """
+    from safetensors.torch import load_file
+    from transformers import TrainerCallback
+
+    class CopiedAside(TrainerCallback):
+        def on_save(self, args, state, control, **kwargs):
+            name = f"checkpoint-{state.global_step}"
+            shutil.copytree(pathlib.Path(args.output_dir) / name, tmp_path / name)
+
+    scheme = [
+        "eval_strategy",
+        "eval_steps",
+        "save_strategy",
+        "save_steps",
+        "save_total_limit",
+        "load_best_model_at_end",
+        "metric_for_best_model",
+        "greater_is_better",
+        "prediction_loss_only",
+    ]
+    args = {key: PACKAGED_TRAINING_ARGS[key] for key in scheme} | {"max_steps": 10}
+    trainer = trainer_with(base_training_cfg(training_args=args), processed, tmp_path)
+    hf = trainer.trainer
+    losses = iter([5.0, 4.0, 3.0, 2.0, 2.5, 3.5, 4.5, 4.0, 3.0, 2.2])
+    evaluate, reported = hf.evaluate, []
+
+    def scripted(*args, **kwargs):
+        metrics = evaluate(*args, **kwargs)
+        assert math.isfinite(metrics["eval_loss"])  # the real one, from the custom loss
+        reported.append(metrics["eval_loss"])
+        return metrics | {"eval_loss": next(losses)}
+
+    monkeypatch.setattr(hf, "evaluate", scripted)
+    hf.add_callback(CopiedAside())
+    trainer.train()
+    assert len(reported) == 10  # every tenth of the run
+    assert hf.state.best_metric == 2.0
+    assert pathlib.Path(hf.state.best_model_checkpoint).name == "checkpoint-4"
+    assert [p.name for p in (tmp_path / "out").glob("checkpoint-*")] == ["checkpoint-4"]
+    saved = load_file(tmp_path / "out" / "mdl-test-run" / "model.safetensors")
+    best = load_file(tmp_path / "checkpoint-4" / "model.safetensors")
+    last = load_file(tmp_path / "checkpoint-10" / "model.safetensors")
+    assert set(saved) == set(best) == set(last)
+    assert all(t.equal(saved[k], best[k]) for k in saved)
+    assert not all(t.equal(saved[k], last[k]) for k in saved)
+
+
+@pytest.mark.parametrize("loss_only", [True, False])
+def test_prediction_loss_only_leaves_evaluation_its_loss_alone(
+    loss_only, processed, tmp_path
+):
+    """the packaged `true` keeps evaluation from gathering every position's
+    logits, which only the loss needs"""
+    cfg = base_training_cfg(training_args={"prediction_loss_only": loss_only})
+    hf = trainer_with(cfg, processed, tmp_path).trainer
+    out = hf.predict(hf.eval_dataset)
+    assert math.isfinite(out.metrics["test_loss"])
+    if loss_only:
+        assert out.predictions is None
+    else:
+        assert out.predictions.shape[:2] == (len(hf.eval_dataset), 16)
+
+
+@pytest.fixture
+def untrained(processed, tmp_path, monkeypatch) -> Trainer:
+    """a trainer whose hf training is a no-op that records how it was called, so
+    that `Trainer.train` goes straight on to saving"""
+    trainer = trainer_with(base_training_cfg(), processed, tmp_path)
+    trainer.calls = []
+    monkeypatch.setattr(
+        trainer.trainer, "train", lambda **kwargs: trainer.calls.append(kwargs)
+    )
+    return trainer
+
+
+def test_training_verbosely_summarizes_the_trained_model(untrained, monkeypatch):
+    """by sampling from it, starting at the tokenizer's BOS, and naming what it
+    samples through the tokenizer's lookup turned around"""
+    summaries = []
+    monkeypatch.setattr(
+        untrained.logger,
+        "summarize_trained_model",
+        lambda **kwargs: summaries.append(kwargs),
+    )
+    untrained.train()
+    assert summaries == []
+    untrained.train(verbose=True)
+    [summary] = summaries
+    lookup = untrained.tkzr_cfg.lookup
+    assert summary["model"] is untrained.trainer.model
+    assert summary["bos_token_id"] == lookup["BOS"]
+    assert summary["reverse"] == {v: k for k, v in lookup.items()}
+
+
+def test_resuming_asks_hf_for_the_latest_checkpoint_and_starts_afresh_failing_that(
+    untrained, monkeypatch
+):
+    warned = []
+    monkeypatch.setattr(untrained.logger, "warning", warned.append)
+    untrained.train(resume_from_checkpoint=True)
+    assert untrained.calls == [{"resume_from_checkpoint": True}]
+    assert warned == []
+
+    def train(**kwargs):
+        untrained.calls.append(kwargs)
+        if kwargs:
+            raise ValueError("No valid checkpoint found in output directory")
+
+    untrained.calls.clear()
+    monkeypatch.setattr(untrained.trainer, "train", train)
+    untrained.train(resume_from_checkpoint=True)
+    assert untrained.calls == [{"resume_from_checkpoint": True}, {}]
+    [warning] = warned
+    assert "No valid checkpoint found" in warning
+    untrained.calls.clear()
+    untrained.train()
+    assert untrained.calls == [{}]
+
+
+def test_the_config_saved_beside_the_model_is_the_merged_one(
+    processed, tmp_path, monkeypatch
+):
+    """the file, then the overrides, then the constructor's keyword arguments,
+    as the run used them"""
+    trainer = trainer_with(
+        base_training_cfg(n_epochs=1),
+        processed,
+        tmp_path,
+        overrides=["n_epochs=2", "~quantile_token_loss", "training_args.seed=7"],
+        max_seq_len=8,
+    )
+    monkeypatch.setattr(trainer.trainer, "train", lambda **kwargs: None)
+    trainer.train()
+    saved = OmegaConf.load(tmp_path / "out" / "mdl-test-run-training.yaml")
+    assert saved == trainer.cfg
+    assert (saved.n_epochs, saved.max_seq_len, saved.training_args.seed) == (2, 8, 7)
+    assert "quantile_token_loss" not in saved

@@ -1172,3 +1172,160 @@ def test_every_shards_nlls_line_up_with_its_input_ids(
             sharded += len(shards) > 1
         assert sharded, "no split was large enough to actually shard"
         assert cut, "no row was long enough to be cut to `max_len`"
+
+
+# ------------------------------------------- the extraction config's options
+
+
+def extractor_with(cfg: dict, processed_data_home, model_home, tmp_path, **kwargs):
+    """an `Extractor` under `cfg`, writing to `tmp_path / "out"` unless told"""
+    if "output_home" not in kwargs:
+        (out := tmp_path / "out").mkdir(parents=True, exist_ok=True)
+        kwargs["output_home"] = out
+    return Extractor(
+        extraction_cfg=write_cfg(tmp_path / "extraction.yaml", cfg),
+        processed_data_home=processed_data_home,
+        model_home=model_home,
+        **kwargs,
+    )
+
+
+def test_all_times_lays_each_row_out_over_max_seq_len_positions(
+    processed, fake_model_home, tmp_path
+):
+    """
+    wider than `extract.max_len` here, so that each row runs out before its
+    width does: the long row cut to its first `max_len` tokens and the short
+    one padded, NaN past each one's last token
+    """
+    cfg = base_extraction_cfg(max_seq_len=24)
+    assert cfg["extract"]["max_len"] == 16
+    extractor = extractor_with(cfg, processed, fake_model_home, tmp_path)
+    long, short = t.arange(3, 23), t.arange(3, 6)
+    batch = {"input_ids": [long, short], "s_elapsed_past": [long * 60.0, short * 60.0]}
+    features = extractor.extract_final(batch, all_times=True)["features"]
+    assert features.shape == (2, 24, extractor.model.config.hidden_size)
+    for row, last in ((0, 15), (1, 2)):
+        assert np.isfinite(features[row, : last + 1]).all()
+        assert np.isnan(features[row, last + 1 :]).all()
+
+
+@pytest.mark.parametrize("batch_size", [5, None], ids=["five", "absent"])
+def test_extraction_reads_batch_size_rows_at_a_time(
+    batch_size, processed, fake_model_home, tmp_path, monkeypatch
+):
+    """each split in batches of `extract.batch_size` rows, the last holding
+    what's left; 8 without the key"""
+    cfg = base_extraction_cfg()
+    if batch_size is None:
+        del cfg["extract"]["batch_size"]
+    else:
+        cfg["extract"]["batch_size"] = batch_size
+    extractor = extractor_with(cfg, processed, fake_model_home, tmp_path)
+    sizes, extract_final = [], extractor.extract_final
+
+    def spy(batch, **kwargs):
+        sizes.append(len(batch["input_ids"]))
+        return extract_final(batch, **kwargs)
+
+    monkeypatch.setattr(extractor, "extract_final", spy)
+    extractor.extract()
+    per, expected = batch_size or 8, []
+    for split in extractor.loader.splits:
+        n = pl.read_parquet(processed / f"{split}_for_inference.parquet").height
+        expected += [per] * (n // per) + ([n % per] if n % per else [])
+    assert sizes == expected
+    assert max(sizes) == per and len(set(sizes)) > 1
+
+
+@pytest.mark.parametrize("how", ["absent", "null"])
+def test_without_a_shard_size_each_split_is_written_whole(
+    how, processed, fake_model_home, tmp_path
+):
+    """one unsuffixed file a split, however many rows it has -- the training
+    split's dozens included, which the shard size of 4 elsewhere splits up"""
+    cfg = base_extraction_cfg()
+    if how == "absent":
+        del cfg["extract"]["shard_size"]
+    else:
+        cfg["extract"]["shard_size"] = None
+    extractor = extractor_with(cfg, processed, fake_model_home, tmp_path)
+    extractor.extract()
+    name = fake_model_home.name
+    written = sorted(p.name for p in extractor.output_home.iterdir())
+    assert written == sorted(
+        f"features-{s}-{name}.parquet" for s in extractor.loader.splits
+    )
+    rows = pl.read_parquet(processed / "train_for_inference.parquet").height
+    assert rows > SHARD_SIZE
+    assert (
+        pl.read_parquet(extractor.output_home / f"features-train-{name}.parquet").height
+        == rows
+    )
+
+
+def test_the_rope_spacing_sets_the_position_ids_and_so_the_features(
+    processed, model_with_heads, tmp_path, sample_batch
+):
+    """`time_based_rope.sec_per_pos_id` seconds to a position, over and above
+    the token's index: the packaged 300, or 60 here -- read through a model
+    initialized wide enough that its attention tells the positions apart"""
+    model_home = model_with_heads()
+    every_minute, every_five = (
+        extractor_with(
+            base_extraction_cfg(time_based_rope={"sec_per_pos_id": sec}),
+            processed,
+            model_home,
+            tmp_path / str(sec),
+        )
+        for sec in (60, 300)
+    )
+    elapsed = sample_batch["s_elapsed_past"][0]
+    for extractor, sec in ((every_minute, 60), (every_five, 300)):
+        position_ids = extractor.collate_fn(dict(sample_batch))["position_ids"]
+        assert t.allclose(position_ids[0].cpu(), elapsed / sec + t.arange(4))
+    assert not np.allclose(
+        every_minute.extract_final(dict(sample_batch))["features"],
+        every_five.extract_final(dict(sample_batch))["features"],
+        rtol=1e-2,
+    )
+
+
+def test_features_are_written_beside_the_inference_tables_by_default(
+    processed, fake_model_home, tmp_path
+):
+    home = tmp_path / "processed"
+    shutil.copytree(processed, home)
+    extractor = extractor_with(
+        base_extraction_cfg(), home, fake_model_home, tmp_path, output_home=None
+    )
+    assert extractor.output_home == home.resolve()
+    extractor.extract()
+    for split in extractor.loader.splits:
+        assert (home / f"features-{split}-{fake_model_home.name}.parquet").is_file()
+
+
+def test_a_row_of_its_bos_alone_has_an_nll_of_zero(extractor, tokenizer_cfg):
+    """the BOS carries no information, and there's nothing after it to score"""
+    bos = tokenizer_cfg.lookup.BOS
+    batch = {
+        "input_ids": [t.tensor([bos]), t.tensor([bos, 5, 6])],
+        "s_elapsed_past": [t.tensor([0.0]), t.tensor([0.0, 60.0, 120.0])],
+    }
+    alone, longer = extractor.extract_final(batch, token_nll=True)["token_nll_bits"]
+    assert alone.dtype == np.float32 and alone.tolist() == [0.0]
+    assert longer.shape == (3,) and longer[0] == 0 and (longer[1:] > 0).all()
+
+
+def test_a_checkpoint_with_a_pad_id_of_its_own_keeps_it(
+    processed, fake_model_home, tmp_path
+):
+    """only a missing pad id is filled in with EOS's, as gemma's 0 isn't"""
+    home = tmp_path / "mdl-padded"
+    shutil.copytree(fake_model_home, home)
+    config = json.loads((home / "config.json").read_text())
+    assert config.get("pad_token_id") is None
+    (home / "config.json").write_text(json.dumps(config | {"pad_token_id": 0}))
+    extractor = extractor_with(base_extraction_cfg(), processed, home, tmp_path)
+    assert extractor.model.config.pad_token_id == 0
+    assert extractor.model.config.eos_token_id != 0

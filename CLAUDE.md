@@ -228,27 +228,36 @@ reusable `model_presets` (YAML anchors) and selects one via the `model:` key.
   on 3.11 with each dependency at the lowest version
   [pyproject.toml](pyproject.toml) allows; it also lints with `ruff check`, but
   doesn't check formatting. It installs torch's CPU wheels from PyTorch's own
-  index, so it never runs CUDA or MPS code, nor the `[gen]` tests (hence
-  `scorer_generative.py`'s 0%). The 3.11–3.14 jobs also install `pytest-cov`
-  (CI-only, not in the `test` extra) and upload coverage to Codecov, strictly
-  informatively: [codecov.yml](codecov.yml) makes its checks `informational`, and
-  the upload step can't fail the job. Don't add a coverage threshold
-  (`--cov-fail-under`, a status `target`) or make the upload required. Keep the
-  matrix in step with `requires-python`, and raise a floor in `pyproject.toml`
-  when code starts needing a newer dependency, or the lowest job fails. On Linux
-  that job gets torch 2.6; the darwin-only 2.8 floor is for MPS, where 12
-  extraction and sampling tests fail under 2.6. `requires-python` stops short of
-  3.15 because PyPI and the CUDA index have no torch wheels for it, and the CPU
-  index's segfault loading a saved model (seen on macOS with 3.15.0rc2). Still
-  run the suite locally before committing; `-m "not slow"` drops the handful of
-  real (tiny) training loops. `pythonpath` puts `src` ahead of site-packages so a
-  run always exercises the working tree even when a non-editable `cotorra` sits
-  in the venv — don't drop it. The suite needs neither network nor real data:
+  index, so it never runs CUDA or MPS code, nor the `[gen]` extra. The 3.11–3.14
+  jobs also install `pytest-cov` (CI-only, not in the `test` extra) and upload
+  coverage to [Codecov](https://app.codecov.io/gh/bbj-lab/cotorra) by OIDC, as
+  cocoa's do, so no token secret is needed (fork PRs upload tokenless; Codecov
+  refuses a tokenless upload from any other branch). Coverage is informational
+  only: the upload step can't fail the job (`continue-on-error`), and
+  [codecov.yml](codecov.yml) makes its statuses always pass and waits for all
+  four uploads before reporting (`after_n_builds`; keep it equal to the matrix
+  size). Don't add a coverage threshold (`--cov-fail-under`, a status `target`)
+  or make the upload required. Keep the matrix in step with `requires-python`,
+  and raise a floor in `pyproject.toml` when code starts needing a newer
+  dependency, or the lowest job fails. On Linux that job gets torch 2.6; the
+  darwin-only 2.8 floor is for MPS, where 12 extraction and sampling tests fail
+  under 2.6. `requires-python` stops short of 3.15 because PyPI and the CUDA
+  index have no torch wheels for it, and the CPU index's segfault loading a saved
+  model (seen on macOS with 3.15.0rc2). Still run the suite locally before
+  committing; `-m "not slow"` drops the handful of real (tiny) training loops.
+  `pythonpath` puts `src` ahead of site-packages so a run always exercises the
+  working tree even when a non-editable `cotorra` sits in the venv — don't drop
+  it. The suite needs neither network nor real data:
   [tests/synth.py](tests/synth.py) writes CLIF-like raw tables the fixtures push
   through the real cocoa collate → tokenize → winnow pipeline, and the model
-  under test is a tiny randomly-initialized `LlamaForCausalLM`.
-  [tests/test_scorer_generative.py](tests/test_scorer_generative.py) skips
-  without the `[gen]` extra.
+  under test is a tiny randomly-initialized `LlamaForCausalLM`. Without the
+  `[gen]` extra, the `scorer_generative` fixture imports
+  `cotorra.scorer_generative` against
+  [tests/fake_quick_sco_re.py](tests/fake_quick_sco_re.py), a copy of
+  `quick_sco_re`'s dataclasses whose engine and generation are placeholders the
+  tests swap for fakes (sglang's part, faked either way), so the generative
+  scorer is tested in CI too; a guard test holds the copy to the real package
+  wherever the extra is installed, and is the one test that skips without it.
 - **Logging** goes through `self.logger` (the parrot-emoji `Logger`), not
   `print`. The CLI itself uses `rich.print`/`Console` for status spinners and the
   `✓ …completed` summaries.

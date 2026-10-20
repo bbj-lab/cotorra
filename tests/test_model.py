@@ -18,7 +18,9 @@ from cotorra.model import (
     CotorraConfig,
     CotorraForCausalLM,
     DispositionHead,
+    Head,
     Log1pHoursHead,
+    TntHead,
     TntMixtureHead,
     TntPointHead,
     TteHead,
@@ -1485,3 +1487,63 @@ def test_a_real_training_step_updates_every_head(configured, tmp_path):
                 for now, then in zip(model.heads[name].parameters(), params)
             )
             assert moved > 0, f"{name} head never updated with {compute_loss_func=}"
+
+
+# ------------------------------------------------------- what a head must give
+
+
+def test_a_head_has_to_say_what_it_predicts_and_how_it_is_scored():
+    """the base class leaves both to the subclass that sets its name and target"""
+
+    class Bare(Head):
+        name, target = "bare", "bare_target"
+
+    head = Bare()
+    assert (head.weight, head.per_record) == (1.0, False)
+    with pytest.raises(NotImplementedError):
+        head(t.zeros(1, 2, 4))
+    with pytest.raises(NotImplementedError):
+        head.loss(None, t.zeros(1, 2))
+
+
+def test_a_time_to_next_token_head_has_to_say_how_it_samples_and_averages():
+    """the interface generation and extraction ask of either kind of tnt head"""
+
+    class Bare(TntHead):
+        pass
+
+    head = Bare()
+    with pytest.raises(NotImplementedError):
+        head.sample_hours(t.zeros(1, 4), t.zeros(1, 4))
+    with pytest.raises(NotImplementedError):
+        head.mean_log1p_hours(t.zeros(1, 4), lambda h: h, t.nn.Embedding(3, 4))
+
+
+def test_a_mixture_head_samples_the_hours_until_the_given_next_token(wide_mixture):
+    """drawn from its distribution given that token, reproducibly under a
+    seeded generator, or with `do_sample=False` its point estimate; the zero
+    part switched off, so that every draw comes from the log-normals"""
+    with t.no_grad():
+        zero_part = wide_mixture.heads["tnt"].proj[-1]
+        zero_part.weight[0].zero_()
+        zero_part.bias[0] = -50.0
+    hidden, next_ids = t.randn(4, 32), t.tensor([4, 9, 17, 30])
+    dist = wide_mixture.tnt_distribution(hidden, next_ids)
+    draws = [
+        wide_mixture.sample_hours_to_next_token(
+            hidden, next_ids, generator=t.Generator().manual_seed(seed)
+        )
+        for seed in (0, 0, 1)
+    ]
+    assert t.equal(draws[0], dist.sample(t.Generator().manual_seed(0)))
+    assert t.equal(draws[0], draws[1]) and not t.equal(draws[0], draws[2])
+    assert (draws[0] > 0).all() and draws[0].shape == (4,)
+    point = wide_mixture.sample_hours_to_next_token(hidden, next_ids, do_sample=False)
+    assert t.equal(point, dist.point_estimate())
+    other = wide_mixture.tnt_distribution(hidden, next_ids.flip(0))
+    assert not t.allclose(other.means, dist.means)
+
+
+def test_a_disposition_head_needs_a_class_to_predict():
+    with pytest.raises(ValueError, match="needs at least one class"):
+        DispositionHead(32, classes=[])
