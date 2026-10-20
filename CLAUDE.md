@@ -226,15 +226,16 @@ reusable `model_presets` (YAML anchors) and selects one via the `model:` key.
   ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs it on every
   push and pull request, and weekly, on Python 3.11 through 3.14, and once more
   on 3.11 with each dependency at the lowest version
-  [pyproject.toml](pyproject.toml) allows; it also lints with `ruff check`, but
-  doesn't check formatting. It installs torch's CPU wheels from PyTorch's own
-  index, so it never runs CUDA or MPS code, nor the `[gen]` extra. The 3.11–3.14
-  jobs also install `pytest-cov` (CI-only, not in the `test` extra) and upload
-  coverage to [Codecov](https://app.codecov.io/gh/bbj-lab/cotorra) by OIDC, as
-  cocoa's do, so no token secret is needed (fork PRs upload tokenless; Codecov
-  refuses a tokenless upload from any other branch). Coverage is informational
-  only: the upload step can't fail the job (`continue-on-error`), and
-  [codecov.yml](codecov.yml) makes its statuses always pass and waits for all
+  [pyproject.toml](pyproject.toml) allows. It doesn't run ruff at all, neither
+  `ruff check` nor `ruff format`, so a style slip never fails it; that's left to
+  the ruff run before committing. It installs torch's CPU wheels from PyTorch's
+  own index, so it never runs CUDA or MPS code, nor the `[gen]` extra. The
+  3.11–3.14 jobs also install `pytest-cov` (CI-only, not in the `test` extra) and
+  upload coverage to [Codecov](https://app.codecov.io/gh/bbj-lab/cotorra) by
+  OIDC, as cocoa's do, so no token secret is needed (fork PRs upload tokenless;
+  Codecov refuses a tokenless upload from any other branch). Coverage is
+  informational only: the upload step can't fail the job (`continue-on-error`),
+  and [codecov.yml](codecov.yml) makes its statuses always pass and waits for all
   four uploads before reporting (`after_n_builds`; keep it equal to the matrix
   size). Don't add a coverage threshold (`--cov-fail-under`, a status `target`)
   or make the upload required. Keep the matrix in step with `requires-python`,

@@ -39,9 +39,9 @@ jobs:
       # the readme's install, with torch's cpu wheels for its cuda ones, which are
       # gigabytes and of no use on a runner without a gpu
       - run: >-
-          pip install '.[test]' pytest-cov
-          --index-url https://download.pytorch.org/whl/cpu
-          --extra-index-url https://pypi.org/simple
+          pip install '.[test]' pytest-cov --index-url
+          https://download.pytorch.org/whl/cpu --extra-index-url
+          https://pypi.org/simple
       - run: pytest --cov --cov-report=term --cov-report=xml
       - uses: codecov/codecov-action@v7
         # coverage is informational: nothing in this step can fail the job
@@ -68,14 +68,3 @@ jobs:
           uv pip install --system --resolution lowest-direct --torch-backend cpu
           '.[test]'
       - run: pytest
-
-  ruff:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-      - run: pip install ruff
-      - run: ruff check .
