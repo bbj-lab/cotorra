@@ -59,6 +59,7 @@ class Tuner(Trainer):
         )
         for n, v in best_trial.hyperparameters.items():
             setattr(self.trainer.args, n, v)
+        self.trainer.create_accelerator_and_postprocess()
         self.trainer.train()
         self.trainer.model.save_pretrained(self.output_home / f"mdl-{self.run_name}")
 
