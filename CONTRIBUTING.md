@@ -122,10 +122,11 @@ pull request against `main` on
 - [Allow maintainer edits](https://docs.github.com/en/github/collaborating-with-issues-and-pull-requests/allowing-changes-to-a-pull-request-branch-created-from-a-fork)
   so that a maintainer can update your branch before merging.
 - CI runs `pytest` on Python 3.11 through 3.14 and again with each dependency at
-  the oldest version [pyproject.toml](pyproject.toml) allows, plus `ruff check`.
-  It runs on CPUs only, so if your change touches GPU code, say how you tested it
-  there. Codecov then reports the change in coverage, but only for information:
-  its checks always pass.
+  the oldest version [pyproject.toml](pyproject.toml) allows. It doesn't run
+  ruff, so formatting and linting are up to you before you push. It runs on CPUs
+  only, so if your change touches GPU code, say how you tested it there. Codecov
+  then reports the change in coverage, but only for information: its checks
+  always pass.
 - A maintainer will review it and may suggest changes or leave comments. Mark
   each conversation as resolved once you've addressed it.
 
