@@ -79,6 +79,12 @@ class TrainerWithCustomLoss(t_Trainer):
         if self.compute_loss_func is not None:
             inputs = dict(inputs)
             labels = inputs.pop("labels", None)
+            if getattr(self, "doc_masking", False):
+                # masking silently does not happen with a KV cache, so refuse
+                # rather than train unmasked
+                assert not getattr(model.config, "use_cache", False), (
+                    "doc_masking batch reached a model with use_cache=True"
+                )
             outputs = model(**inputs)
             # a `compute_loss_func` fills `terms` as `Loss.custom_loss` does, or
             # takes it in a `**kwargs` and leaves it empty
@@ -179,6 +185,18 @@ class Trainer(Configurable):
         wandb_cfg = self.cfg.get("wandb") or {}
         self.run_name = self.cfg.get("run_name", wandb_cfg.get("run_name", ""))
         # the merged config, not the file it came from, so overrides reach it too
+        if self.cfg.get("doc_masking", False):
+            # without these, the flattened batch would silently train with
+            # plain causal attention across every packed record
+            assert self.cfg.get("packing", "concat") == "bfd", (
+                "doc_masking needs packing: bfd"
+            )
+            assert self.cfg.get("attn_implementation") == "flash_attention_2", (
+                "doc_masking needs attn_implementation: flash_attention_2"
+            )
+            assert not self.head_options and "time_based_rope" not in self.cfg, (
+                "doc_masking does not yet support secondary heads or time_based_rope"
+            )
         self.loader = Loader(self.cfg, self.processed_data_home)
 
         self.trainer = TrainerWithCustomLoss(
@@ -192,6 +210,7 @@ class Trainer(Configurable):
             ),
         )
         self.model = self.trainer.model
+        self.trainer.doc_masking = bool(self.cfg.get("doc_masking", False))
 
         os.environ["WANDB_PROJECT"] = wandb_cfg.get("project", "cotorra")
         os.environ["WANDB_NAME"] = wandb_cfg.get("run_name", "cotorra")
@@ -205,9 +224,20 @@ class Trainer(Configurable):
         config = AutoConfig.from_pretrained(
             self.cfg.model.model_name, **conf_param, **self.cfg.model.model_args
         )
+        if self.cfg.get("doc_masking", False):
+            # with a KV cache, transformers skips flash-attention's varlen path
+            # and the packed records attend to each other. HF applies
+            # training_args.use_cache only to the model it builds in __init__,
+            # not to the one model_init rebuilds in train()
+            config.use_cache = False
         if self.head_options:
             config = CotorraConfig(text_config=config, heads=self.head_options)
-        mdl = AutoModelForCausalLM.from_config(config)
+        # attn_implementation: e.g. flash_attention_2, which doc_masking needs;
+        # unset keeps transformers' default (sdpa)
+        attn = self.cfg.get("attn_implementation", None)
+        mdl = AutoModelForCausalLM.from_config(
+            config, **({"attn_implementation": attn} if attn else {})
+        )
         self.logger.info(
             "Loaded model {name} with {num} params ({dtype}).".format(
                 name="{}{}".format(
@@ -239,6 +269,24 @@ class Trainer(Configurable):
             if weights is not None and options.get("per_record", False):
                 # the weights the loader gives each record, beside its target
                 f_set[weights] = t.stack([x[weights] for x in batch])
+        if "pad_mask" in batch[0]:
+            # padding left by `packing: bfd` (util.best_fit_packed_iter): its
+            # positions are never targets, which CrossEntropyLoss skips at -100
+            pad = t.stack([x["pad_mask"] for x in batch]).bool()
+            f_set["labels"] = f_set["labels"].masked_fill(pad, -100)
+        if self.cfg.get("doc_masking", False) and "doc_pos" in batch[0]:
+            # cross-record attention masking for `packing: bfd` batches (train
+            # and eval): flatten to one row whose position_ids restart at every
+            # packed piece, which transformers' flash_attention_2 turns into
+            # varlen segments (it only does so for a batch of ONE row). A
+            # piece's first token is never a target -- it would be predicted
+            # from the previous, unrelated piece.
+            pos = t.stack([x["doc_pos"] for x in batch])
+            return {
+                "input_ids": input_ids.reshape(1, -1),
+                "labels": f_set["labels"].masked_fill(pos == 0, -100).reshape(1, -1),
+                "position_ids": pos.reshape(1, -1),
+            }
         return f_set
 
     def train(
