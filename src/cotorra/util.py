@@ -41,6 +41,99 @@ def batched_iter(dset: ds.Dataset, seq_len: int) -> collections.abc.Iterator:
             yield {k: [dq[k].popleft() for _ in range(seq_len)] for k in dq}
 
 
+def best_fit_packed_iter(
+    dset: ds.Dataset, seq_len: int, rng: Generator
+) -> collections.abc.Iterator:
+    """
+    Best-fit Decreasing packing (Ding et al., ICML 2024, "Fewer Truncations
+    Improve Language Modeling"): a record is split only when it is longer
+    than `seq_len`, into chunks of at most `seq_len`; every chunk is then
+    placed whole into the open sequence whose remaining space is the smallest
+    that still fits it, largest chunks first. Leftover space is padded with
+    zeros and flagged in `pad_mask`, which the collator turns into ignored
+    labels. Ties between equal-length chunks keep `dset`'s (shuffled) order;
+    the records within a sequence, and the sequences, are shuffled with `rng`
+    so neither "longest first" nor packing order is systematic.
+    """
+    import pyarrow.compute as pc
+
+    # through the arrow formatter, not `dset.data`: the latter is the table in
+    # its stored order and ignores a shuffle's indices mapping, which would pair
+    # each row's fetched tokens with another row's length
+    lengths = pc.list_value_length(dset.with_format("arrow")["input_ids"]).to_numpy()
+    # chunks as (row, start, length), stable-sorted by decreasing length
+    chunks = [
+        (i, s, min(seq_len, n - s))
+        for i, n in enumerate(lengths)
+        for s in range(0, int(n), seq_len)
+    ]
+    chunks.sort(key=lambda c: -c[2])
+
+    # bins by remaining capacity: free[r] holds the ids of open bins with r left;
+    # a segment tree over r finds the smallest r >= c with an open bin
+    size = 1
+    while size < seq_len + 1:
+        size *= 2
+    tree = np.zeros(2 * size, np.int64)
+    free = collections.defaultdict(list)
+    bins = []
+
+    def mark(r, d):
+        i = r + size
+        while i:
+            tree[i] += d
+            i //= 2
+
+    def smallest_ge(c):
+        if tree[1] == 0:
+            return -1
+        i, lo, hi = 1, 0, size - 1
+        stack = [(1, 0, size - 1)]
+        while stack:
+            i, lo, hi = stack.pop()
+            if hi < c or tree[i] == 0:
+                continue
+            if lo == hi:
+                return lo
+            mid = (lo + hi) // 2
+            stack.append((2 * i + 1, mid + 1, hi))  # right after left
+            stack.append((2 * i, lo, mid))
+        return -1
+
+    for row, start, n in chunks:
+        r = smallest_ge(n) if n < seq_len else -1
+        if r < 0:
+            b, r = len(bins), seq_len
+            bins.append([])
+        else:
+            b = free[r].pop()
+            mark(r, -1)
+        bins[b].append((row, start, n))
+        if r - n > 0:
+            free[r - n].append(b)
+            mark(r - n, 1)
+
+    for b in rng.permutation(len(bins)):
+        pieces = [bins[b][j] for j in rng.permutation(len(bins[b]))]
+        out = {k: [] for k in dset.column_names}
+        for row, start, n in pieces:
+            eg = dset[int(row)]
+            for k in out:
+                out[k].extend(list(eg[k])[start : start + n])
+        n_pad = seq_len - len(out["input_ids"])
+        for k in out:
+            out[k].extend([0] * n_pad)
+        out["pad_mask"] = [0] * (seq_len - n_pad) + [1] * n_pad
+        # position within each piece, restarting at 0 for every piece (a long
+        # record's continuation chunk too) and for the padding: `doc_masking`
+        # passes these as position_ids, and flash-attention's varlen path
+        # takes every 0 as the start of a new attention segment
+        out["doc_pos"] = [i for _, _, n in pieces for i in range(n)] + list(
+            range(n_pad)
+        )
+        yield out
+
+
 def pr_auc_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
     precs, recs, *_ = skl_mets.precision_recall_curve(
         y_true, np.round(y_score, decimals=4), drop_intermediate=True

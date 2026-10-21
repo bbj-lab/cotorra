@@ -14,7 +14,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from cotorra.configurable import Configurable
 from cotorra.model import HEADS, DispositionHead, TteHead, head_options
-from cotorra.util import batched_iter
+from cotorra.util import batched_iter, best_fit_packed_iter
 
 # the positions of a record that each head with a `target_weight` scores -- the
 # ones its loss doesn't mask -- as a polars expression over the record's targets
@@ -218,17 +218,42 @@ class Loader(Configurable):
         )
 
     def get_train_data(self) -> ds.Dataset:
+        # packing: "concat" (default) concatenates the shuffled records and cuts
+        # every max_seq_len tokens; "bfd" packs them whole by Best-fit
+        # Decreasing, splitting only records longer than max_seq_len. See
+        # util.best_fit_packed_iter
+        packing = self.cfg.get("packing", "concat")
+        assert packing in ("concat", "bfd"), f"packing: {packing!r}"
+        dset = (
+            self.dataset[self.splits[0]]
+            .repeat(self.cfg.n_epochs)
+            .shuffle(generator=self.rng)
+        )
+        if packing == "bfd":
+            generator, extra = best_fit_packed_iter, {"rng": self.rng}
+        else:
+            generator, extra = batched_iter, {}
         return ds.Dataset.from_generator(
-            batched_iter,
-            gen_kwargs={
-                "dset": self.dataset[self.splits[0]]
-                .repeat(self.cfg.n_epochs)
-                .shuffle(generator=self.rng),
-                "seq_len": self.cfg.max_seq_len,
-            },
+            generator,
+            gen_kwargs={"dset": dset, "seq_len": self.cfg.max_seq_len, **extra},
         ).with_format("torch")
 
     def get_tuning_data(self) -> ds.Dataset:
+        if self.cfg.get("doc_masking", False):
+            # evaluate in the training format: BFD-packed, and (through the
+            # collator) flattened with each record masked from the others.
+            # Concatenated, a doc_masking model is scored on context it never
+            # trains on, which inflates eval_loss and misleads both the Optuna
+            # objective and checkpoint selection. Its own generator, so the
+            # packing does not depend on what the training data consumed.
+            return ds.Dataset.from_generator(
+                best_fit_packed_iter,
+                gen_kwargs={
+                    "dset": self.dataset[self.splits[1]],
+                    "seq_len": self.cfg.max_seq_len,
+                    "rng": np.random.default_rng(42),
+                },
+            ).with_format("torch")
         return ds.Dataset.from_generator(
             batched_iter,
             gen_kwargs={

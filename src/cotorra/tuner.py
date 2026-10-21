@@ -5,10 +5,11 @@ train a model with hyperparameter tuning
 """
 
 import functools
+import shutil
 
 import optuna
 from omegaconf import OmegaConf
-from transformers import TrainingArguments
+from transformers import TrainerCallback, TrainingArguments
 
 from cotorra.trainer import Trainer
 
@@ -19,9 +20,20 @@ DEFAULT_HP_SPACE = {
 }
 
 
+class _PruneTrialCheckpoints(TrainerCallback):
+    def __init__(self, output_home):
+        self.output_home = output_home
+
+    def on_train_end(self, args, state, control, **kwargs):
+        for d in self.output_home.glob("run-*/checkpoint-*"):
+            shutil.rmtree(d, ignore_errors=True)
+
+
 class Tuner(Trainer):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
+        if self.cfg.get("prune_trial_checkpoints", False):
+            self.trainer.add_callback(_PruneTrialCheckpoints(self.output_home))
 
     @staticmethod
     def optuna_hp_space(
