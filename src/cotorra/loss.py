@@ -116,7 +116,11 @@ class Loss:
         if not self.n_cats:
             return t.zeros((), device=logits.device, dtype=t.float32)
         shift_labels = labels[:, 1:].to(logits.device)
-        cat = self.label_to_cat.to(logits.device)[shift_labels]
+        # a -100 label isn't a target (`packing: bfd`'s padding, say), and has no
+        # category; read as an index, it would name a token from the vocab's end
+        scored = shift_labels != -100
+        shift_labels = shift_labels.clamp(min=0)
+        cat = self.label_to_cat.to(logits.device)[shift_labels].masked_fill(~scored, -1)
         is_q = cat >= 0
         # gathered at every position, so no shape depends on the data and nothing
         # waits on the host; a position without a quantile token borrows category
@@ -138,11 +142,13 @@ class Loss:
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = labels[:, 1:].contiguous()
-        return t.nn.CrossEntropyLoss(
+        weighted = t.nn.CrossEntropyLoss(
             weight=self.weights.to(logits.device, dtype=logits.dtype)
         )(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)).to(
             dtype=t.float32
         )
+        # as for `x_ent_loss`
+        return t.where((shift_labels != -100).any(), weighted, 0.0)
 
     def balanced_toi_loss(self, outputs: dict, labels: t.Tensor, **kwargs) -> t.Tensor:
         """
@@ -157,19 +163,29 @@ class Loss:
         """
         logits = outputs.get("logits")[:, :-1].to(dtype=t.float32)
         flag = self.balanced_toi_flag.to(logits.device)
-        is_toi = flag[labels[:, 1:].to(logits.device)]
+        shift_labels = labels[:, 1:].to(logits.device)
+        # averaged over the positions with a target, skipping a -100 label, as
+        # cross-entropy does (summed then normalized, so that a batch with none
+        # still yields a differentiable 0.0)
+        scored = shift_labels != -100
+        is_toi = flag[shift_labels.clamp(min=0)]
         lse_toi = logits[..., flag].logsumexp(dim=-1)
         lse_rest = logits.masked_fill(flag, -t.inf).logsumexp(dim=-1)
         lse_all = t.logaddexp(lse_toi, lse_rest)
-        return -t.where(is_toi, lse_toi - lse_all, lse_rest - lse_all).mean()
+        nll = -t.where(is_toi, lse_toi - lse_all, lse_rest - lse_all)
+        return t.where(scored, nll, 0.0).sum() / scored.sum().clamp(min=1)
 
     def x_ent_loss(self, outputs: dict, labels: t.Tensor, **kwargs) -> t.Tensor:
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = labels[:, 1:].contiguous()
-        return t.nn.CrossEntropyLoss()(
+        x_ent = t.nn.CrossEntropyLoss()(
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
         ).to(dtype=t.float32)
+        # a mean over no target at all -- every label -100, which `packing: bfd`
+        # can leave a batch -- is nan: 0.0 then, its gradient 0 rather than nan,
+        # and the mean itself, to the bit, whenever there's a target
+        return t.where((shift_labels != -100).any(), x_ent, 0.0)
 
     def head_loss(self, outputs: dict, name: str) -> t.Tensor:
         """a secondary head's term, which the model computes itself -- it owns the

@@ -137,7 +137,8 @@ The trainer consumes the tokenized timelines and fits a causal language model to
 predict the next token in each subject's timeline. It:
 
 1. Builds a next-token-prediction dataset from `tokens_times.parquet` and the
-   subject splits.
+   subject splits, packing the records into fixed-length rows, optionally whole
+   and each attending only to itself.
 2. Initializes a HuggingFace causal LM from a preset (or a custom architecture
    config).
 3. Optionally applies custom losses that teach the ordering of quantile bins or
@@ -165,6 +166,17 @@ that specifies:
 
 - **max_seq_len**: Maximum sequence length for model input.
 - **n_epochs**: Number of epochs (handled in the dataloader, not the trainer).
+- **packing** _(optional)_: How training records are packed into rows of
+  `max_seq_len` tokens: `concat` (default) joins them end to end, and `bfd` packs
+  them whole, padding the room left over. See
+  [Packing records](#packing-records).
+- **doc_masking** _(optional)_: With `packing: bfd`, keeps each packed record
+  from attending to the others in its row (default: `false`). See
+  [Packing records](#packing-records).
+- **attn_implementation** _(optional)_: The attention implementation the model is
+  built with, e.g. `sdpa`, `eager` or, with
+  [flash-attn](https://github.com/Dao-AILab/flash-attention) installed,
+  `flash_attention_2` (default: transformers' own choice, usually `sdpa`).
 - **run_name**: Name for the current run (referenced by `wandb` and
   `training_args`).
 - **tokens_of_interest**: List of special tokens to upweight during training
@@ -248,6 +260,13 @@ that specifies:
 
 - **training_args**: Arguments passed to HuggingFace's
   [`TrainingArguments`](https://huggingface.co/docs/transformers/en/main_classes/trainer#transformers.TrainingArguments).
+
+    _Note:_ Don't set `label_smoothing_factor`. HuggingFace smooths only its own
+    loss, so with `custom_loss: true` the setting does nothing, and cotorra
+    warns. With `custom_loss: false` and a secondary head, HuggingFace would drop
+    the heads' terms and score each token against itself, so cotorra refuses it.
+    Only a model without heads, on `custom_loss: false`, is smoothed as intended.
+
 - **tuning_args**: Arguments passed to HuggingFace's
   [`hyperparameter_search`](https://huggingface.co/docs/transformers/hpo_train?backends=Optuna)
   when `cotorra tune` is called.
@@ -257,6 +276,10 @@ that specifies:
       (`low`, `high`, `step`, `log`; `choices` for `categorical`). Without it,
       the search covers `learning_rate` (1e-4 to 5e-4, log-scaled) and
       `gradient_accumulation_steps` (1 to 3).
+- **prune_trial_checkpoints** _(optional)_: Deletes each trial's checkpoints
+  (`run-*/checkpoint-*` under `--output-home`) as the trial ends, when
+  `cotorra tune` is called (default: `false`). The model it saves is trained
+  afresh after the search, so nothing it needs is lost, only disk space saved.
 
 ### Model presets
 
@@ -284,6 +307,57 @@ individual `model_args` entries as needed.
 > [training.yaml](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/training.yaml) file to control the frequency
 > of checkpointing.
 <!-- prettier-ignore-end -->
+
+### Packing records
+
+Training packs the subjects' timelines into rows of `max_seq_len` tokens, in one
+of two ways:
+
+- `packing: concat`, the default, joins the shuffled records end to end and cuts
+  the result every `max_seq_len` tokens. Records straddle rows, and the last,
+  partial row is dropped.
+- `packing: bfd` packs the records whole, by best-fit decreasing
+  ([Ding et al., 2024](https://arxiv.org/abs/2404.10830)). A record is split only
+  when it's longer than `max_seq_len`, into chunks of at most that length. Each
+  chunk, longest first, goes into the row with the least room left that still
+  fits it. Nothing is dropped: the room left over is padded instead, and the
+  padding is never a target, for next-token prediction or for a secondary head.
+  With `n_epochs` above 1, each epoch is packed apart, so that no row holds a
+  record twice, where the later copy could attend to the earlier one.
+
+Either way, a token attends to the records packed before it in its row. With
+`packing: bfd`, `doc_masking: true` stops that. Each packed record attends only
+to itself, its position ids count from 0, and its first token isn't a target,
+since it would be predicted from an unrelated record. Evaluation then packs the
+tuning split the same way, so that `eval_loss`, which picks the best checkpoint
+and which `cotorra tune` minimizes, scores the model as it trains. Without
+`doc_masking`, the tuning split is concatenated, whichever the `packing`.
+
+```yaml
+packing: bfd
+doc_masking: !!bool true
+# attn_implementation: flash_attention_2 # faster on a GPU, with flash-attn installed
+```
+
+A few things to know:
+
+- `packing: bfd` needs `training_args.remove_unused_columns: false`, as the
+  packaged config sets it. Otherwise HuggingFace drops the columns marking the
+  padding, so cotorra refuses to train without it.
+- `doc_masking` needs no particular attention implementation. For `sdpa` (the
+  default) and `eager`, transformers builds a block-diagonal mask from the
+  position ids that restart at each record. For `flash_attention_2`, whether set
+  by `attn_implementation` or in `model.model_args`, cotorra flattens each batch
+  into a single row, which flash attention's variable-length kernels split where
+  the position ids restart. `nn.DataParallel`, which splits a batch by its rows,
+  can't take a single row, so cotorra refuses flash attention under `doc_masking`
+  when one process sees several GPUs: launch one process per GPU instead, with
+  `torchrun` or `accelerate launch`. Either way, the model's KV cache has to be
+  off, so the saved model carries `use_cache: false`. To generate from it with a
+  cache, set `model.generation_config.use_cache = True` after loading it.
+- Under `doc_masking`, each chunk of a record longer than `max_seq_len` attends
+  only to itself, so its tokens can't see where their record began.
+- `doc_masking` doesn't yet work with the secondary heads or `time_based_rope`.
 
 ### Training secondary heads
 
@@ -337,7 +411,10 @@ To train one or more:
     Each weight defaults to `1.0`, so empty blocks work too. With
     `custom_loss: true` (as shipped), the weighted terms are added to the custom
     next-token loss; otherwise the model adds them to HuggingFace's standard loss
-    itself.
+    itself, each term in training counting its batch's share of the step's
+    tokens, as HuggingFace's own does, so that a weight means the same whatever
+    `gradient_accumulation_steps` and however many processes train. (Through
+    v26.10.1, training multiplied those weights by both.)
 
 2. **Tokenize with end times (TTE head only).** The TTE head trains on an
    `hours_to_end_time` column, which cocoa writes only when asked. Copy cocoa's

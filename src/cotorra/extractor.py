@@ -138,9 +138,14 @@ class Extractor(Configurable):
                 / self.cfg.time_based_rope.sec_per_pos_id
             )
             p_ids += t.arange(p_ids.shape[-1], device=p_ids.device, dtype=p_ids.dtype)
+            # as `Trainer.collate_fn` passes it: without a mask, a checkpoint
+            # saved with `use_cache: false` would start a new sequence wherever
+            # these ids don't step by exactly 1, as at every gap between
+            # timestamps, and attend only within one
+            mask = t.ones_like(input_ids)
         else:
-            p_ids = None
-        return {"input_ids": input_ids, "position_ids": p_ids}
+            p_ids = mask = None
+        return {"input_ids": input_ids, "position_ids": p_ids, "attention_mask": mask}
 
     def _check_heads(self, heads: collections.abc.Iterable[str]) -> list[str]:
         """`heads`, names in `HEAD_COLUMNS` (or just one), without repeats, once

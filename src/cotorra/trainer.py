@@ -21,6 +21,7 @@ from transformers import (
 from transformers import Trainer as t_Trainer
 from transformers.trainer_pt_utils import find_batch_size, nested_gather
 from transformers.trainer_utils import EvalLoopOutput, TrainOutput
+from transformers.utils.generic import is_flash_attention_requested
 
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
@@ -81,10 +82,11 @@ class TrainerWithCustomLoss(t_Trainer):
             labels = inputs.pop("labels", None)
             if getattr(self, "doc_masking", False):
                 # masking silently does not happen with a KV cache, so refuse
-                # rather than train unmasked
-                assert not getattr(model.config, "use_cache", False), (
-                    "doc_masking batch reached a model with use_cache=True"
-                )
+                # rather than train unmasked; asked of the model itself, which
+                # DDP and DataParallel wrap
+                assert not getattr(
+                    self.accelerator.unwrap_model(model).config, "use_cache", False
+                ), "doc_masking batch reached a model with use_cache=True"
             outputs = model(**inputs)
             # a `compute_loss_func` fills `terms` as `Loss.custom_loss` does, or
             # takes it in a `**kwargs` and leaves it empty
@@ -100,9 +102,11 @@ class TrainerWithCustomLoss(t_Trainer):
             if model.training:
                 # with a custom loss set, hf's `training_step` leaves averaging
                 # over gradient accumulation to it -- which a per-batch mean
-                # doesn't do -- so the accumulated micro-batches would sum; this
-                # is the division hf's stock path makes (set only inside its
-                # training loop, hence the default)
+                # doesn't do -- so the accumulated micro-batches would sum. This
+                # weights each micro-batch alike, where hf's stock loss weights
+                # each scored token alike: the same while every micro-batch scores
+                # as many tokens, as concatenated rows do and `packing: bfd`'s
+                # needn't (set only inside its training loop, hence the default)
                 loss = loss / getattr(self, "current_gradient_accumulation_steps", 1)
             return (loss, outputs) if return_outputs else loss
         else:
@@ -184,19 +188,47 @@ class Trainer(Configurable):
         # optional, and None when left empty
         wandb_cfg = self.cfg.get("wandb") or {}
         self.run_name = self.cfg.get("run_name", wandb_cfg.get("run_name", ""))
-        # the merged config, not the file it came from, so overrides reach it too
+        packing = self.cfg.get("packing", "concat")
+        if packing == "bfd" and self.cfg.training_args.get(
+            "remove_unused_columns", True
+        ):
+            # hf's default, which drops every column the model's `forward` doesn't
+            # name: padding that loses its `pad_mask` trains as targets, silently
+            raise ValueError(
+                "`packing: bfd` needs `training_args.remove_unused_columns: false`, "
+                "or hf drops the `pad_mask` and `doc_pos` columns that keep its "
+                "padding out of the loss"
+            )
         if self.cfg.get("doc_masking", False):
-            # without these, the flattened batch would silently train with
-            # plain causal attention across every packed record
-            assert self.cfg.get("packing", "concat") == "bfd", (
-                "doc_masking needs packing: bfd"
-            )
-            assert self.cfg.get("attn_implementation") == "flash_attention_2", (
-                "doc_masking needs attn_implementation: flash_attention_2"
-            )
-            assert not self.head_options and "time_based_rope" not in self.cfg, (
-                "doc_masking does not yet support secondary heads or time_based_rope"
-            )
+            # each record attends only to itself through position ids restarting
+            # at every packed piece, which bfd's `doc_pos` provides; time-based
+            # position ids would take their place
+            if packing != "bfd":
+                raise ValueError("`doc_masking` needs `packing: bfd`")
+            if self.head_options or "time_based_rope" in self.cfg:
+                raise ValueError(
+                    "`doc_masking` does not yet support secondary heads or "
+                    "`time_based_rope`"
+                )
+        if self.cfg.training_args.get("label_smoothing_factor", 0):
+            # hf smooths only its own loss: a custom loss replaces it, and for a
+            # model with heads hf drops their terms and, the class missing from
+            # the causal-lm names it shifts labels for, scores each token
+            # against itself
+            if self.loss is not None:
+                warnings.warn(
+                    "`training_args.label_smoothing_factor` has no effect with "
+                    "`custom_loss: true`, whose loss replaces the one hf smooths",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            elif self.head_options:
+                raise ValueError(
+                    "`training_args.label_smoothing_factor` with a secondary head "
+                    "and `custom_loss: false` would train the heads not at all and "
+                    "score each token against itself; leave it at 0"
+                )
+        # the merged config, not the file it came from, so overrides reach it too
         self.loader = Loader(self.cfg, self.processed_data_home)
 
         self.trainer = TrainerWithCustomLoss(
@@ -211,6 +243,18 @@ class Trainer(Configurable):
         )
         self.model = self.trainer.model
         self.trainer.doc_masking = bool(self.cfg.get("doc_masking", False))
+        if (
+            self.trainer.doc_masking
+            and self.trainer.args.n_gpu > 1
+            and is_flash_attention_requested(config=self.model.config)
+        ):
+            # the batch, flattened into one row for flash attention, would go to
+            # a single replica whole, and hf's stock loss be scaled for them all
+            raise ValueError(
+                "`doc_masking` with flash attention flattens each batch into a single "
+                "row, which `nn.DataParallel` can't split across gpus; launch a "
+                "process per gpu instead (`torchrun`, or `accelerate launch`)"
+            )
 
         os.environ["WANDB_PROJECT"] = wandb_cfg.get("project", "cotorra")
         os.environ["WANDB_NAME"] = wandb_cfg.get("run_name", "cotorra")
@@ -225,15 +269,16 @@ class Trainer(Configurable):
             self.cfg.model.model_name, **conf_param, **self.cfg.model.model_args
         )
         if self.cfg.get("doc_masking", False):
-            # with a KV cache, transformers skips flash-attention's varlen path
-            # and the packed records attend to each other. HF applies
-            # training_args.use_cache only to the model it builds in __init__,
-            # not to the one model_init rebuilds in train()
+            # transformers reads restarting position ids as separate sequences
+            # only without a KV cache, which the model otherwise builds even in
+            # training, and the packed records would attend to each other. HF
+            # applies training_args.use_cache only to the model it builds in
+            # __init__, not to the one model_init rebuilds in train()
             config.use_cache = False
         if self.head_options:
             config = CotorraConfig(text_config=config, heads=self.head_options)
-        # attn_implementation: e.g. flash_attention_2, which doc_masking needs;
-        # unset keeps transformers' default (sdpa)
+        # attn_implementation: e.g. eager or, with flash-attn installed,
+        # flash_attention_2; unset keeps transformers' default (sdpa)
         attn = self.cfg.get("attn_implementation", None)
         mdl = AutoModelForCausalLM.from_config(
             config, **({"attn_implementation": attn} if attn else {})
@@ -263,6 +308,12 @@ class Trainer(Configurable):
             )
             p_ids += t.arange(p_ids.shape[-1], device=p_ids.device, dtype=p_ids.dtype)
             f_set["position_ids"] = p_ids
+            # every token attends to all those before it: given neither a mask nor
+            # a KV cache (which gradient checkpointing turns off), transformers
+            # starts a new packed sequence wherever these ids don't step by exactly
+            # 1, as at every gap between timestamps. Flash attention drops a mask
+            # of ones, though, and still reads a one-row batch's ids that way
+            f_set["attention_mask"] = t.ones_like(input_ids)
         for name, options in self.head_options.items():
             target, weights = HEADS[name].target, HEADS[name].target_weight
             f_set[target] = t.stack([x[target] for x in batch])
@@ -270,23 +321,35 @@ class Trainer(Configurable):
                 # the weights the loader gives each record, beside its target
                 f_set[weights] = t.stack([x[weights] for x in batch])
         if "pad_mask" in batch[0]:
-            # padding left by `packing: bfd` (util.best_fit_packed_iter): its
-            # positions are never targets, which CrossEntropyLoss skips at -100
+            # padding left by `packing: bfd` (util.best_fit_packed_iter) is never
+            # a target, neither the lm's (-100, which every loss skips) nor a
+            # head's (nan, or -100 for a class). Nothing else needs masking: a
+            # piece ends short of its row only where its record ends (a split
+            # record's other chunks each fill a row), and a record's last token
+            # has no time to the next, so a mixture time-to-next-token head never
+            # conditions a gap on another record's token
             pad = t.stack([x["pad_mask"] for x in batch]).bool()
             f_set["labels"] = f_set["labels"].masked_fill(pad, -100)
-        if self.cfg.get("doc_masking", False) and "doc_pos" in batch[0]:
-            # cross-record attention masking for `packing: bfd` batches (train
-            # and eval): flatten to one row whose position_ids restart at every
-            # packed piece, which transformers' flash_attention_2 turns into
-            # varlen segments (it only does so for a batch of ONE row). A
-            # piece's first token is never a target -- it would be predicted
-            # from the previous, unrelated piece.
+            for name in self.head_options:
+                target = HEADS[name].target
+                f_set[target] = f_set[target].masked_fill(
+                    pad, t.nan if f_set[target].is_floating_point() else -100
+                )
+        if self.cfg.get("doc_masking", False):
+            # each packed piece attends only to itself, by position ids restarting
+            # at every one, which transformers -- given no attention mask or KV
+            # cache -- reads as separate sequences: a block-diagonal causal mask
+            # per row for sdpa and eager attention, and for flash attention,
+            # whose varlen path takes only a batch of one row, once the batch is
+            # flattened into one -- read off the model, so that one built with it
+            # through `model.model_args` counts too. A piece's first token is
+            # never a target: it would be predicted from the previous, unrelated
+            # piece
             pos = t.stack([x["doc_pos"] for x in batch])
-            return {
-                "input_ids": input_ids.reshape(1, -1),
-                "labels": f_set["labels"].masked_fill(pos == 0, -100).reshape(1, -1),
-                "position_ids": pos.reshape(1, -1),
-            }
+            f_set["labels"] = f_set["labels"].masked_fill(pos == 0, -100)
+            f_set["position_ids"] = pos
+            if is_flash_attention_requested(config=self.trainer.model.config):
+                f_set = {k: v.reshape(1, -1) for k, v in f_set.items()}
         return f_set
 
     def train(
