@@ -1,56 +1,56 @@
 ---
 title: "Cotorra for training generative models on tokenized event sequences"
 tags:
-  - electronic health records
-  - foundation models
-  - generative event models
-  - healthcare
-  - machine learning
-  - transformers
+    - electronic health records
+    - foundation models
+    - generative event models
+    - healthcare
+    - machine learning
+    - transformers
 authors:
-  - surname: Burkhart
-    given-names: Michael C.
-    orcid: 0000-0002-2772-5840
-    affiliation: 1
-  - surname: Solo
-    given-names: Luke
-    orcid: 0009-0004-2101-2120
-    affiliation: 1
-  - surname: Lee
-    given-names: Inhyeok
-    orcid: 0009-0005-2396-7753
-    affiliation: 1
-  - surname: Charles
-    given-names: S'Khaja
-    orcid: 0000-0002-0188-1175
-    affiliation: 1
-  - surname: Woo
-    given-names: Elizabeth Geena
-    orcid: 0000-0002-8462-718X
-    affiliation: 1
-  - surname: Chaudhari
-    given-names: Vaishvik
-    orcid: 0009-0006-7507-6634
-    affiliation: 2
-  - surname: Hieromnimon
-    given-names: Hanna
-    orcid: 0000-0001-8727-5290
-    affiliation: 1
-  - surname: Parker
-    given-names: William F.
-    orcid: 0000-0002-6000-3153
-    affiliation: 1
-  - surname: Beaulieu-Jones
-    given-names: Brett K.
-    orcid: 0000-0002-6700-1468
-    affiliation: 1
+    - surname: Burkhart
+      given-names: Michael C.
+      orcid: 0000-0002-2772-5840
+      affiliation: 1
+    - surname: Solo
+      given-names: Luke
+      orcid: 0009-0004-2101-2120
+      affiliation: 1
+    - surname: Lee
+      given-names: Inhyeok
+      orcid: 0009-0005-2396-7753
+      affiliation: 1
+    - surname: Charles
+      given-names: S'Khaja
+      orcid: 0000-0002-0188-1175
+      affiliation: 1
+    - surname: Woo
+      given-names: Elizabeth Geena
+      orcid: 0000-0002-8462-718X
+      affiliation: 1
+    - surname: Chaudhari
+      given-names: Vaishvik
+      orcid: 0009-0006-7507-6634
+      affiliation: 2
+    - surname: Hieromnimon
+      given-names: Hanna
+      orcid: 0000-0001-8727-5290
+      affiliation: 1
+    - surname: Parker
+      given-names: William F.
+      orcid: 0000-0002-6000-3153
+      affiliation: 1
+    - surname: Beaulieu-Jones
+      given-names: Brett K.
+      orcid: 0000-0002-6700-1468
+      affiliation: 1
 affiliations:
-  - name: University of Chicago, U.S.A.
-    index: 1
-    ror: 024mw5h28
-  - name: Rush University, U.S.A.
-    index: 2
-    ror: 01k9xac83
+    - name: University of Chicago, U.S.A.
+      index: 1
+      ror: 024mw5h28
+    - name: Rush University, U.S.A.
+      index: 2
+      ror: 01k9xac83
 date: 23 October 2026
 bibliography: paper.bib
 ---
@@ -77,7 +77,7 @@ novel sequences typically proceeds in one of the following ways (see Figure
    off-the-shelf classifiers such a logistic regression or gradient boosted
    decision trees that can be learned with a fraction of the compute required to
    train the original model. Commonly abbreviated as rep-based inference, @Wor23,
-   @Wor25, @Lee26, @Guo26, and @Zha26 provide notable examples.
+   @Guo24, @Wor25, @Lee26, @Guo26, and @Zha26 provide notable examples.
 
 2. _Generative inference_ applies the generative capabilities of the trained
    model directly to a novel sequence to sample potential completions of the
@@ -119,7 +119,7 @@ converting data into the MEDS format and for training models. The Vector
 Institute's [odyssey](https://github.com/VectorInstitute/odyssey) library grew
 out of EHRMamba [@Fal25]; it has migrated to MEDS. The Shah lab's
 [femr](https://github.com/som-shahlab/femr) library grew out of work on the MOTOR
-[@Ste24] paper; at the time of writing, the most recent commit occured over a
+[@Ste24] paper; at the time of writing, the most recent commit occurred over a
 year ago.
 
 # Software design
@@ -132,7 +132,7 @@ Each of the library's main commands---`train`, `tune`, `extract`,
 `rep-based-score`, and `generative-score`---are configurable via yaml files to
 allow for substantial customization without requiring a working knowledge of
 python. Configuration overrides can also be passed as command line arguments, to
-prevent the need to maintain multiple similiar configurations.
+prevent the need to maintain multiple similar configurations.
 
 ## Training / tuning
 
@@ -143,6 +143,7 @@ Face's `transformers` library [@Wol20], and offers configurable:
   @Zau25),
 - time-to-event, time-to-next-token, and classification-style heads,
 - time-based RoPE [@Wei26],
+- best-fit sequence packing [@Din24],
 
 and can report training metrics to the platform formerly known as weights and
 biases, as seen in Figure \ref{fig:scrnsht}.
@@ -196,5 +197,3 @@ by the Biological Sciences Division and the Institute for Translational
 Medicine/CTSA (NIH UL1TR002389).
 
 # References
-
-<!-- docker run --rm --volume $PWD:/data --user $(id -u):$(id -g) --env JOURNAL=joss openjournals/inara -->
