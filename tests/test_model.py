@@ -415,6 +415,28 @@ def test_the_loss_adds_each_heads_weighted_term(model):
     assert full.loss.item() == pytest.approx(expected, rel=1e-5)
 
 
+def test_given_the_steps_token_count_each_heads_term_counts_its_share(model):
+    """
+    hf's trainer, on `custom_loss: false`, passes `num_items_in_batch` in
+    training: the tokens scored over the whole step, every batch it accumulates
+    toward one (and every process's), over which the lm's term sums this
+    batch's losses. Each head's term is weighted by this batch's share of them
+    too, so that the loss is the batch's own scaled by that share; a head's
+    mean added as it is counted once a batch, its weight multiplied by the
+    accumulation steps. Without the count, as in evaluation, it's the batch's own
+    """
+    x = ids(2, 7)
+    labels = x.masked_fill(
+        t.tensor([[0, 0, 1, 0, 0, 0, 1], [0, 1, 0, 0, 0, 0, 0]]) == 1, -100
+    )
+    batch = {"input_ids": x, "labels": labels, **targets(model.heads)}
+    own = model(**batch).loss.item()
+    scored = int((labels[:, 1:] != -100).sum())
+    for step in (scored, 3 * scored):  # this batch alone, or a third of the step
+        counted = model(**batch, num_items_in_batch=t.tensor(step)).loss.item()
+        assert counted == pytest.approx(own * scored / step, rel=1e-5)
+
+
 def test_each_head_is_scored_without_labels(model):
     """
     on cotorra's default `custom_loss: true`, `TrainerWithCustomLoss` pops
@@ -1390,14 +1412,18 @@ def test_an_objective_naming_no_head_is_refused(processed, tmp_path):
 def test_the_model_consumes_what_the_trainers_collator_produces(configured):
     """
     the contract between `Trainer.collate_fn` and the model: the batch carries
-    float `position_ids` (time-based rope) and each configured head's target,
+    float `position_ids` (time-based rope), with the mask of ones that keeps
+    their jumps from splitting attention, and each configured head's target,
     and nothing else is needed
     """
     n_vocab = len(configured.tkzr_cfg.lookup)
     collated = configured.collate_fn(rows(n_vocab, n_classes(configured), 4))
-    assert set(collated) == {"input_ids", "labels", "position_ids"} | {
-        HEADS[name].target for name in configured.head_options
-    }
+    assert set(collated) == {
+        "input_ids",
+        "labels",
+        "position_ids",
+        "attention_mask",
+    } | {HEADS[name].target for name in configured.head_options}
 
     out = configured.model_init()(**collated)
     assert out.logits.shape == (2, 4, n_vocab)
@@ -1422,6 +1448,7 @@ def test_a_per_record_objective_batches_its_weights_beside_its_target(
         "input_ids",
         "labels",
         "position_ids",
+        "attention_mask",
         HEADS[name].target,
         HEADS[name].target_weight,
     }

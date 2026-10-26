@@ -8,7 +8,7 @@ from helpers import base_training_cfg, default_cfg, write_cfg
 from omegaconf import OmegaConf
 from transformers.trainer_utils import BestRun
 
-from cotorra.tuner import DEFAULT_HP_SPACE, Tuner
+from cotorra.tuner import DEFAULT_HP_SPACE, Tuner, _PruneTrialCheckpoints
 
 
 def test_optuna_hp_space_suggests_expected_ranges():
@@ -297,3 +297,49 @@ def test_a_real_search_trains_the_final_model_with_hyperparameters_from_the_spac
     assert args.lr_scheduler_type in ("constant", "cosine")
     assert args.warmup_steps in (1, 2, 3)
     assert (tmp_path / "out" / "mdl-test-run" / "config.json").is_file()
+
+
+# ----------------------------------------------------- pruning trial checkpoints
+
+
+@pytest.mark.parametrize("prune", [True, False])
+def test_trial_checkpoints_are_pruned_only_when_asked(prune, processed, tmp_path):
+    tuner = tuner_with(
+        processed,
+        tmp_path,
+        base_training_cfg()["tuning_args"],
+        prune_trial_checkpoints=prune,
+    )
+    callbacks = tuner.trainer.callback_handler.callbacks
+    assert sum(isinstance(cb, _PruneTrialCheckpoints) for cb in callbacks) == prune
+
+
+def test_pruning_deletes_every_trials_checkpoints_and_nothing_else(tmp_path):
+    """the final model's own checkpoints, outside `run-*`, and whatever else the
+    output home holds, stay"""
+    for d in ("run-0/checkpoint-2", "run-1/checkpoint-4", "checkpoint-6", "mdl-x"):
+        (tmp_path / d).mkdir(parents=True)
+        (tmp_path / d / "model.safetensors").touch()
+    _PruneTrialCheckpoints(tmp_path).on_train_end(None, None, None)
+    assert sorted(
+        str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_dir()
+    ) == ["checkpoint-6", "mdl-x", "run-0", "run-1"]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("prune", [True, False])
+def test_a_real_search_leaves_its_trials_checkpoints_only_unpruned(
+    prune, processed, tmp_path
+):
+    tuning_args = {"direction": "minimize", "backend": "optuna", "n_trials": 1}
+    tuner = tuner_with(
+        processed,
+        tmp_path,
+        tuning_args,
+        overrides=["training_args.save_strategy=steps", "training_args.save_steps=2"],
+        prune_trial_checkpoints=prune,
+    )
+    tuner.train()
+    out = tmp_path / "out"
+    assert bool(list(out.glob("run-*/checkpoint-*"))) is not prune
+    assert (out / "mdl-test-run" / "config.json").is_file()

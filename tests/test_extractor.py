@@ -353,6 +353,20 @@ def test_dropping_time_based_rope_changes_the_extracted_features(
     assert not np.allclose(with_rope, without_rope)
 
 
+def test_time_based_features_are_the_same_whether_the_checkpoint_caches_or_not(
+    extractor, sample_batch, monkeypatch
+):
+    """a checkpoint saved with `use_cache: false` builds no KV cache, and given
+    neither it nor the mask of ones `collate_fn` passes, transformers would
+    start a new sequence wherever position ids don't step by exactly 1, as
+    time-based ones don't at any gap between timestamps"""
+    features = dict()
+    for use_cache in (False, True):
+        monkeypatch.setattr(extractor.model.config, "use_cache", use_cache)
+        features[use_cache] = extractor.extract_final(dict(sample_batch))["features"]
+    np.testing.assert_allclose(features[False], features[True], rtol=1e-3, atol=1e-3)
+
+
 # ----------------------------------------------- the secondary heads' columns
 
 ALL_HEADS = ("tte", "tnt", "disposition")
@@ -827,8 +841,9 @@ def test_the_end_times_reach_neither_the_model_nor_the_tables(
 ):
     """
     inference tables winnowed with end times carry the outcome itself, as
-    `hours_to_end_time_past`; the model is still handed nothing but the tokens
-    and their position ids, and no feature table is written with the column
+    `hours_to_end_time_past`; the model is still handed nothing but the tokens,
+    their position ids and a mask of ones, and no feature table is written with
+    the column
     """
     extractor = extract_from(
         model_with_heads("tte"),
@@ -854,7 +869,12 @@ def test_the_end_times_reach_neither_the_model_nor_the_tables(
     assert calls
     for args, kwargs in calls:
         assert args == ()
-        assert kwargs == ["input_ids", "output_hidden_states", "position_ids"]
+        assert kwargs == [
+            "attention_mask",
+            "input_ids",
+            "output_hidden_states",
+            "position_ids",
+        ]
 
 
 def test_only_the_context_bears_on_what_is_extracted(
