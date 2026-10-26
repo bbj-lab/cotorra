@@ -1,0 +1,53 @@
+{
+  "contributors": [
+    {
+      "name": "Burkhart, Michael C.",
+      "affiliation": "University of Chicago",
+      "orcid": "0000-0002-2772-5840"
+    },
+    {
+      "name": "Solo, Luke",
+      "affiliation": "University of Chicago",
+      "orcid": "0009-0004-2101-2120"
+    },
+    {
+      "name": "Lee, Inhyeok",
+      "affiliation": "University of Chicago",
+      "orcid": "0009-0005-2396-7753"
+    },
+    {
+      "name": "Charles, S'Khaja",
+      "affiliation": "University of Chicago",
+      "orcid": "0000-0002-0188-1175"
+    },
+    {
+      "name": "Woo, Elizabeth Geena",
+      "affiliation": "University of Chicago",
+      "orcid": "0000-0002-8462-718X"
+    },
+    {
+      "name": "Chaudhari, Vaishvik",
+      "affiliation": "Rush University",
+      "orcid": "0009-0006-7507-6634"
+    },
+    {
+      "name": "Hieromnimon, Hanna",
+      "affiliation": "University of Chicago",
+      "orcid": "0000-0001-8727-5290"
+    },
+    {
+      "name": "Parker, William",
+      "affiliation": "University of Chicago",
+      "orcid": "0000-0002-6000-3153"
+    },
+    {
+      "name": "Beaulieu-Jones, Brett K.",
+      "affiliation": "University of Chicago",
+      "orcid": "0000-0002-6700-1468"
+    }
+  ],
+  "title": "Cotorra: a configurable trainer",
+  "license": "mit",
+  "upload_type": "software",
+  "language": "eng"
+}
