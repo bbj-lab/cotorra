@@ -1,0 +1,40 @@
+name: draft pdf
+
+# compiles the joss paper, as the journal's editorial bot will, and uploads it as an
+# artifact of the run; see https://github.com/openjournals/openjournals-draft-action
+on:
+  push:
+    paths:
+      - joss-submission/**
+      - .github/workflows/draft-pdf.yml
+  pull_request:
+    paths:
+      - joss-submission/**
+      - .github/workflows/draft-pdf.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  paper:
+    name: paper draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      # the same openjournals/inara image as the local docker command in
+      # joss-submission/README.md; it writes paper.pdf next to paper.md
+      - uses: openjournals/openjournals-draft-action@master
+        with:
+          journal: joss
+          paper-path: joss-submission/paper.md
+      - uses: actions/upload-artifact@v7
+        with:
+          path: joss-submission/paper.pdf
+          # the pdf itself rather than a zip of it; the artifact takes the file's name
+          archive: false
