@@ -6,6 +6,7 @@ import math
 import shutil
 import time
 
+import datasets as ds
 import numpy as np
 import polars as pl
 import pytest
@@ -15,6 +16,7 @@ from omegaconf import OmegaConf
 
 from cotorra.loader import SCORED, Loader, disposition_targets, record_weights
 from cotorra.model import HEADS
+from cotorra.util import best_fit_packed_iter
 
 SEQ_LEN = 16  # `base_training_cfg`'s max_seq_len
 
@@ -158,6 +160,105 @@ def test_get_tuning_data_ignores_n_epochs(processed, tmp_path_factory):
         lengths[n] = len(loader_n.get_tuning_data())
 
     assert lengths[1] == lengths[2]
+
+
+# ---------------------------------------------------- best-fit decreasing packing
+
+PACKED_COLUMNS = ["input_ids", "s_elapsed", "pad_mask", "doc_pos"]
+
+
+def loader_with(processed, tmp_path_factory, **overrides) -> Loader:
+    cfg_path = write_cfg(
+        tmp_path_factory.mktemp("loader-packing-cfg") / "training.yaml",
+        base_training_cfg(**overrides),
+    )
+    return Loader(training_cfg=cfg_path, processed_data_home=processed)
+
+
+@pytest.fixture(scope="module")
+def bfd_loader(processed, tmp_path_factory) -> Loader:
+    return loader_with(processed, tmp_path_factory, packing="bfd", n_epochs=2)
+
+
+def unpadded(rows: ds.Dataset) -> list[tuple[int, float]]:
+    """every token `rows` pack, beside its elapsed seconds, padding dropped"""
+    return sorted(
+        pair
+        for eg in rows
+        for pair in zip(
+            eg["input_ids"][~eg["pad_mask"].bool()].tolist(),
+            eg["s_elapsed"][~eg["pad_mask"].bool()].tolist(),
+        )
+    )
+
+
+def in_records(dset: ds.Dataset) -> list[tuple[int, float]]:
+    """every token of `dset`'s records, beside its elapsed seconds"""
+    return sorted(
+        (i, t.tensor(s, dtype=t.float32).item())
+        for ids, secs in zip(dset["input_ids"], dset["s_elapsed"])
+        for i, s in zip(ids, secs)
+    )
+
+
+def test_bfd_rows_are_fixed_length_and_flag_their_padding(bfd_loader):
+    train = bfd_loader.get_train_data()
+    assert train.column_names == PACKED_COLUMNS
+    for eg in train:
+        assert all(v.shape == (SEQ_LEN,) for v in eg.values())
+    assert t.stack([eg["pad_mask"] for eg in train]).any()
+
+
+def test_bfd_packing_trains_on_every_token_of_every_epoch(bfd_loader):
+    """nothing is dropped, as concatenation drops its last partial row: each
+    training token appears once an epoch, its elapsed time beside it"""
+    assert unpadded(bfd_loader.get_train_data()) == sorted(
+        2 * in_records(bfd_loader.dataset["train"])
+    )
+
+
+def test_bfd_hands_the_packer_the_split_and_its_epochs_to_pack_apart(
+    bfd_loader, monkeypatch
+):
+    """the split as it is, not repeated: packed in one pass, the epochs' copies
+    of a record would often share a row (see test_util), where the later copy
+    could attend to the earlier"""
+    seen = {}
+
+    def from_generator(generator, gen_kwargs):
+        seen.update(gen_kwargs, generator=generator)
+        return ds.Dataset.from_dict({"input_ids": [[0]]})
+
+    monkeypatch.setattr(ds.Dataset, "from_generator", staticmethod(from_generator))
+    bfd_loader.get_train_data()
+    assert seen["generator"] is best_fit_packed_iter
+    assert seen["n_epochs"] == bfd_loader.cfg.n_epochs == 2
+    assert len(seen["dset"]) == len(bfd_loader.dataset["train"])
+
+
+def test_an_unknown_packing_is_refused(processed, tmp_path_factory):
+    loader = loader_with(processed, tmp_path_factory, packing="best_fit")
+    with pytest.raises(ValueError, match="`packing` is `concat` or `bfd`"):
+        loader.get_train_data()
+
+
+def test_bfd_alone_leaves_the_tuning_data_concatenated(bfd_loader):
+    assert bfd_loader.get_tuning_data().column_names == ["input_ids", "s_elapsed"]
+
+
+def test_doc_masking_evaluates_on_tuning_data_packed_as_training_is(
+    processed, tmp_path_factory
+):
+    """so that `eval_loss` scores each record attending only to itself, as it
+    trains, not given context it never trains on; by a seed of its own, so on
+    the same rows whatever the training data drew first"""
+    loader = loader_with(processed, tmp_path_factory, packing="bfd", doc_masking=True)
+    first = loader.get_tuning_data()
+    loader.get_train_data()
+    again = loader.get_tuning_data()
+    assert first.column_names == PACKED_COLUMNS
+    assert all(t.equal(a["input_ids"], b["input_ids"]) for a, b in zip(first, again))
+    assert unpadded(first) == in_records(loader.dataset["tuning"])
 
 
 def test_for_inference_is_none_when_no_inference_files_exist(

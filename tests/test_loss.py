@@ -579,3 +579,87 @@ def test_both_configs_are_required():
     failing with an AttributeError rather than naming what was missing"""
     with pytest.raises(TypeError, match="cfg"):
         Loss()
+
+
+# ------------------------------------------------- positions that aren't targets
+
+
+def padded(outputs: dict, labels: t.Tensor, n: int = 3) -> tuple[dict, t.Tensor]:
+    """`outputs` and `labels` with `n` positions of padding after each row, as
+    `packing: bfd` leaves it: logits of any kind, labeled -100"""
+    g = t.Generator().manual_seed(1)
+    rows = labels.shape[0]
+    logits = t.randn(rows, n, VOCAB_SIZE, generator=g)
+    return (
+        {"logits": t.cat([outputs["logits"], logits], dim=1)},
+        t.cat([labels, t.full((rows, n), -100)], dim=1),
+    )
+
+
+@pytest.mark.parametrize(
+    "term", ["x_ent_loss", "balanced_toi_loss", "quantile_token_loss"]
+)
+def test_each_term_scores_a_padded_batch_as_it_scores_the_batch_unpadded(
+    outputs, labels, term
+):
+    """a -100 label marks a position that isn't a target, which cross-entropy
+    skips by its ignore index; the other terms look the label up in tables
+    indexed by token, where -100 used to read the vocabulary's 100th token from
+    the end -- an IndexError in this 15-token vocabulary, and in a real one a
+    wrong target, silently"""
+    loss = Loss(balanced_cfg(), make_tkzr_cfg())
+    unpadded = getattr(loss, term)(outputs, labels)
+    assert getattr(loss, term)(*padded(outputs, labels)).item() == pytest.approx(
+        unpadded.item(), rel=1e-5
+    )
+
+
+def test_no_term_reads_the_logits_where_the_next_token_is_no_target(outputs, labels):
+    """`doc_masking` labels each packed record's first token -100, the logits
+    before it predicting nothing"""
+    loss = Loss(balanced_cfg(), make_tkzr_cfg())
+    labels = labels.clone()
+    labels[:, 2] = -100
+    other = outputs["logits"].clone()
+    other[:, 1] = 10 * t.randn(
+        other[:, 1].shape, generator=t.Generator().manual_seed(2)
+    )
+    terms, other_terms = dict(), dict()
+    loss.custom_loss(outputs, labels, terms=terms)
+    loss.custom_loss({"logits": other}, labels, terms=other_terms)
+    assert set(terms) == {"x_ent_loss", "balanced_toi_loss", "quantile_token_loss"}
+    for name, term in terms.items():
+        assert t.isfinite(term)
+        assert term.item() == pytest.approx(other_terms[name].item(), rel=1e-5)
+
+
+def test_a_label_without_a_target_is_no_token_whatever_the_vocabularys_order(
+    outputs, labels
+):
+    """clamped to index the per-token tables, a -100 label reads token 0: `UNK`
+    in every cocoa vocabulary so far, but nothing promises that, so it's masked
+    rather than trusted to have no category"""
+    lookup = LOOKUP | {"UNK": LOOKUP["LAB//sodium_Q2"], "LAB//sodium_Q2": 0}
+    loss = Loss(
+        make_cfg(), OmegaConf.create({"lookup": lookup, "cfg": {"n_bins": N_BINS}})
+    )
+    assert loss.label_to_cat[0] >= 0  # token 0 is a quantile token here
+    assert loss.quantile_token_loss(*padded(outputs, labels)).item() == pytest.approx(
+        loss.quantile_token_loss(outputs, labels).item(), rel=1e-5
+    )
+
+
+@pytest.mark.parametrize(
+    "term",
+    ["x_ent_loss", "balanced_toi_loss", "quantile_token_loss", "label_weighted_loss"],
+)
+def test_with_nothing_to_score_each_term_is_a_differentiable_zero(outputs, term):
+    """every label -100 -- padding and records' first tokens, as `packing: bfd`
+    can leave a batch -- would make a mean over no target nan, and so the
+    objective, and `eval_loss` with it"""
+    loss = Loss(weighted_cfg(**balanced_cfg()), make_tkzr_cfg())
+    logits = outputs["logits"].clone().requires_grad_()
+    out = getattr(loss, term)({"logits": logits}, t.full((2, 5), -100))
+    out.backward()
+    assert out.item() == 0.0
+    assert logits.grad.isfinite().all()

@@ -11,7 +11,7 @@ import pytest
 import torch as t
 from helpers import TINY_MODEL_ARGS, base_training_cfg, default_cfg, write_cfg
 from omegaconf import OmegaConf
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, TrainingArguments
 
 from cotorra.model import HEADS
 from cotorra.trainer import Trainer
@@ -58,8 +58,9 @@ def test_collate_fn_adds_time_based_position_ids_when_configured(built_trainer):
         },
     ]
     out = built_trainer.collate_fn(batch)
-    assert set(out.keys()) == {"input_ids", "labels", "position_ids"}
+    assert set(out.keys()) == {"input_ids", "labels", "position_ids", "attention_mask"}
     assert t.equal(out["labels"], out["input_ids"])
+    assert t.equal(out["attention_mask"], t.ones_like(out["input_ids"]))
 
     sec_per_pos_id = built_trainer.cfg.time_based_rope.sec_per_pos_id
     expected = t.stack([b["s_elapsed"] for b in batch]) / sec_per_pos_id
@@ -182,7 +183,12 @@ def test_train_dataloader_batches_carry_time_based_position_ids(built_trainer):
     """
     assert built_trainer.trainer.args.remove_unused_columns is False
     batch = next(iter(built_trainer.trainer.get_train_dataloader()))
-    assert set(batch.keys()) == {"input_ids", "labels", "position_ids"}
+    assert set(batch.keys()) == {
+        "input_ids",
+        "labels",
+        "position_ids",
+        "attention_mask",
+    }
     assert batch["position_ids"].shape == batch["input_ids"].shape
 
 
@@ -491,6 +497,69 @@ def test_accumulated_batches_step_as_one_batch_of_their_size(tmp_path):
     for loss_func in (x_ent, None):
         whole, accumulated = one_step(4, 1, loss_func), one_step(2, 2, loss_func)
         assert t.allclose(whole, accumulated, atol=1e-6), loss_func
+
+
+@pytest.mark.slow
+def test_a_heads_term_accumulates_as_hfs_own_term_does(tmp_path):
+    """
+    without a custom loss, hf sums the lm's token losses over the step's
+    `num_items_in_batch` and skips its own division over the accumulated
+    batches; a head's mean added to that as it was counted once per batch, its
+    weight multiplied by `gradient_accumulation_steps` in training (and by the
+    processes under ddp) but not in evaluation. Two accumulated batches of two
+    still take the step one batch of four does
+    """
+    import copy
+
+    from helpers import TINY_MODEL_ARGS
+    from transformers import AutoConfig
+
+    from cotorra.model import CotorraConfig, head_options
+    from cotorra.trainer import TrainerWithCustomLoss
+
+    t.manual_seed(0)
+    model = AutoModelForCausalLM.from_config(
+        CotorraConfig(
+            text_config=AutoConfig.for_model("llama", vocab_size=64, **TINY_MODEL_ARGS),
+            heads=head_options({"tte_objective": {"weight": 2.0}}, {}),
+        )
+    )
+    data = [
+        {"input_ids": t.randint(3, 63, (8,)), "hours_to_end_time": 10 * t.rand(8)}
+        for _ in range(4)
+    ]
+
+    def collate(rows):
+        ids = t.stack([r["input_ids"] for r in rows])
+        hours = t.stack([r["hours_to_end_time"] for r in rows])
+        return {"input_ids": ids, "labels": ids, "hours_to_end_time": hours}
+
+    def one_step(batch_size, accumulate):
+        mdl = copy.deepcopy(model)
+        TrainerWithCustomLoss(
+            model=mdl,
+            data_collator=collate,
+            train_dataset=data,
+            args=TrainingArguments(
+                output_dir=str(tmp_path),
+                max_steps=1,
+                per_device_train_batch_size=batch_size,
+                gradient_accumulation_steps=accumulate,
+                optim="sgd",
+                learning_rate=0.5,
+                lr_scheduler_type="constant",
+                max_grad_norm=1e9,
+                report_to="none",
+                save_strategy="no",
+                logging_strategy="no",
+                disable_tqdm=True,
+                use_cpu=True,
+                remove_unused_columns=False,
+            ),
+        ).train()
+        return t.cat([p.detach().flatten() for p in mdl.parameters()])
+
+    assert t.allclose(one_step(4, 1), one_step(2, 2), atol=1e-6)
 
 
 @pytest.mark.parametrize("stage", [Trainer, Tuner])
@@ -831,3 +900,303 @@ def test_the_config_saved_beside_the_model_is_the_merged_one(
     assert saved == trainer.cfg
     assert (saved.n_epochs, saved.max_seq_len, saved.training_args.seed) == (2, 8, 7)
     assert "quantile_token_loss" not in saved
+
+
+# ------------------------------------------------ packing and per-record masking
+
+
+def packed_cfg(**overrides) -> dict:
+    """the shipped default, packed by best-fit decreasing and without time-based
+    rope, which `doc_masking` can't take"""
+    cfg = base_training_cfg(**({"packing": "bfd"} | overrides))
+    del cfg["time_based_rope"]
+    return cfg
+
+
+@pytest.fixture(scope="module")
+def masking_trainer(processed, tmp_path_factory) -> Trainer:
+    home = tmp_path_factory.mktemp("doc-masking")
+    return trainer_with(packed_cfg(doc_masking=True), processed, home)
+
+
+def spans(eg: dict) -> list[tuple[int, int]]:
+    """where each piece of a packed row starts and ends, its padding left out"""
+    n = int((eg["pad_mask"] == 0).sum())
+    starts = (eg["doc_pos"][:n] == 0).nonzero().flatten().tolist()
+    return list(zip(starts, starts[1:] + [n]))
+
+
+def busiest(dataset, n: int = 4) -> list[dict]:
+    """the `n` packed rows holding the most pieces"""
+    return sorted(dataset, key=lambda eg: -len(spans(eg)))[:n]
+
+
+@pytest.mark.parametrize("how", ["true", "absent"])
+def test_bfd_packing_needs_the_columns_hf_would_drop(how, processed, tmp_path):
+    """hf drops every column the model's `forward` doesn't name unless told not
+    to, its default; the padding would then lose its `pad_mask` and silently
+    train as targets"""
+    cfg = packed_cfg()
+    if how == "true":
+        cfg["training_args"]["remove_unused_columns"] = True
+    else:
+        del cfg["training_args"]["remove_unused_columns"]
+    with pytest.raises(ValueError, match="remove_unused_columns: false"):
+        trainer_with(cfg, processed, tmp_path)
+
+
+def test_doc_masking_needs_bfd_packing(processed, tmp_path):
+    with pytest.raises(ValueError, match="`doc_masking` needs `packing: bfd`"):
+        trainer_with(
+            packed_cfg(packing="concat", doc_masking=True), processed, tmp_path
+        )
+
+
+@pytest.mark.parametrize(
+    "block, value",
+    [("tnt_objective", {}), ("time_based_rope", {"sec_per_pos_id": 300})],
+)
+def test_doc_masking_refuses_what_it_does_not_yet_support(
+    block, value, processed, tmp_path
+):
+    cfg = packed_cfg(doc_masking=True)
+    cfg[block] = value
+    with pytest.raises(ValueError, match="does not yet support"):
+        trainer_with(cfg, processed, tmp_path)
+
+
+def test_bfd_padding_is_no_target_for_the_lm_or_any_head(
+    processed_with_end_times, tmp_path
+):
+    """the packer pads with zeros, which would train the time heads toward a gap
+    of none (their losses keep any finite, non-negative target) and the
+    disposition head toward its first class: nan for a time, -100 for a class or
+    a token, which every loss skips. Nothing but the padding changes: a split
+    record's chunk keeps the gap at its row's end, as concatenated rows do"""
+    cfg = packed_cfg()
+    cfg["tte_objective"] = {}
+    cfg["tnt_objective"] = {"mixture_components": 3}
+    cfg["disposition_objective"] = {}
+    trainer = trainer_with(cfg, processed_with_end_times, tmp_path)
+    dataset = trainer.trainer.train_dataset
+    padded = sorted(dataset, key=lambda eg: -int(eg["pad_mask"].sum()))[:4]
+    # a split record's chunk filling a row, its gap to the next token a real one
+    split = [
+        eg
+        for eg in dataset
+        if not eg["pad_mask"].any() and eg["hours_to_next_token"][-1].isfinite()
+    ][:2]
+    rows = padded + split
+    batch = trainer.collate_fn(rows)
+    pad = t.stack([eg["pad_mask"] for eg in rows]).bool()
+    assert pad.any() and split
+
+    assert (batch["labels"][pad] == -100).all()
+    assert t.equal(batch["labels"][~pad], batch["input_ids"][~pad])
+    for target in ("hours_to_end_time", "hours_to_next_token"):
+        assert batch[target][pad].isnan().all()
+        raw = t.stack([eg[target] for eg in rows])
+        assert t.equal(batch[target][~pad].nan_to_num(-1.0), raw[~pad].nan_to_num(-1.0))
+    assert (batch["disposition"][pad] == -100).all()
+    raw = t.stack([eg["disposition"] for eg in rows])
+    assert t.equal(batch["disposition"][~pad], raw[~pad])
+    assert batch["hours_to_next_token"][len(padded) :, -1].isfinite().all()
+
+    mdl = trainer.model_init()
+    loss = trainer.trainer.compute_loss(mdl, batch)
+    loss.backward()
+    assert t.isfinite(loss)
+    for head in mdl.heads.values():
+        assert max(p.grad.abs().max().item() for p in head.parameters()) > 0
+
+    # a mixture head conditions each position's gap on the token after it in
+    # the row, and needs no mask for it: a piece ends short of its row only
+    # where its record ends (a split record's other chunks each fill a row),
+    # and a record's last token has no gap to score
+    for eg in dataset:
+        scored = eg["hours_to_next_token"][:-1].isfinite() & ~eg["pad_mask"][:-1].bool()
+        assert t.equal(eg["doc_pos"][1:][scored], eg["doc_pos"][:-1][scored] + 1)
+
+
+def test_doc_masking_builds_its_models_without_a_kv_cache(masking_trainer):
+    """transformers reads restarting position ids as separate sequences only
+    without one, and hf sets `training_args.use_cache` on the model it builds
+    first, not on the one `model_init` rebuilds to train"""
+    assert masking_trainer.model_init().config.use_cache is False
+
+
+@pytest.mark.parametrize("attn", ["eager", None])
+def test_attn_implementation_picks_the_models_attention(attn, processed, tmp_path):
+    cfg = base_training_cfg(**({"attn_implementation": attn} if attn else {}))
+    trainer = trainer_with(cfg, processed, tmp_path)
+    assert trainer.model_init().config._attn_implementation == (attn or "sdpa")
+
+
+def test_doc_masking_restarts_the_positions_and_skips_each_pieces_first_token(
+    masking_trainer,
+):
+    rows = busiest(masking_trainer.trainer.train_dataset)
+    batch = masking_trainer.collate_fn(rows)
+    pos = t.stack([eg["doc_pos"] for eg in rows])
+    pad = t.stack([eg["pad_mask"] for eg in rows]).bool()
+    assert set(batch) == {"input_ids", "labels", "position_ids"}
+    assert batch["input_ids"].shape == pos.shape  # a row each, as it was packed
+    assert t.equal(batch["position_ids"], pos)
+    unscored = (pos == 0) | pad
+    assert (batch["labels"][unscored] == -100).all()
+    assert t.equal(batch["labels"][~unscored], batch["input_ids"][~unscored])
+
+
+def test_doc_masking_flattens_the_batch_for_flash_attention(
+    masking_trainer, monkeypatch
+):
+    """whose varlen path takes only a batch of one row; sdpa and eager attention
+    mask each row as it is. Read off the model, which `model.model_args` can
+    build with flash attention as well as `attn_implementation` can"""
+    rows = busiest(masking_trainer.trainer.train_dataset)
+    per_row = masking_trainer.collate_fn(rows)
+    config = masking_trainer.trainer.model.config
+    monkeypatch.setattr(config, "_attn_implementation", "flash_attention_2")
+    flat = masking_trainer.collate_fn(rows)
+    assert set(flat) == set(per_row)
+    for k, v in flat.items():
+        assert t.equal(v, per_row[k].reshape(1, -1))
+
+
+def test_doc_masking_keeps_each_packed_record_from_attending_to_the_others(
+    masking_trainer,
+):
+    """every piece of a packed row gets the logits it gets alone; fed the row
+    without the restarting position ids, the pieces after the first would see
+    those before them"""
+    mdl = masking_trainer.model_init().eval()
+    rows = busiest(masking_trainer.trainer.train_dataset)
+    batch = masking_trainer.collate_fn(rows)
+    with t.no_grad():
+        masked = mdl(input_ids=batch["input_ids"], position_ids=batch["position_ids"])
+        unmasked = mdl(input_ids=batch["input_ids"])
+    seen_across = False
+    for r, eg in enumerate(rows):
+        assert len(spans(eg)) > 1
+        for start, end in spans(eg):
+            with t.no_grad():
+                alone = mdl(input_ids=eg["input_ids"][None, start:end]).logits[0]
+            assert t.allclose(masked.logits[r, start:end], alone, atol=1e-5)
+            seen_across |= not t.allclose(
+                unmasked.logits[r, start:end], alone, atol=1e-5
+            )
+    assert seen_across
+
+
+@pytest.mark.parametrize("wrap", [False, True], ids=["bare", "wrapped"])
+def test_a_doc_masking_batch_is_refused_by_a_model_with_a_kv_cache(
+    masking_trainer, wrap
+):
+    """asked of the model itself: under DDP or DataParallel, hf hands
+    `compute_loss` the wrapper, which has no `config`"""
+    mdl = masking_trainer.model_init()
+    model = t.nn.DataParallel(mdl) if wrap else mdl
+    batch = masking_trainer.collate_fn(busiest(masking_trainer.trainer.train_dataset))
+    assert t.isfinite(masking_trainer.trainer.compute_loss(model, batch))
+    mdl.config.use_cache = True
+    with pytest.raises(AssertionError, match="use_cache=True"):
+        masking_trainer.trainer.compute_loss(model, batch)
+
+
+def test_doc_masking_refuses_to_flatten_for_data_parallel(
+    processed, tmp_path, monkeypatch
+):
+    """which splits a batch by its rows across gpus, and a batch flattened for
+    flash attention has one"""
+    monkeypatch.setattr(TrainingArguments, "n_gpu", property(lambda self: 2))
+    monkeypatch.setattr(
+        "cotorra.trainer.is_flash_attention_requested", lambda **_: True
+    )
+    with pytest.raises(ValueError, match="DataParallel"):
+        trainer_with(packed_cfg(doc_masking=True), processed, tmp_path)
+
+
+def test_doc_masking_trains_and_evaluates_on_hfs_own_batches(masking_trainer):
+    """hf's dataloaders, with the shipped `remove_unused_columns: false`, keep
+    `doc_pos` for the collator, the tuning set's as well as the training set's"""
+    trainer = masking_trainer.trainer
+    for loader in (trainer.get_train_dataloader(), trainer.get_eval_dataloader()):
+        assert set(next(iter(loader))) == {"input_ids", "labels", "position_ids"}
+    mdl = masking_trainer.model_init()
+    batch = masking_trainer.collate_fn(busiest(trainer.train_dataset))
+    loss = trainer.compute_loss(mdl.train(), batch)
+    loss.backward()
+    assert t.isfinite(loss)
+    assert math.isfinite(trainer.evaluate()["eval_loss"])
+
+
+@pytest.mark.slow
+def test_a_doc_masking_model_trains_and_saves(processed, tmp_path):
+    trainer = trainer_with(packed_cfg(doc_masking=True), processed, tmp_path)
+    trainer.train()
+    saved = AutoModelForCausalLM.from_pretrained(tmp_path / "out" / "mdl-test-run")
+    assert saved.config.vocab_size == len(trainer.tkzr_cfg.lookup)
+
+
+def test_time_based_positions_attend_across_timestamps_with_or_without_a_cache(
+    built_trainer,
+):
+    """gradient checkpointing turns the KV cache off, and given neither it nor a
+    mask, transformers starts a new packed sequence wherever position ids don't
+    step by exactly 1, as time-based ones don't at any gap between timestamps;
+    the mask of ones `collate_fn` passes keeps attention whole"""
+    mdl = built_trainer.model_init().eval()
+    # rows whose tokens span more than one timestamp, so that there's a jump
+    rows = [
+        eg
+        for eg in built_trainer.trainer.train_dataset
+        if eg["s_elapsed"].unique().numel() > 2
+    ][:2]
+    batch = built_trainer.collate_fn(rows)
+    del batch["labels"]
+    with t.no_grad():
+        cached = mdl(**batch, use_cache=True).logits
+        uncached = mdl(**batch, use_cache=False).logits
+        del batch["attention_mask"]
+        split = mdl(**batch, use_cache=False).logits
+    assert t.allclose(uncached, cached, atol=1e-5)
+    assert not t.allclose(split, cached, atol=1e-3)
+
+
+# ------------------------------------------------------------- label smoothing
+
+
+def smoothed_cfg(**overrides) -> dict:
+    cfg = base_training_cfg(**overrides)
+    cfg["training_args"]["label_smoothing_factor"] = 0.1
+    return cfg
+
+
+def test_label_smoothing_is_refused_for_heads_on_hfs_own_loss(processed, tmp_path):
+    """hf pops the labels to smooth its loss itself, so the model, given none,
+    adds no head's term; and cotorra's class isn't among the causal lms whose
+    labels hf shifts, so each token would be scored against itself"""
+    with pytest.raises(ValueError, match="label_smoothing_factor"):
+        trainer_with(
+            smoothed_cfg(custom_loss=False, tnt_objective={}), processed, tmp_path
+        )
+
+
+def test_label_smoothing_is_flagged_as_doing_nothing_with_a_custom_loss(
+    processed, tmp_path
+):
+    """which replaces the loss hf smooths; it still trains, as it did, unsmoothed"""
+    with pytest.warns(UserWarning, match="no effect with `custom_loss: true`"):
+        trainer = trainer_with(smoothed_cfg(), processed, tmp_path)
+    assert trainer.loss is not None
+
+
+def test_label_smoothing_is_left_to_hf_for_a_model_without_heads(processed, tmp_path):
+    """on hf's own loss, which smooths it, shifting the labels, as it should"""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trainer = trainer_with(smoothed_cfg(custom_loss=False), processed, tmp_path)
+    assert not [w for w in caught if "label_smoothing_factor" in str(w.message)]
+    assert trainer.trainer.label_smoother is not None

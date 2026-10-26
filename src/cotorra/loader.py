@@ -223,25 +223,34 @@ class Loader(Configurable):
         # Decreasing, splitting only records longer than max_seq_len. See
         # util.best_fit_packed_iter
         packing = self.cfg.get("packing", "concat")
-        assert packing in ("concat", "bfd"), f"packing: {packing!r}"
-        dset = (
-            self.dataset[self.splits[0]]
-            .repeat(self.cfg.n_epochs)
-            .shuffle(generator=self.rng)
-        )
+        if packing not in ("concat", "bfd"):
+            raise ValueError(f"`packing` is `concat` or `bfd`; got {packing!r}")
         if packing == "bfd":
-            generator, extra = best_fit_packed_iter, {"rng": self.rng}
-        else:
-            generator, extra = batched_iter, {}
+            # the split as it is: the packer shuffles it, and packs each epoch
+            # apart, so that no row holds a record twice
+            return ds.Dataset.from_generator(
+                best_fit_packed_iter,
+                gen_kwargs={
+                    "dset": self.dataset[self.splits[0]],
+                    "seq_len": self.cfg.max_seq_len,
+                    "rng": self.rng,
+                    "n_epochs": self.cfg.n_epochs,
+                },
+            ).with_format("torch")
         return ds.Dataset.from_generator(
-            generator,
-            gen_kwargs={"dset": dset, "seq_len": self.cfg.max_seq_len, **extra},
+            batched_iter,
+            gen_kwargs={
+                "dset": self.dataset[self.splits[0]]
+                .repeat(self.cfg.n_epochs)
+                .shuffle(generator=self.rng),
+                "seq_len": self.cfg.max_seq_len,
+            },
         ).with_format("torch")
 
     def get_tuning_data(self) -> ds.Dataset:
         if self.cfg.get("doc_masking", False):
             # evaluate in the training format: BFD-packed, and (through the
-            # collator) flattened with each record masked from the others.
+            # collator) each record masked from the others.
             # Concatenated, a doc_masking model is scored on context it never
             # trains on, which inflates eval_loss and misleads both the Optuna
             # objective and checkpoint selection. Its own generator, so the

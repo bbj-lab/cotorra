@@ -814,7 +814,10 @@ class CotorraForCausalLM(PreTrainedModel, GenerationMixin):
         target, passed under the name its `target` gives (`hours_to_end_time`,
         `hours_to_next_token`, `disposition`), scores it too, weighted by the
         column its `target_weight` names (`hours_to_end_time_weight`,
-        `disposition_weight`) when the head is weighted per record"""
+        `disposition_weight`) when the head is weighted per record. Given hf's
+        `num_items_in_batch`, as its trainer passes in training, each head's
+        term counts this batch's share of the step's scored tokens, as the lm's
+        term does"""
         # popped before `kwargs` reaches the backbone, whose own `**kwargs` would
         # otherwise swallow a target, or its weights, meant for a head this model
         # doesn't carry
@@ -865,6 +868,17 @@ class CotorraForCausalLM(PreTrainedModel, GenerationMixin):
             if labels is not None
             else None
         )
+        # hf's trainer passes `num_items_in_batch` in training: the tokens scored
+        # in the whole step -- every batch it accumulates toward one, and under
+        # ddp every process's -- over which the lm's term sums this batch's
+        # losses, so that hf skips its own division over the accumulated batches
+        # and scales for the processes. A head's mean, weighted by this batch's
+        # share of those tokens (counted as the lm's term scores them), averages
+        # over them alike; added as it is, it would count once a batch, and once
+        # a process
+        share = None
+        if loss is not None and kwargs.get("num_items_in_batch") is not None:
+            share = (labels[..., 1:] != -100).sum() / kwargs["num_items_in_batch"]
 
         fields = dict()
         for name, head in self.heads.items():
@@ -880,7 +894,8 @@ class CotorraForCausalLM(PreTrainedModel, GenerationMixin):
             fields[f"{name}_pred"] = None if pred is None else pred[:, keep]
             fields[f"{name}_loss"] = head_loss
             if loss is not None and head_loss is not None:
-                loss = loss + head.weight * head_loss.to(dtype=loss.dtype)
+                term = head.weight * head_loss.to(dtype=loss.dtype)
+                loss = loss + (term if share is None else term * share)
 
         return CotorraCausalLMOutputWithPast(
             loss=loss,

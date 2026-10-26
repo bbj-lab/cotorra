@@ -21,6 +21,10 @@ DEFAULT_HP_SPACE = {
 
 
 class _PruneTrialCheckpoints(TrainerCallback):
+    """deletes the search's trial checkpoints, `run-*/checkpoint-*` under
+    `output_home`, as each trial ends: by then hf has loaded the trial's best,
+    and the model `Tuner.train` saves is trained afresh, outside `run-*`"""
+
     def __init__(self, output_home):
         self.output_home = output_home
 

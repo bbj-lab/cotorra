@@ -183,7 +183,18 @@ checkpoints load and behave as before.
 Fixing a bug so a key does what it documents isn't a compatibility break: with
 `custom_loss: true`, `gradient_accumulation_steps` used to sum its micro-batches'
 gradients rather than average them (HF leaves that to a custom loss), and now
-averages them as HF's stock path does.
+averages them. It weights each micro-batch alike, where HF's stock path weights
+each scored token alike; the two agree while every micro-batch scores as many
+tokens, as concatenated rows do and `packing: bfd`'s needn't. With
+`custom_loss: false`, a model with heads added each head's mean, as it was, to
+HF's LM term: a sum over the step's `num_items_in_batch` tokens, for which HF
+skips its division by the micro-batches and multiplies by the processes (to undo
+DDP's averaging), so the heads' weights were multiplied by both in training,
+though not in evaluation. Now `CotorraForCausalLM.forward` weights each head's
+term by its micro-batch's share of those tokens, so that it scales as the LM term
+does under any of HF's scalings. Transformers 5.5.4 counts every unmasked label,
+not the shifted ones the loss scores, so its count runs one token a row high,
+shrinking both terms alike by about one part in `max_seq_len`.
 
 Deprecating a key follows the same rule: `label_weighted_loss` (it made the model
 predict its tokens of interest more often) is still honored, and
@@ -303,6 +314,28 @@ the split caches lacking the disposition target. Token-set selectors
 (`tokens_of_interest`, `target_tokens`) support **fnmatch patterns** (e.g.
 `LABEL//*`), resolved against the tokenizer vocab.
 
+`Loader.get_train_data` packs the train split into `max_seq_len` rows by
+`packing`: `concat` (the default, `util.batched_iter`) runs the shuffled,
+epoch-repeated records together and drops the last partial row; `bfd`
+(`util.best_fit_packed_iter`) cuts only records longer than a row and places each
+chunk whole by best-fit decreasing, padding each row with zeros and adding
+`pad_mask` and `doc_pos` (each token's position in its piece, restarting at 0 for
+every piece and for the padding). It packs each of `n_epochs` passes apart, in an
+order of its own: packed in one pass, a record's copies, all of one length, sit
+side by side among the chunks sorted by length and land in the same rows, where
+the later attends to the earlier. `Trainer.collate_fn` keeps the padding from
+being any loss's target (-100 for the labels and the disposition, nan for the
+time heads); nothing else needs masking, since a piece ends short of its row only
+where its record ends (a split record's other chunks each fill a row), whose last
+token has no TNT target, so a mixture TNT head never conditions on another
+record's token. `doc_masking` (`bfd` only, and not yet with heads or
+`time_based_rope`) passes `doc_pos` as `position_ids` and labels each piece's
+first token -100; for flash attention, read off the built model (so
+`model.model_args` counts too), it flattens the batch into one row, which
+`Trainer.__init__` refuses under `nn.DataParallel`. The tuning split is then
+`bfd`-packed too, by its own fixed seed, so `eval_loss` scores the masked format
+the model trains on (without `doc_masking` it stays concatenated).
+
 ## Gotchas
 
 - **Install requires the PyTorch CUDA index.** Use the two-index `pip install`
@@ -333,7 +366,40 @@ the split caches lacking the disposition target. Token-set selectors
   targets (unused by `extract`), so a `tte_objective` there fails without
   `hours_to_end_time` in `tokens_times.parquet`.
 - **`remove_unused_columns: false`** in `training_args` is required — otherwise
-  HF drops the `s_elapsed` column that time-based RoPE needs.
+  HF drops the `s_elapsed` column that time-based RoPE needs, and
+  `packing: bfd`'s `pad_mask` and `doc_pos` (`Trainer.__init__` refuses `bfd`
+  without it; HF's own default is `true`).
+- **transformers reads position ids that don't step by exactly 1 as packed
+  sequences.** Given no `attention_mask` and no KV cache, `create_causal_mask`
+  (`find_packed_sequence_indices`, in every transformers cotorra allows) starts a
+  new sequence wherever consecutive `position_ids` don't differ by 1, and masks
+  attention across them, per row (verified for sdpa and eager; flex needs
+  `torch.compile`, which macOS CPU lacks). `doc_masking` relies on it, so
+  `model_init` turns the cache off under it, and `collate_fn` flattens the batch
+  for flash attention, whose varlen path takes a single row only.
+  `time_based_rope`'s ids jump at every gap between timestamps, so both collators
+  pass an all-ones `attention_mask` beside them: without it, a model run without
+  a cache (gradient checkpointing turns it off; a checkpoint may be saved with
+  `use_cache: false`) splits attention at every jump. Flash attention drops a
+  mask of ones, though, and derives a one-row batch's sequences from its position
+  ids anyway (its helpers give wrong segments on 5.19 and fail on 5.5.4; the
+  kernel itself is untested, flash-attn needing CUDA), so time-based RoPE with
+  flash attention is only sound for batches of more than one row. HF sets
+  `training_args.use_cache` on the model it builds in `__init__` (the one
+  `built_trainer.model` saves in the tests), not on the one `model_init` rebuilds
+  in `train()`, which keeps its `AutoConfig`'s.
+- **HF's `label_smoothing_factor` only smooths HF's own loss.** On
+  `custom_loss: true` it does nothing (`Trainer.__init__` warns). On
+  `custom_loss: false` with heads, HF pops `labels` to smooth the logits itself,
+  so the model adds no head term, and since `CotorraForCausalLM` isn't in HF's
+  `MODEL_FOR_CAUSAL_LM_MAPPING_NAMES` it smooths without shifting the labels;
+  `Trainer.__init__` refuses that. A stock model on `custom_loss: false` is
+  smoothed correctly.
+- **A label of -100 isn't a target** (`bfd`'s padding, `doc_masking`'s piece
+  starts). Cross-entropy skips it by `ignore_index`, but a custom-loss term that
+  looks labels up in a per-token table (`label_to_cat`, `balanced_toi_flag`) has
+  to clamp and mask them: a -100 index wraps around to a token from the end of
+  the vocabulary.
 - **`--resume-from-checkpoint` is safe to pass unconditionally**: `Trainer.train`
   falls back to training from scratch if no checkpoint is found.
 - **`processed` is a symlink** (`-> ../cocoa/processed`) and `output/`, `wandb/`,
