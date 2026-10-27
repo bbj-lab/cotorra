@@ -70,21 +70,21 @@ Given a trained model, inference for downstream events on partially completed
 novel sequences typically proceeds in one of the following ways (see Figure
 \ref{fig:inference} for a schematic):
 
-1. _Representation-based inference_ extracts model-derived representations from
-   each variable-length sequence up to the point in time that inference is to be
-   performed. These fixed-length vectors then serve as features to train
-   outcome-specific supervised models, which themselves take the form of
-   off-the-shelf classifiers such a logistic regression or gradient boosted
-   decision trees that can be learned with a fraction of the compute required to
-   train the original model. Commonly abbreviated as rep-based inference, @Wor23,
-   @Guo24, @Wor25, @Lee26, @Guo26, and @Zha26 provide notable examples.
+1. _Representation-based inference_, or rep-based inference, extracts
+   model-derived representations from each variable-length sequence up to the
+   point in time that inference is to be performed. These fixed-length vectors
+   then serve as features to train outcome-specific supervised models, which
+   themselves take the form of off-the-shelf classifiers such a logistic
+   regression or gradient boosted decision trees that can be learned with a
+   fraction of the compute required to train the original model. See @Wor23,
+   @Guo24, @Wor25, @Lee26, @Guo26, and @Zha26 for notable examples.
 
-2. _Generative inference_ applies the generative capabilities of the trained
-   model directly to a novel sequence to sample potential completions of the
-   sequence. These generated sequences are then used to form a Monte Carlo-style
-   estimate of the probability for a token-related outcome of interest. Also
-   known as zero-shot inference, @McD23, @Kra24, @Ren24, @Ren25, @Wax25, and
-   @Sol26 provide notable examples.
+2. _Generative inference_, or zero-shot inference, applies the generative
+   capabilities of the trained model directly to a novel sequence to sample
+   potential completions of the sequence. These generated sequences are then used
+   to form a Monte Carlo-style estimate of the probability for a token-related
+   outcome of interest. @McD23, @Kra24, @Ren24, @Ren25, @Wax25, and @Sol26
+   provide notable examples.
 
 3. _Supervised finetuning_ modifies the training objective to prioritize specific
    downstream outcomes of interest. Oftentimes, a model's architecture will be
@@ -111,16 +111,16 @@ of these codebases led us to develop our own workflow.
 
 # State of the field
 
-As a actively developing field, much of the available code is research code
-designed to reproduce the results of a specific paper. Some repositories and
-tools have received sustained development and are worth consideration by a
-potential practitioner. The MEDS ecosystem [@McD26] offers tools both for
-converting data into the MEDS format and for training models. The Vector
-Institute's [odyssey](https://github.com/VectorInstitute/odyssey) library grew
-out of EHRMamba [@Fal25]; it has migrated to MEDS. The Shah lab's
-[femr](https://github.com/som-shahlab/femr) library grew out of work on the MOTOR
-[@Ste24] paper; at the time of writing, the most recent commit occurred over a
-year ago.
+As research products of a actively developing field, much of the code currently
+available is designed to reproduce the results of a specific paper. Some
+repositories and tools have received sustained development and are worth
+consideration from a potential practitioner. The MEDS ecosystem [@McD26] offers
+tools both for converting data into the MEDS format and for training models. The
+Vector Institute's [odyssey](https://github.com/VectorInstitute/odyssey) library
+grew out of EHRMamba [@Fal25]; it takes MEDS event streams as input. The Shah
+lab's [femr](https://github.com/som-shahlab/femr) library grew out of work on the
+MOTOR [@Ste24] paper. However, at the time of writing, the most recent commit to
+the default / main branch occurred over a year ago.
 
 # Software design
 
@@ -184,10 +184,12 @@ generative inference [@Sol26], establishing best practices for tokenization
 
 # AI usage disclosure
 
-Claude Code, OpenAI Codex, and Github Copilot were used to develop this library.
-An emphasis on modularity, frequent commits, and testing was adopted specifically
-to allow these tools to perform their best. In contrast, this document was typed
-by hand.
+Claude Code, OpenAI Codex, and Github Copilot were used to develop and document
+this library. An emphasis on modularity, frequent commits, and testing was
+adopted specifically to allow these tools to perform their best. Humans reviewed,
+modified, and validated all AI-generated content. Architectural and design
+decisions were made by humans. This document in particular was entirely typed by
+hand.
 
 # Acknowledgements
 
