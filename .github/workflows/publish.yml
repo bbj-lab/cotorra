@@ -1,0 +1,145 @@
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # sigstore signs the build provenance for this oidc identity
+      attestations: write # and github keeps it
+    steps:
+      - uses: actions/checkout@v7
+      # only a tag signed (git tag -s) with this one key publishes: github serves
+      # the account's public keys, and pinning the fingerprint shuts out the
+      # others, as well as any key added to the account later
+      - name: check the tag is signed with the release key
+        env:
+          RELEASE_KEY: 52E7A62CF53FD288A6F0BFADFCC4C12ADAB0E195
+        run: |
+          # gpg's exit status counts any trouble with any key, so check for this one
+          curl -fsSL https://github.com/burkh4rt.gpg | gpg --batch --quiet --import || true
+          if ! gpg --list-keys "$RELEASE_KEY" > /dev/null; then
+            echo "::error::github serves no key $RELEASE_KEY for burkh4rt"
+            exit 1
+          fi
+          tag=refs/tags/$GITHUB_REF_NAME
+          if [ "$(git cat-file -t "$tag")" != tag ]; then
+            echo "::error::$GITHUB_REF_NAME is a lightweight tag, not one signed with git tag -s"
+            exit 1
+          fi
+          if [ "$(git rev-parse "$tag^{commit}")" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::$GITHUB_REF_NAME doesn't point to the commit checked out"
+            exit 1
+          fi
+          # gpg's status lines, VALIDSIG's last field the primary key's fingerprint
+          status=$(git verify-tag --raw "$tag" 2>&1) && verified=true || verified=false
+          signer=$(awk '$2 == "VALIDSIG" { print $NF }' <<< "$status")
+          if [ "$verified" != true ] || [ "$signer" != "$RELEASE_KEY" ]; then
+            echo "$status"
+            echo "::error::$GITHUB_REF_NAME isn't signed with the release key, $RELEASE_KEY"
+            exit 1
+          fi
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: pip install build packaging tomlkit
+      - name: check the tag matches pyproject.toml's version
+        shell: python
+        run: |
+          import os, tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              version = tomllib.load(f)["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              raise SystemExit(f"tag {tag} doesn't match version {version}")
+      # pypi refuses a distribution with any requirement that's a direct url
+      # reference (`name @ git+...`), even one inside an extra, so drop each extra
+      # with one (gen, for quick-sco-re, which isn't on pypi); a source install
+      # keeps them
+      - name: drop the extras pypi can't host
+        shell: python
+        run: |
+          import pathlib
+
+          import tomlkit
+          from packaging.requirements import Requirement
+
+          path = pathlib.Path("pyproject.toml")
+          doc = tomlkit.parse(path.read_text())
+          direct = lambda reqs: [r for r in reqs if Requirement(r).url]
+          if bad := direct(doc["project"]["dependencies"]):
+              raise SystemExit(f"pypi can't host a direct reference: {bad}")
+          extras = doc["project"].get("optional-dependencies", {})
+          for name in [name for name, reqs in extras.items() if direct(reqs)]:
+              print(f"dropping extra {name}: {direct(extras[name])}")
+              del extras[name]
+          path.write_text(tomlkit.dumps(doc))
+      - run: python -m build
+      # sigstore-signed slsa build provenance for each file, which github keeps and
+      # gh attestation verify <file> --repo bbj-lab/cotorra checks
+      - uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish to pypi
+    needs: build
+    # pypi trusts this repository's workflow alone, so a fork's tag can't publish
+    if: github.repository == 'bbj-lab/cotorra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/cotorra
+    permissions:
+      id-token: write # trusted publishing: pypi takes an oidc token, no secret
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # pep 740 attestations, sigstore-signed for this workflow's oidc identity
+          # and uploaded beside each file; the default, set so it stays on
+          attestations: true
+
+  publish-testpypi:
+    # apart from publish, so neither index's failure keeps the other from its upload
+    name: publish to testpypi
+    needs: build
+    if: github.repository == 'bbj-lab/cotorra'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/cotorra
+    permissions:
+      id-token: write # trusted publishing, as for pypi, set up apart on testpypi
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          attestations: true
+          # testpypi is only for trying releases out, so a version already there
+          # (from an upload by hand, say) shouldn't fail the run
+          skip-existing: true

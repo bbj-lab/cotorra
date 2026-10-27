@@ -958,7 +958,8 @@ request.
     I. Lee, L. Solo, M. Burkhart, B. Ramadan, W. Parker, & B. Beaulieu-Jones,
     Representation before training: a fixed-budget benchmark for generative
     medical event models,
-    [arXiv:2604.16775](https://doi.org/10.48550/arXiv.2604.16775)
+    [arXiv:2604.16775](https://doi.org/10.48550/arXiv.2604.16775), _to appear in
+    ML4H 2026_
 
 [^6]:
     M. Burkhart, L. Solo, I. Lee, S. Charles, Z. Liao, K. Chhikara, D. Therese,
@@ -1032,24 +1033,18 @@ srun -p gpuq \
 . .venv/bin/activate
 ```
 
-Send to pypi:
-```
-rm -rf dist
-python3 -m pip install --upgrade build
-python3 -m build
-python3 -m pip install --upgrade twine
-python3 -m twine upload --repository pypi dist/*
-```
-
 Make docs:
 ```
 mkdocs build
 mkdocs serve --dev-addr 127.0.0.1:8002
 ```
 
-Make tag:
+Make tag and send to pypi and testpypi (pushing a `v*` tag runs
+`.github/workflows/publish.yml`, which drops the `gen` extra, builds, and
+uploads to both):
 ```
-git tag -s v26.6.3 -m "bootstrapping utilities"
+git tag -s v26.10.2 -m "best-fit packing"
+git push origin v26.10.2
 ```
 
 -->

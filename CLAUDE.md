@@ -343,11 +343,12 @@ the model trains on (without `doc_masking` it stays concatenated).
   correctly. Development install is `pip install -e ".[gen]"`.
 - **`generative-score` needs the `[gen]` extra** (`quick-sco-re`, `sglang`). It's
   declared in [pyproject.toml](pyproject.toml)'s `optional-dependencies`, but
-  `quick-sco-re` comes from git, so only a source install gets it (the built
-  26.9.0 wheel carries no `gen` extra). `GenerativeScorer` imports `quick_sco_re`
-  at module load, so [cli.py](src/cotorra/cli.py) imports it _lazily_ inside the
-  command. Preserve that laziness so the base install works without these
-  heavy/optional deps.
+  `quick-sco-re` comes from git, so only a source install gets it (the release
+  workflow drops the extra from what it publishes; see
+  [Build, docs, release](#build-docs-release)). `GenerativeScorer` imports
+  `quick_sco_re` at module load, so [cli.py](src/cotorra/cli.py) imports it
+  _lazily_ inside the command. Preserve that laziness so the base install works
+  without these heavy/optional deps.
 - **`sec_per_pos_id` isn't saved with the model.** `extract` has to be told the
   `time_based_rope` spacing the model was trained with; it's in
   `mdl-<run_name>-training.yaml`.
@@ -413,12 +414,32 @@ the model trains on (without `doc_masking` it stays concatenated).
 mkdocs build
 mkdocs serve --dev-addr 127.0.0.1:8001
 
-# build + publish to PyPI
-rm -rf dist && python3 -m build && python3 -m twine upload --repository pypi dist/*
-
-# release tag (signed); version lives in pyproject.toml `version`
+# release: bump pyproject.toml `version`, commit, then push a signed tag for it
 git tag -s vXX.X.X -m "message"
+git push origin vXX.X.X
 ```
+
+Pushing a `v*` tag to `bbj-lab/cotorra` runs
+[publish.yml](.github/workflows/publish.yml), which builds the sdist and wheel
+and uploads them to PyPI and TestPyPI by trusted publishing (OIDC, as for
+Codecov, so no token secret), in parallel jobs through the `pypi` and `testpypi`
+environments, so neither index's failure blocks the other; TestPyPI skips a
+version it already has. It fails unless the tag is `v` + `version`, points to the
+commit built, and is signed (`git tag -s`, not a lightweight tag) with burkh4rt's
+release key: it imports the public keys GitHub serves for that account and
+accepts only the one whose fingerprint it pins (`RELEASE_KEY`), so letting anyone
+else release means changing that. Each file gets two Sigstore-signed
+attestations, both keyless (signed for the workflow's OIDC identity): SLSA build
+provenance from the build job, kept by GitHub
+(`gh attestation verify <file> --repo bbj-lab/cotorra`), and the publish action's
+PEP 740 attestations, uploaded beside it to each index
+(`pypi-attestations verify pypi --repository https://github.com/bbj-lab/cotorra pypi:<file>`).
+PyPI no longer takes PGP signatures, so Sigstore is the only signing it shows.
+PyPI refuses any requirement that's a direct URL reference, even in an extra, so
+before building it drops every extra holding one: `gen`, whose `quick-sco-re`
+comes from git. Don't build and upload by hand: a plain `python -m build` keeps
+`gen`, and PyPI rejects the upload. Once `quick-sco-re` is on PyPI, pin it by
+version and `gen` ships with no change to the workflow.
 
 `docs/recipes/` and top-level `recipes/` are kept in sync (the docs include the
 recipe markdown). `docs/index.md` likewise includes `README.md`, so README edits
