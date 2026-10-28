@@ -144,6 +144,18 @@ class TrainerWithCustomLoss(t_Trainer):
         output.metrics.update(self.term_means("eval", prefix=f"{metric_key_prefix}_"))
         return output
 
+    def _report_to_hp_search(
+        self, trial: typing.Any, step: int, metrics: dict[str, float]
+    ) -> None:
+        # Optuna's pruner compares trials at equal reported steps. Report the
+        # eval number (1, 2, ... = 10%, 20%, ... of this run) instead of the
+        # global step, so runs with different epochs are compared at equal
+        # fractions of their own schedule, not at equal step counts.
+        every = getattr(self.state, "eval_steps", None)
+        if every:
+            step = step // every
+        super()._report_to_hp_search(trial, step, metrics)
+
 
 class Trainer(Configurable):
     """the meds format dumps training (train), validation (tuning), and test (held_out)
