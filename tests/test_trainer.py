@@ -415,7 +415,7 @@ def test_evaluation_reports_each_terms_mean_over_the_whole_eval_set(
 ):
     """weighted by rows as hf weights `eval_loss` -- here over a short last
     batch -- so the weighted terms add up to it"""
-    cfg = base_training_cfg(training_args={"per_device_eval_batch_size": 5})
+    cfg = base_training_cfg()
     trainer = Trainer(
         training_cfg=write_cfg(
             tmp_path_factory.mktemp("eval-terms") / "training.yaml", cfg
@@ -423,7 +423,12 @@ def test_evaluation_reports_each_terms_mean_over_the_whole_eval_set(
         processed_data_home=processed,
         output_home=tmp_path_factory.mktemp("eval-terms-output"),
     )
-    assert len(trainer.trainer.eval_dataset) % 5
+    # the eval set's length follows the synthetic data (and the cocoa collating
+    # it), so pick a batch size that leaves its last batch short
+    n = len(trainer.trainer.eval_dataset)
+    trainer.trainer.args.per_device_eval_batch_size = next(
+        b for b in range(5, n) if n % b
+    )
     metrics = trainer.trainer.evaluate()
     assert metrics["eval_loss"] == pytest.approx(
         metrics["eval_x_ent_loss"]

@@ -61,6 +61,12 @@ class Tuner(Trainer):
     def train(self, verbose: bool = False) -> None:
         tuning_args = OmegaConf.to_container(self.cfg.tuning_args, resolve=True)
         hp_space = tuning_args.pop("hp_space", None)
+        warmup = tuning_args.pop("prune_warmup_evals", None)
+        if warmup is not None:
+            # Optuna's default pruner, but never prune before eval number `warmup`
+            tuning_args["pruner"] = optuna.pruners.MedianPruner(
+                n_warmup_steps=int(warmup)
+            )
         # hf skips a field `TrainingArguments` lacks with a warning, so a typo would
         # run every trial alike
         if unknown := set(hp_space or {}) - set(TrainingArguments.__dataclass_fields__):

@@ -59,9 +59,13 @@ SCHEMAS = {
         "out_dttm": DTTM,
         "location_category": pl.String,
     },
-    # deliberately carries no time column: the CODE entry is configured with
-    # `reference_key`, so its time arrives from the reference frame
-    "clif_code_status": {"patient_id": pl.String, "code_status_category": pl.String},
+    # keyed by patient, as in clif: the CODE entry's `reference_key` joins each
+    # row to every stay of its patient, and its window keeps the stay it was set in
+    "clif_code_status": {
+        "patient_id": pl.String,
+        "start_dttm": DTTM,
+        "code_status_category": pl.String,
+    },
     "clif_crrt_therapy": {
         "hospitalization_id": pl.String,
         "recorded_dttm": DTTM,
@@ -160,6 +164,7 @@ class Manifest:
     admission: dict  # hospitalization_id -> naive utc admission datetime
     discharge: dict  # hospitalization_id -> naive utc discharge datetime
     los_hours: dict  # hospitalization_id -> length of stay in hours
+    code_status: dict  # hospitalization_id -> (naive utc time, category) set in it
     icu: frozenset  # hospitalizations with an XFR-IN//icu event
     imv: frozenset  # hospitalizations with a RESP//imv event
     prone: frozenset
@@ -235,7 +240,7 @@ def write_raw_dataset(
 
     rows = {t: [] for t in SCHEMAS}
     patient_ids, patient_of, subjects_of = [], {}, {}
-    admission, discharge, los_hours = {}, {}, {}
+    admission, discharge, los_hours, code_status = {}, {}, {}, {}
     (
         icu,
         imv,
@@ -262,12 +267,6 @@ def write_raw_dataset(
                 "ethnicity_category": ETHNICITIES[i % len(ETHNICITIES)],
                 "sex_category": SEXES[i % len(SEXES)],
                 "language_category": LANGUAGES[i % len(LANGUAGES)],
-            }
-        )
-        rows["clif_code_status"].append(
-            {
-                "patient_id": pid,
-                "code_status_category": ("Full" if i % 3 else "DNR/DNI"),
             }
         )
 
@@ -297,6 +296,18 @@ def write_raw_dataset(
                     "age_at_admission": _spread(v, 18, 95),
                     "admission_type_category": ADMIT_TYPES[v % len(ADMIT_TYPES)],
                     "discharge_category": dscg,
+                }
+            )
+
+            # --- code status, set an hour in; a second stay reverses the first's,
+            # so a status landing on the other stay of its patient would show
+            status = "Full" if bool(i % 3) != bool(j) else "DNR/DNI"
+            code_status[hid] = (a + HOUR, status)
+            rows["clif_code_status"].append(
+                {
+                    "patient_id": pid,
+                    "start_dttm": a + HOUR,
+                    "code_status_category": status,
                 }
             )
 
@@ -600,9 +611,18 @@ def write_raw_dataset(
                         }
                     )
 
+        # --- a code status set ten days before the first stay, so in none
+        first = f"H{i:04d}0"
+        rows["clif_code_status"].append(
+            {
+                "patient_id": pid,
+                "start_dttm": admission[first] - 10 * DAY,
+                "code_status_category": "DNR",
+            }
+        )
+
         # --- patient-level extra events: one inside the first stay, one well
         # before it; the date-only column exercises fix_date_to_time
-        first = f"H{i:04d}0"
         rows["clif_extra_events"].extend(
             [
                 {
@@ -645,6 +665,7 @@ def write_raw_dataset(
         admission=admission,
         discharge=discharge,
         los_hours=los_hours,
+        code_status=code_status,
         icu=frozenset(icu),
         imv=frozenset(imv),
         prone=frozenset(prone),
