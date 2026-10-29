@@ -228,17 +228,18 @@ that specifies:
 - **tnt_objective** _(optional)_: Trains a time-to-next-token (TNT) head that
   predicts, at each token, the log1p-hours until the next token, making the model
   a marked point process. Its target is derived from `times`, and a record's last
-  token is left out.
+  token is left out. See [Training secondary heads](#training-secondary-heads).
     - **weight**: Weight on the term (default: `1.0`).
     - **mixture_components** _(optional)_: Makes the head predict a distribution
       rather than a single value: the chance that the next token shares this
-      one's timestamp, plus a mixture of this many log-normals over the positive
-      gap, conditioned on which token comes next and trained by likelihood.
-      Needed to sample realistic times. Left unset, the head predicts log1p-hours
-      by squared error.
+      one's timestamp, plus a mixture of this many log-normals (at least 1) over
+      the positive gap, conditioned on which token comes next and trained by
+      likelihood. Needed to sample realistic times. Left unset, the head predicts
+      log1p-hours by squared error.
 - **disposition_objective** _(optional)_: Trains a supervised head that predicts,
   at each token, the record's discharge disposition, read off its `DSCG//*`
-  token, by cross-entropy.
+  token, by cross-entropy. See
+  [Training secondary heads](#training-secondary-heads).
     - **weight**: Weight on the term (default: `1.0`).
     - **classes**: The dispositions to predict among, as token labels or fnmatch
       patterns (default: `["DSCG//*"]`). A record whose disposition matches none
@@ -375,18 +376,69 @@ those heads, each trained jointly with next-token prediction.
 
 The TNT head turns the model into a marked point process: the language-modelling
 head predicts _what_ the next token is, and the TNT head _when_ it arrives. It
-comes in two kinds. By default it predicts a single value per token (log1p-hours,
-by squared error). With `mixture_components` set, it predicts a distribution over
-the gap instead, given which token comes next, which is what sampling realistic
-times needs.
+comes in two kinds:
+
+- **A point head**, the default, predicts a single value at each token: the
+  log1p-hours until the next token, trained by squared error. It predicts the
+  same gap whatever token comes next, so it can't time a token sampled from the
+  model.
+- **A mixture head**, with `mixture_components` set, predicts a distribution over
+  the gap instead, given which token comes next. That is what sampling realistic
+  times needs.
+
+The mixture head's distribution has two parts:
+
+- **The gap is exactly 0** with some probability: the next token shares this
+  one's timestamp, as the tokens of a single event, or of results recorded at
+  once, do. A continuous distribution can't put any probability on exactly 0.
+- **Otherwise the gap is log-normal**, its log-hours a mixture of Gaussians, each
+  with its own weight, mean and width, so that the gap can have several typical
+  scales at once. `mixture_components` sets how many (at least 1); the examples
+  here use 8.
+
+The head reads the hidden state at each token together with the embedding of the
+token after it, so the gap can depend on what arrives: a quantile token
+completing an event comes at once, a new event later. It's trained by the
+negative log-likelihood of the gap that came, the positive part's density taken
+on the log-hours scale, where the mixture lives. With `custom_loss: true` the
+term is logged as `tnt_loss` (`eval_tnt_loss` in evaluation). It isn't comparable
+with a point head's squared error, and it can go below 0. Besides each record's
+last token, the mixture head leaves out each row's last token, since the token
+after it lies in the next row.
+
+Choose the mixture head to sample timelines with their times, or to score how
+likely a gap is. For a single predicted gap, either kind works:
+`cotorra extract --time-to-next-token` writes the same quantity for both, the
+`expm1` of the mean log1p-hours until the next token, given the history alone.
+That's a typical gap rather than the average one, which a few long waits pull
+higher. A mixture head gets it by averaging over every possible next token,
+weighted by the model's own next-token probabilities, so it costs more to extract
+(see [Extraction](#2-extraction)).
 
 The disposition head is supervised. At each token it predicts how the record will
-end, for example the chance that the patient dies before discharge
-(`DSCG//expired`). Its target comes from the record's own `DSCG//*` token: every
-token before it is scored against that disposition, and the tokens from it on
-aren't, since by then the disposition is known. A record whose disposition
-matches none of `classes` isn't scored at all. `DSCG//*` includes
-`DSCG//missing`; to leave it out, list the classes you want instead.
+end, as a probability for each of its `classes`: for example, the chance that the
+patient dies before discharge (`DSCG//expired`). Next-token prediction gives a
+disposition's probability only where it's the very next token; the head gives one
+at every token, from the first.
+
+- **Its target** is the record's own disposition token, which cocoa's default
+  config writes at the discharge time, from the hospitalization's
+  `discharge_category`, among the record's last tokens. Every token before it is
+  scored against that disposition, by cross-entropy, and the tokens from it on
+  aren't, since by then the disposition is known. A record holding more than one
+  token from `classes` is scored against the last.
+- **Its classes**, token labels or fnmatch patterns, are resolved against the
+  vocabulary when training starts, and training stops with an error if they match
+  no token at all. The model keeps them in token-id order, whatever order the
+  config lists them in, as `model.heads["disposition"].classes`, and its
+  predictions follow that order.
+- **A record whose disposition matches none of `classes` isn't scored at all**,
+  rather than counted under some other class. Narrowing the classes narrows the
+  question: with `classes: ["DSCG//expired", "DSCG//home"]`, the head learns only
+  from records ending in one of the two, so its `DSCG//expired` probability is
+  the chance of death among those records, not among all of them. `DSCG//*` keeps
+  every record, `DSCG//missing` included; to leave that one out, list the classes
+  you want instead.
 
 To train one or more:
 
