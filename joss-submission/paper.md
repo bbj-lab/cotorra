@@ -1,7 +1,8 @@
 ---
-title: "Cotorra for training generative models on tokenized event sequences"
+title: "Cotorra for modeling tokenized event sequences" # _training_ the models is only a small part of what this package does
 tags:
     - electronic health records
+    - event stream data
     - foundation models
     - generative event models
     - healthcare
@@ -45,10 +46,10 @@ authors:
       orcid: 0000-0002-6700-1468
       affiliation: 1
 affiliations:
-    - name: University of Chicago, U.S.A.
+    - name: University of Chicago, Chicago, IL, U.S.A. # JOSS typically drops dept names
       index: 1
       ror: 024mw5h28
-    - name: Rush University, U.S.A.
+    - name: Rush University, Chicago, IL, U.S.A.
       index: 2
       ror: 01k9xac83
 date: 23 October 2026
