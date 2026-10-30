@@ -15,16 +15,14 @@
 ## About
 
 This repo provides a configurable trainer for generative event models on
-tokenized timelines. _Cotorra_ is a Spanish term for a small-to-medium sized
-parrot, particularly the Monk parakeet. Monk parakeets were introduced to the
-south side of Chicago, where they have flourished. [^1] It benefits from previous
-experience training foundation models on tokenized electronic health records.
-[^2] [^3] [^4] [^5] [^6]
-
-Given a dataset of tokenized timelines, this package trains a model to predict
-the next token in a subject's timeline given their history up to that point, and
-then uses the trained model to extract representations and score outcomes of
-interest. It does all of this in a configurable way.
+tokenized timelines. It also supports three types of downstream inference on
+held-out data: (i) representation-based, (ii) generative, and (iii) inference via
+supervised finetuning, all in a highly configurable way. _Cotorra_ is a Spanish
+term for a small-to-medium sized parrot, particularly the Monk parakeet. Monk
+parakeets were introduced to the south side of Chicago, where they have
+flourished. [^1] The library benefits from previous experience training
+foundation models on tokenized electronic health records. [^2] [^3] [^4] [^5]
+[^6]
 
 <!-- cards-anchor -->
 
@@ -519,14 +517,14 @@ that specifies:
 ## (3) Scoring
 
 Scoring uses a trained model to produce outcome scores for the tokens of
-interest. Two complementary approaches are provided:
+interest. Three complementary approaches are provided:
 
 **Generative scoring** (`cotorra generative-score`) Monte Carlo samples future
 trajectories directly from the model. It:
 
 1. Loads the trained model and held-out inference data.
 2. Samples future trajectories for each target token.
-3. Computes MC, SCOPE, and REACH scores per target token.
+3. Computes MC, SCOPE, and REACH scores [^4] per target token.
 
 Note this depends on the
 [quick-sco-re](https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git)
@@ -553,7 +551,55 @@ We support two types of model transfer for rep-based scoring:
    held-out features of this second set. For this second type of transfer, use
    the `--training-home` option offered by this command.
 
-Both are driven by a YAML config (the package ships a default; see
+**Scoring via supervised finetuning** (`cotorra train`, then `cotorra extract`)
+trains the model to predict an outcome directly, through a head beside its
+language-modelling head, and reads the scores off that head: no estimator is fit
+afterward, and no trajectories are sampled. It needs no scoring command, nor
+`scoring.yaml`:
+
+1. **Train with a supervised head.** Add a `disposition_objective` block to the
+   training config to predict how each record ends (e.g. the chance of
+   `DSCG//expired`), or a `tte_objective` block to predict the hours until its
+   end time, and train as usual; see
+   [Training secondary heads](#training-secondary-heads). The heads train jointly
+   with next-token prediction from the first step: `cotorra train` always builds
+   a fresh model, so it can't add a head to a model already trained without one.
+
+2. **Extract the heads' predictions** for every split's inference contexts:
+
+    ```sh
+    cotorra extract -p processed/ -m output/mdl-<run_name> -d -t
+    ```
+
+    `-d` (`--discharge-disposition`) adds a `<class>_prob` column for each
+    disposition class (`DSCG//expired_prob`, say), and `-t` (`--time-to-event`) a
+    `time_to_event` column in hours; see [Extraction](#2-extraction). Both are
+    read at a context's final token, so set `extract.max_len` to cover the
+    longest `tokens_past`, or a longer context is scored where it was cut off,
+    short of the prediction point.
+
+3. **Evaluate on the held-out split.** `features-held_out-mdl-<run_name>.parquet`
+   has a row per row of `held_out_for_inference.parquet`, in its order, so its
+   scores line up with that table's label columns. For instance, to evaluate
+   `DSCG//expired_prob` as the other scorers' `--verbose` summaries do, over the
+   contexts in which the patient hasn't already expired:
+
+    ```python
+    import polars as pl
+
+    from cotorra.util import bootstrap_ci
+
+    labels = pl.read_parquet("processed/held_out_for_inference.parquet")
+    scores = pl.read_parquet("processed/features-held_out-mdl-<run_name>.parquet")
+    qual = ~labels["DSCG//expired_past"]
+    bootstrap_ci(
+        labels["DSCG//expired_future"].filter(qual).to_numpy(),
+        scores["DSCG//expired_prob"].filter(qual).to_numpy(),
+    )  # 95% intervals for roc_auc, pr_auc, and brier
+    ```
+
+Generative and representation-based scoring are both driven by a YAML config (the
+package ships a default; see
 [`./src/cotorra/config/scoring.yaml`](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/scoring.yaml))
 that specifies:
 
