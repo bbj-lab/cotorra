@@ -10,6 +10,8 @@ output
 processed
 wandb
 mimic-iv-demo
+joss-submission/jats
+joss-submission/paper.pdf
 
 # Created by https://www.toptal.com/developers/gitignore/api/python,pycharm+all,visualstudiocode,macos,windows,linux
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,pycharm+all,visualstudiocode,macos,windows,linux
