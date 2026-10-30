@@ -105,14 +105,23 @@ inference [@Sol26], tokenization best practices [@Lee26], and federated learning
 
 # Statement of need
 
-Many of the papers cited above released code that would presumably allow an
-external researcher to reproduce the results of said paper. Experiences with some
-of these codebases led us to develop our own workflow.
+Generative event models, or foundation model on tokenized event sequences, have
+generated a great deal of excitement in the research community for their
+promising performance and resilience to distribution shift. They consider a
+wholistic account of a patient's hospitalization and could be used to overcome
+some of the challenges associated with fragmented model deployment [@Ram26].
+However, they have yet to be widely adopted or deployed in real-world scenarios
+[@Wor23b]. In a recent literature review, @Guo26 admit that none of the
+fifty-three studies considered described a clinical deployment. These models
+require a fair amount of data preprocessing and training to achieve their
+promised benefits. Configurable, open source tools to prepare data and train
+these models should help to improve adoption and empower healthcare
+professionals.
 
 # State of the field
 
-As research products of a actively developing field, much of the code currently
-available is designed to reproduce the results of a specific paper. Some
+As research products of an actively developing field, much of the currently
+available code is designed to reproduce the results of a specific paper. Some
 repositories and tools have received sustained development and are worth
 consideration from a potential practitioner. The MEDS ecosystem [@McD26] offers
 tools both for converting data into the MEDS format and for training models. The
