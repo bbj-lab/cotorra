@@ -108,16 +108,16 @@ inference [@Sol26], tokenization best practices [@Lee26], and federated learning
 
 Generative event models, or foundation model on tokenized event sequences, have
 generated a great deal of excitement in the research community for their
-promising performance and resilience to distribution shift. They consider a
-wholistic account of a patient's hospitalization and could be used to overcome
-some of the challenges associated with fragmented model deployment [@Ram26].
-However, they have yet to be widely adopted or deployed in real-world scenarios
-[@Wor23b]. In a recent literature review, @Guo26 admit that none of the
-fifty-three studies considered described a clinical deployment. These models
+promising performance and resilience to distribution shift. In healthcare, they
+consider a wholistic account of a patient's medical journey and could be used to
+overcome some of the challenges associated with fragmented model deployment
+[@Ram26]. Outside of medicine, they have found applications in recommender
+systems [@Zha24; @Li26] and finance [@Dou26]. However, they have yet to be widely
+adopted or deployed in real-world scenarios [@Wor23b; @Guo26]. These models
 require a fair amount of data preprocessing and training to achieve their
-promised benefits. Configurable, open source tools to prepare data and train
-these models should help to improve adoption and empower healthcare
-professionals.
+promised benefits. Configurable, open source tools to prepare data, train models,
+and perform inference should help lower the barrier to entry and empower
+potential practitioners.
 
 # State of the field
 
