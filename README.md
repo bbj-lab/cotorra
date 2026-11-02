@@ -17,12 +17,11 @@
 This repo provides a configurable trainer for generative event models on
 tokenized timelines. It also supports three types of downstream inference on
 held-out data: (i) representation-based, (ii) generative, and (iii) inference via
-supervised finetuning, all in a highly configurable way. _Cotorra_ is a Spanish
-term for a small-to-medium sized parrot, particularly the Monk parakeet. Monk
-parakeets were introduced to the south side of Chicago, where they have
-flourished. [^1] The library benefits from previous experience training
-foundation models on tokenized electronic health records. [^2] [^3] [^4] [^5]
-[^6]
+supervised finetuning. _Cotorra_ is a Spanish term for a small-to-medium sized
+parrot, particularly the Monk parakeet. Monk parakeets were introduced to the
+south side of Chicago, where they have flourished. [^1] The library benefits from
+previous experience training foundation models on tokenized electronic health
+records. [^2] [^3] [^4] [^5] [^6]
 
 <!-- cards-anchor -->
 
@@ -1141,8 +1140,9 @@ Make tag and send to pypi and testpypi (pushing a `v*` tag runs
 `.github/workflows/publish.yml`, which drops the `gen` extra, builds, and
 uploads to both):
 ```
-git tag -s v26.10.2 -m "best-fit packing"
-git push origin v26.10.2
+git tag -s v26.11.0 -m "optimized optuna"
+git push origin v26.11.0
+git push upstream v26.11.0
 ```
 
 -->
