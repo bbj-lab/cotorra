@@ -634,9 +634,27 @@ def test_a_custom_loss_can_score_a_batch_without_labels(built_trainer, monkeypat
     trainer.reset_terms("eval")
     with t.no_grad():
         trainer.compute_loss(mdl.eval(), batch)
-    assert trainer.term_weights["eval"] == 3
+    assert trainer.term_weights["eval"] == {"mean_logit": 3}
     assert set(trainer.term_sums["eval"]) == {"mean_logit"}
     trainer.reset_terms("eval")
+
+
+@pytest.mark.parametrize("every, reported", [(5, 4), (None, 20), (0, 20)])
+def test_a_trial_reports_its_evaluation_number_rather_than_its_step(
+    built_trainer, monkeypatch, every, reported
+):
+    """so that optuna's pruner compares trials at equal fractions of their own
+    schedules, however many steps each takes; with no evaluation steps to count
+    by, the step as it is"""
+    seen = []
+    monkeypatch.setattr(
+        "transformers.Trainer._report_to_hp_search",
+        lambda self, trial, step, metrics: seen.append(step),
+    )
+    hf = built_trainer.trainer
+    monkeypatch.setattr(hf.state, "eval_steps", every)
+    hf._report_to_hp_search(None, 20, {"eval_loss": 1.0})
+    assert seen == [reported]
 
 
 def trainer_with(cfg: dict, processed, tmp_path, **kwargs) -> Trainer:
@@ -1548,6 +1566,79 @@ def test_pad_eval_head_loss_uses_its_valid_targets(processed_with_end_times, tmp
     assert metrics["eval_tte_loss"] == pytest.approx(total / denominator, rel=1e-5)
 
 
+def test_pad_eval_mixture_head_loss_leaves_each_rows_last_position_out(
+    processed, tmp_path
+):
+    """which has no next token in its row to condition on: averaged over the
+    positions the head scores (`Head.scored`), so that a row cut from a longer
+    record, ending on a gap to its next chunk, counts no position the head
+    leaves out"""
+    cfg = base_training_cfg(packing="pad", tnt_objective={"mixture_components": 3})
+    trainer = trainer_with(cfg, processed, tmp_path)
+    hf = trainer.trainer
+    mdl = hf.model.eval()
+    head = mdl.heads["tnt"]
+    total, n, cut = 0.0, 0, 0
+    with t.no_grad():
+        for eg in hf.eval_dataset:
+            batch = {k: v.to(mdl.device) for k, v in trainer.collate_fn([eg]).items()}
+            labels = batch.pop("labels")
+            terms = dict()
+            trainer.loss(mdl(**batch), labels, terms)
+            k = head.scored(batch["hours_to_next_token"]).sum().item()
+            total += k * terms["tnt_loss"].item()
+            n += k
+            cut += bool(batch["hours_to_next_token"][0, -1].isfinite())
+    assert cut
+    assert hf.evaluate()["eval_tnt_loss"] == pytest.approx(total / n, rel=1e-5)
+
+
+def test_other_packings_evaluate_as_hf_does(processed_with_end_times, tmp_path):
+    """`packing: pad` aside, `eval_loss` is hf's own, each batch's loss weighted
+    by its rows, and so is each logged term, as released: a run picks the
+    checkpoint it always did, though a head scores a batch's tokens unevenly"""
+    cfg = base_training_cfg(tte_objective={}, disposition_objective={})
+    trainer = trainer_with(cfg, processed_with_end_times, tmp_path)
+    hf = trainer.trainer
+    mdl = hf.model.eval()
+    sums, rows = collections.defaultdict(float), 0
+    with t.no_grad():
+        for batch in hf.get_eval_dataloader():
+            batch = dict(batch)
+            labels = batch.pop("labels")
+            terms, k = dict(), len(labels)
+            sums["loss"] += k * trainer.loss(mdl(**batch), labels, terms).item()
+            for name, term in terms.items():
+                sums[name] += k * term.item()
+            rows += k
+    assert {"tte_loss", "disposition_loss"} < set(sums)
+    metrics = hf.evaluate()
+    for name, total in sums.items():
+        assert metrics[f"eval_{name}"] == pytest.approx(total / rows, rel=1e-5)
+
+
+def test_pad_eval_loss_of_another_loss_function_is_a_mean_over_the_tokens(
+    pad_trainer, monkeypatch
+):
+    """one that counts nothing of its own, as `Loss` does: each batch's loss
+    weighted by the tokens its lm scores"""
+    hf = pad_trainer.trainer
+    mdl = hf.model.eval()
+
+    def loss_func(outputs, labels, terms):
+        return outputs.logits.float().square().mean()
+
+    monkeypatch.setattr(hf, "compute_loss_func", loss_func)
+    total, n = 0.0, 0
+    with t.no_grad():
+        for batch in hf.get_eval_dataloader():
+            batch = dict(batch)
+            k = (batch.pop("labels")[:, 1:] != -100).sum().item()
+            total += k * loss_func(mdl(**batch), None, dict()).item()
+            n += k
+    assert hf.evaluate()["eval_loss"] == pytest.approx(total / n, rel=1e-5)
+
+
 def test_pad_trains_and_evaluates_on_hfs_own_batches(pad_trainer):
     """hf's dataloaders, through the batch samplers and the collator:
     training's batch holding the longest row first, evaluation's batches
@@ -1564,6 +1655,25 @@ def test_pad_trains_and_evaluates_on_hfs_own_batches(pad_trainer):
     loss.backward()
     assert t.isfinite(loss)
     assert math.isfinite(trainer.evaluate()["eval_loss"])
+
+
+def test_pad_keeps_its_eval_dataloader_with_persistent_workers(
+    pad_trainer, processed, tmp_path
+):
+    """as hf keeps its own, so that later evaluations reuse its workers rather
+    than start them anew; without persistent workers, it keeps none. Built but
+    never iterated, so no worker starts"""
+    cfg = base_training_cfg(packing="pad")
+    cfg["training_args"] |= {
+        "dataloader_num_workers": 1,
+        "dataloader_persistent_workers": True,
+    }
+    hf = trainer_with(cfg, processed, tmp_path).trainer
+    loader = hf.get_eval_dataloader()
+    assert type(loader.batch_sampler) is TokenBudgetBatches
+    assert hf._eval_dataloaders["eval"] is loader
+    pad_trainer.trainer.get_eval_dataloader()
+    assert "eval" not in getattr(pad_trainer.trainer, "_eval_dataloaders", {})
 
 
 def test_pad_gives_hfs_own_loss_a_target_in_every_batch(processed, tmp_path):

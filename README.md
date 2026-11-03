@@ -391,10 +391,13 @@ shuffled, and the one holding the longest row goes first, so that a budget too
 large for memory fails at the first step. The order is seeded by
 `training_args.data_seed`, or `seed` without one, so that every trial of
 `cotorra tune` draws the same batches. Evaluation takes the tuning split's rows
-longest first, batched the same way. Its `eval_loss`, which picks the best
-checkpoint and which `cotorra tune` minimizes, is a mean over the tokens scored,
-as are the logged `eval_*` terms, rather than HuggingFace's mean over the
-batches weighted by their rows.
+longest first, batched the same way. Each logged `eval_*` term is a mean over the
+positions it scores, rather than HuggingFace's mean over the batches weighted by
+their rows: over the tokens for cross-entropy, the quantile tokens for
+`quantile_token_loss`, and each secondary head's usable targets for its head. Its
+`eval_loss`, which picks the best checkpoint and which `cotorra tune` minimizes,
+weighs those means together as training's loss weighs a batch's. The other
+packings keep HuggingFace's `eval_loss`.
 
 ```yaml
 packing: pad

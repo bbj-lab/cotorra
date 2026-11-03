@@ -43,6 +43,13 @@ MIRRORED_KEYS = (
 )
 
 
+def usable_hours(hours: t.Tensor) -> t.Tensor:
+    """where a number of hours makes a target: finite and non-negative, so that
+    neither a missing time (a nan, as a record's last token's time to the next
+    has) nor padding is ever scored"""
+    return t.isfinite(hours) & (hours >= 0)
+
+
 def log1p_hours_mse(
     preds: t.Tensor, hours: t.Tensor, weights: t.Tensor | None = None
 ) -> t.Tensor:
@@ -56,7 +63,7 @@ def log1p_hours_mse(
     training considers unused"""
     preds = preds.to(dtype=t.float32)
     target = hours.to(device=preds.device, dtype=t.float32)
-    keep = t.isfinite(target) & (target >= 0)
+    keep = usable_hours(target)
     if weights is None:
         total = t.nn.functional.mse_loss(
             preds[keep], t.log1p(target[keep]), reduction="sum"
@@ -252,6 +259,13 @@ class Head(t.nn.Module):
         `target_weight` column holds, None unless the head is `per_record`"""
         raise NotImplementedError
 
+    def scored(self, target: t.Tensor) -> t.Tensor:
+        """where `loss` scores `target`, as a mask: the positions whose count its
+        summed loss is divided by, weighted or not. `loss` reads it too, so the
+        two never differ, and `TrainerWithCustomLoss` counts them to average the
+        head's term over a whole evaluation rather than batch by batch"""
+        raise NotImplementedError
+
     def forward(
         self,
         hidden_states: t.Tensor,
@@ -296,6 +310,13 @@ class Log1pHoursHead(Head):
     def predict(self, hidden_states: t.Tensor) -> t.Tensor:
         return t.nn.functional.softplus(self.linear(hidden_states)).squeeze(-1)
 
+    def hours(self, target: t.Tensor) -> t.Tensor:
+        """the hours the head is scored against: its target as it comes"""
+        return target
+
+    def scored(self, target: t.Tensor) -> t.Tensor:
+        return usable_hours(self.hours(target))
+
     def loss(
         self,
         pred: t.Tensor,
@@ -303,7 +324,8 @@ class Log1pHoursHead(Head):
         weights: t.Tensor | None = None,
         **context,
     ) -> t.Tensor:
-        return log1p_hours_mse(pred, target, weights)
+        # `log1p_hours_mse` masks by `usable_hours`, as `scored` does
+        return log1p_hours_mse(pred, self.hours(target), weights)
 
 
 class TteHead(Log1pHoursHead):
@@ -329,14 +351,10 @@ class TteHead(Log1pHoursHead):
         super().__init__(hidden_size, weight)
         self.per_record = per_record
 
-    def loss(
-        self,
-        pred: t.Tensor,
-        target: t.Tensor,
-        weights: t.Tensor | None = None,
-        **context,
-    ) -> t.Tensor:
-        return super().loss(pred, target.clamp(min=0), weights)
+    def hours(self, target: t.Tensor) -> t.Tensor:
+        """0 hours remaining for a token recorded after the end time; a nan stays
+        one"""
+        return target.clamp(min=0)
 
 
 class TntHead(Head):
@@ -489,10 +507,15 @@ class TntMixtureHead(TntHead):
         dist = self.distribution(
             hidden_states[:, :-1], input_embeddings(input_ids[:, 1:])
         )
-        target = target[:, :-1].to(device=dist.means.device, dtype=t.float32)
-        keep = t.isfinite(target) & (target >= 0)
-        nll = -dist.log_prob(t.where(keep, target, 0.0))
+        target = target.to(device=dist.means.device, dtype=t.float32)
+        keep = self.scored(target)
+        nll = -dist.log_prob(t.where(keep, target[:, :-1], 0.0))
         return (nll * keep).sum() / keep.sum().clamp(min=1)
+
+    def scored(self, target: t.Tensor) -> t.Tensor:
+        """every position but each row's last, which has no next token in the row
+        to condition on, where its hours make a target"""
+        return usable_hours(target[:, :-1])
 
     def sample_hours(
         self,
@@ -629,6 +652,10 @@ class DispositionHead(Head):
     def predict(self, hidden_states: t.Tensor) -> t.Tensor:
         return self.linear(hidden_states)
 
+    def scored(self, target: t.Tensor) -> t.Tensor:
+        """every position with a disposition still to come, of one of `classes`"""
+        return target != -100
+
     def loss(
         self,
         pred: t.Tensor,
@@ -638,7 +665,8 @@ class DispositionHead(Head):
     ) -> t.Tensor:
         logits = pred.flatten(0, -2).to(dtype=t.float32)
         target = target.to(device=pred.device, dtype=t.long).flatten()
-        scored = target != -100
+        # what `ignore_index` skips
+        scored = self.scored(target)
         if weights is None:
             total = t.nn.functional.cross_entropy(
                 logits, target, ignore_index=-100, reduction="sum"

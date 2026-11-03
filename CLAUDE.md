@@ -125,7 +125,11 @@ to compute the vocabulary's half once per call and chunks positions by
 `chunk_elements`; a change to `proj`'s layout has to change it too. Every head is
 scored unshifted (position i against its own target) over every position,
 whatever `logits_to_keep` trims, and each loss is summed then normalized so a
-batch with nothing to score still gives its head a gradient.
+batch with nothing to score still gives its head a gradient. It's normalized by
+the count of the positions `Head.scored` marks, which the head's `loss` reads
+too, so that `TrainerWithCustomLoss` can count them to average the head's term
+over a whole evaluation (see `pad`, below); a new head implements `scored` beside
+`loss`.
 
 ### Configuration model (important)
 
@@ -370,16 +374,21 @@ a NICU split, the discharge rate it was fit to rose 3.4×). Megabatches, as HF's
 length-grouped sampler sorts, would leave the rare short rows a batch spanning a
 wide range of lengths, badly filled, so the sort is over the whole pass,
 fairseq's way. Under `pad`, `tally` weights the logged terms by the tokens a
-batch's LM scores rather than its rows, and evaluation tallies the loss itself,
-so that `evaluation_loop`'s `eval_loss` is a mean over the tokens scored (HF's
-weighs batch means by rows, which a batch of hundreds of short records would
-dominate). `Trainer.__init__` refuses `pad` with `train_sampling_strategy` other
-than `group_by_length`, with more than one process (how accelerate shards batches
-of varying size differs by version), with `auto_find_batch_size` (which halves
-the batch size HF hands a dataloader, which the budget doesn't read, so every
-retry would rebuild the same batches), or with time-based RoPE under flash
-attention (see the gotcha below), and refuses `tokens_per_batch` without `pad` or
-below `max_seq_len`.
+batch's LM scores rather than its rows, and in evaluation by the positions each
+term scores: `Loss.custom_loss` records each LM term's count beside it
+(`counts`), from the mask it averages over, and a head's is its `Head.scored`'s.
+`evaluation_loop`'s `eval_loss` is then `Loss.combine` of those means (the one
+place the objective's weights are applied, to a batch's terms in training too)
+or, for a loss function other than `Loss`'s, the loss's own mean over the tokens
+scored; HF's weighs batch means by rows, which a batch of hundreds of short
+records would dominate. Every other packing keeps HF's `eval_loss`, and terms
+weighted by rows, as released. `Trainer.__init__` refuses `pad` with
+`train_sampling_strategy` other than `group_by_length`, with more than one
+process (how accelerate shards batches of varying size differs by version), with
+`auto_find_batch_size` (which halves the batch size HF hands a dataloader, which
+the budget doesn't read, so every retry would rebuild the same batches), or with
+time-based RoPE under flash attention (see the gotcha below), and refuses
+`tokens_per_batch` without `pad` or below `max_seq_len`.
 
 ## Gotchas
 
