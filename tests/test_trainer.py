@@ -2,6 +2,7 @@
 
 """tests for cotorra.trainer.Trainer"""
 
+import collections
 import math
 import os
 import pathlib
@@ -14,7 +15,7 @@ from omegaconf import OmegaConf
 from transformers import AutoModelForCausalLM, TrainingArguments
 
 from cotorra.model import HEADS
-from cotorra.trainer import LengthGroupedRows, Trainer, row_lengths
+from cotorra.trainer import TokenBudgetBatches, Trainer, row_lengths
 from cotorra.tuner import Tuner
 
 
@@ -633,7 +634,7 @@ def test_a_custom_loss_can_score_a_batch_without_labels(built_trainer, monkeypat
     trainer.reset_terms("eval")
     with t.no_grad():
         trainer.compute_loss(mdl.eval(), batch)
-    assert trainer.term_rows["eval"] == 3
+    assert trainer.term_weights["eval"] == 3
     assert set(trainer.term_sums["eval"]) == {"mean_logit"}
     trainer.reset_terms("eval")
 
@@ -1284,92 +1285,165 @@ def test_pad_padding_is_no_target_for_the_lm_or_any_head(
     assert any(e.isfinite() for e in ends)
 
 
-def drawn(sampler: LengthGroupedRows, epoch: int | None = None) -> list[int]:
+def drawn(sampler: TokenBudgetBatches, epoch: int | None = None) -> list[list[int]]:
     if epoch is not None:
         sampler.set_epoch(epoch)
     return list(sampler)
 
 
-def test_length_grouped_rows_are_drawn_by_their_seed_and_epoch():
-    """alike in every process, and in every trial of a search, whatever else
-    drew from torch's own generator; reseeded by the epoch hf sets, so that a
-    resumed run draws the order it left off in"""
-    lengths = list(range(1, 200))
-    sampler = LengthGroupedRows(4, lengths, seed=0)
+def test_token_budget_batches_are_drawn_by_their_seed_and_epoch():
+    """alike in every trial of a search, whatever else drew from torch's own
+    generator; redrawn by the epoch hf sets, so that a resumed run draws the
+    batches it left off in, and as many as it says it holds"""
+    lengths = [1 + (7 * i) % 16 for i in range(200)]
+    sampler = TokenBudgetBatches(lengths, 64, seed=0)
     first = drawn(sampler)
-    assert sorted(first) == list(range(len(lengths)))
+    assert len(sampler) == len(first)
+    assert sorted(i for batch in first for i in batch) == list(range(len(lengths)))
     t.manual_seed(123)
-    assert drawn(LengthGroupedRows(4, lengths, seed=0)) == first
-    assert drawn(LengthGroupedRows(4, lengths, seed=1)) != first
+    assert drawn(TokenBudgetBatches(lengths, 64, seed=0)) == first
+    assert drawn(TokenBudgetBatches(lengths, 64, seed=1)) != first
     assert drawn(sampler, epoch=1) != first
     assert drawn(sampler, epoch=0) == first
-    assert drawn(LengthGroupedRows(4, lengths, seed=0), epoch=1) == drawn(
+    assert drawn(TokenBudgetBatches(lengths, 64, seed=0), epoch=1) == drawn(
         sampler, epoch=1
     )
-
-
-def test_pad_groups_the_training_rows_by_length(pad_trainer):
-    """hf's length-grouped sampler, over the rows' own lengths and seeded as hf
-    seeds: rows of about one length to a batch, the longest first, padded far
-    less than rows drawn at random"""
-    trainer = pad_trainer.trainer
-    sampler = trainer._get_train_sampler()
-    assert type(sampler) is LengthGroupedRows
-    lengths = [len(eg["input_ids"]) for eg in trainer.train_dataset]
-    assert sampler.lengths == lengths
-    assert sampler.seed == trainer.args.seed
-    assert sampler.batch_size == (
-        trainer.args.train_batch_size * trainer.args.gradient_accumulation_steps
+    # unseeded, the rows in their own order
+    assert [i for b in drawn(TokenBudgetBatches(lengths, 64)) for i in b] == list(
+        range(200)
     )
-    size = trainer.args.train_batch_size
-
-    def padding(order: list[int]) -> int:
-        batches = [order[i : i + size] for i in range(0, len(order), size)]
-        return sum(
-            len(b) * max(lengths[j] for j in b) - sum(lengths[j] for j in b)
-            for b in batches
-        )
-
-    grouped = drawn(sampler, epoch=0)
-    assert lengths[grouped[0]] == max(lengths)
-    shuffled = t.randperm(len(lengths), generator=t.Generator().manual_seed(0))
-    assert 0 < padding(grouped) < padding(shuffled.tolist()) / 2
 
 
-@pytest.mark.parametrize(
-    "strategy, sampler",
-    [
-        ("group_by_length", LengthGroupedRows),
-        ("random", t.utils.data.RandomSampler),
-        ("sequential", t.utils.data.SequentialSampler),
-    ],
-)
-def test_pad_leaves_its_rows_to_any_sampler_train_sampling_strategy_names(
-    strategy, sampler, processed, tmp_path
-):
-    """hf's own `group_by_length` is taken as cotorra's, its megabatches a
-    multiple, as hf's are, of a step's rows, gradient accumulation and all; the
-    tuning rows stay longest first whichever, which hf's `group_by_length` would
-    shuffle"""
-    cfg = base_training_cfg(packing="pad")
-    cfg["training_args"]["train_sampling_strategy"] = strategy
+def test_pad_batches_by_a_budget_of_tokens_each_pass_apart(processed, tmp_path):
+    """hf's own dataloaders, through `TokenBudgetBatches`: every row of every
+    one of the loader's passes once, each batch holding as many rows as fit
+    `per_device_train_batch_size` rows of `max_seq_len` once padded, so that
+    batches of short rows hold more of them; seeded as hf seeds its samplers"""
+    cfg = base_training_cfg(packing="pad", n_epochs=2)
     cfg["training_args"]["gradient_accumulation_steps"] = 2
     trainer = trainer_with(cfg, processed, tmp_path).trainer
-    assert type(drawn := trainer._get_train_sampler()) is sampler
-    if sampler is LengthGroupedRows:
-        assert drawn.batch_size == 2 * trainer.args.train_batch_size
-    evaluated = trainer._get_eval_sampler(trainer.eval_dataset)
-    assert type(evaluated) is t.utils.data.SequentialSampler
+    budget = trainer.args.per_device_train_batch_size * cfg["max_seq_len"]
+    loader = trainer.get_train_dataloader()
+    sampler = loader.batch_sampler
+    assert type(sampler) is TokenBudgetBatches
+    assert (sampler.budget, sampler.n_passes) == (budget, 2)
+    assert sampler.seed == trainer.args.seed
+    assert len(loader) == len(sampler)
+
+    lengths = row_lengths(trainer.train_dataset)
+    batches = drawn(sampler)
+    assert sorted(i for b in batches for i in b) == list(range(len(lengths)))
+    assert all(len(b) * max(lengths[i] for i in b) <= budget for b in batches)
+    assert max(map(len, batches)) > trainer.args.per_device_train_batch_size
+    per_pass = len(lengths) // 2
+    passes = [{i // per_pass for i in b} for b in batches]
+    assert all(len(p) == 1 for p in passes)
+    passes = [min(p) for p in passes]
+    assert passes == sorted(passes) and set(passes) == {0, 1}
+
+    widths = [b["input_ids"].shape for b in loader]
+    assert len(widths) == len(batches)
+    assert all(rows * width <= budget for rows, width in widths)
+
+
+def test_tokens_per_batch_budgets_training_and_evaluation_alike(processed, tmp_path):
+    """in place of the batch sizes' rows of `max_seq_len`, which otherwise set
+    training's and evaluation's apart"""
+    cfg = base_training_cfg(packing="pad")
+    cfg["training_args"]["per_device_eval_batch_size"] = 3
+    trainer = trainer_with(cfg, processed, tmp_path / "default").trainer
+    n = cfg["max_seq_len"]
+    assert (trainer.token_budget(True), trainer.token_budget(False)) == (2 * n, 3 * n)
+    # read off the arguments as a search's trial leaves them
+    trainer.args.per_device_train_batch_size = 4
+    assert trainer.get_train_dataloader().batch_sampler.budget == 4 * n
+    budgeted = trainer_with(cfg | {"tokens_per_batch": 5 * n}, processed, tmp_path)
+    hf = budgeted.trainer
+    assert (hf.token_budget(True), hf.token_budget(False)) == (5 * n, 5 * n)
+    evaluated = hf.get_eval_dataloader().batch_sampler
+    assert (evaluated.budget, evaluated.seed) == (5 * n, None)
+
+
+def test_tokens_per_batch_has_to_hold_a_row(processed, tmp_path):
+    cfg = base_training_cfg(packing="pad", tokens_per_batch=8)
+    with pytest.raises(ValueError, match="can't hold a row of `max_seq_len: 16`"):
+        trainer_with(cfg, processed, tmp_path)
+
+
+def test_tokens_per_batch_needs_pad(processed, tmp_path):
+    cfg = base_training_cfg(tokens_per_batch=64)
+    with pytest.raises(ValueError, match="`tokens_per_batch` needs `packing: pad`"):
+        trainer_with(cfg, processed, tmp_path)
+
+
+@pytest.mark.parametrize("strategy", ["random", "sequential"])
+def test_pad_refuses_a_sampling_strategy_it_would_ignore(strategy, processed, tmp_path):
+    """drawn by a count of rows, at random or in turn, each of a short record's
+    tokens would weigh far above a long one's; hf's `group_by_length` is what
+    the budget does anyway"""
+    cfg = base_training_cfg(packing="pad")
+    cfg["training_args"]["train_sampling_strategy"] = strategy
+    with pytest.raises(ValueError, match=f"train_sampling_strategy: {strategy}"):
+        trainer_with(cfg, processed, tmp_path / strategy)
+    cfg["training_args"]["train_sampling_strategy"] = "group_by_length"
+    loader = trainer_with(cfg, processed, tmp_path).trainer.get_train_dataloader()
+    assert type(loader.batch_sampler) is TokenBudgetBatches
+
+
+def test_pad_refuses_to_train_across_processes(processed, tmp_path, monkeypatch):
+    monkeypatch.setattr(TrainingArguments, "world_size", property(lambda self: 2))
+    with pytest.raises(ValueError, match="doesn't yet train across processes"):
+        trainer_with(base_training_cfg(packing="pad"), processed, tmp_path)
 
 
 def test_other_packings_leave_their_rows_to_hfs_samplers(built_trainer):
     trainer = built_trainer.trainer
     assert type(trainer._get_train_sampler()) is t.utils.data.RandomSampler
+    loader = trainer.get_train_dataloader()
+    assert type(loader.batch_sampler) is not TokenBudgetBatches
+
+
+@pytest.mark.parametrize("custom_loss", [True, False])
+def test_pad_eval_loss_is_a_mean_over_the_tokens_scored(
+    custom_loss, processed, tmp_path
+):
+    """its batches hold rows by the dozen or a few at a time, and hf's own
+    `eval_loss`, weighing each batch's mean by its rows, would weigh each of a
+    short record's tokens far above a long one's: each row's mean loss, scored
+    alone, weighted by its targets, as are the custom loss's terms. Without the
+    quantile-token term, which averages over its own positions rather than
+    every target's, so that a batch's loss is the mean of its targets' own"""
+    cfg = base_training_cfg(packing="pad", custom_loss=custom_loss)
+    del cfg["quantile_token_loss"]
+    trainer = trainer_with(cfg, processed, tmp_path)
+    hf = trainer.trainer
+    widths = [b["input_ids"].shape for b in hf.get_eval_dataloader()]
+    assert len({rows for rows, _ in widths}) > 1
+    mdl = hf.model.eval()
+    sums, n = collections.defaultdict(float), 0
+    with t.no_grad():
+        for eg in hf.eval_dataset:
+            batch = {k: v.to(mdl.device) for k, v in trainer.collate_fn([eg]).items()}
+            k = (batch["labels"][:, 1:] != -100).sum().item()
+            labels = batch.pop("labels")
+            if custom_loss:
+                terms = dict()
+                sums["loss"] += k * trainer.loss(mdl(**batch), labels, terms).item()
+                for name, term in terms.items():
+                    sums[name] += k * term.item()
+            else:
+                sums["loss"] += k * mdl(**batch, labels=labels).loss.item()
+            n += k
+    metrics = hf.evaluate()
+    assert metrics["eval_loss"] == pytest.approx(sums.pop("loss") / n, rel=1e-5)
+    for name, total in sums.items():
+        assert metrics[f"eval_{name}"] == pytest.approx(total / n, rel=1e-5)
 
 
 def test_pad_trains_and_evaluates_on_hfs_own_batches(pad_trainer):
-    """hf's dataloaders, through the samplers and the collator: training's
-    longest batch first, evaluation's batches longest first"""
+    """hf's dataloaders, through the batch samplers and the collator:
+    training's batch holding the longest row first, evaluation's batches
+    longest first"""
     trainer = pad_trainer.trainer
     first = next(iter(trainer.get_train_dataloader()))
     assert set(first) == {"input_ids", "labels", "position_ids", "attention_mask"}

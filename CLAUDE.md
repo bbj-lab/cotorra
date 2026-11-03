@@ -185,7 +185,8 @@ Fixing a bug so a key does what it documents isn't a compatibility break: with
 gradients rather than average them (HF leaves that to a custom loss), and now
 averages them. It weights each micro-batch alike, where HF's stock path weights
 each scored token alike; the two agree while every micro-batch scores as many
-tokens, as concatenated rows do and `packing: bfd`'s and `pad`'s needn't. With
+tokens, as concatenated rows do, `packing: pad`'s, filled to a budget of tokens,
+about do, and `bfd`'s needn't. With
 `custom_loss: false`, a model with heads added each head's mean, as it was, to
 HF's LM term: a sum over the step's `num_items_in_batch` tokens, for which HF
 skips its division by the micro-batches and multiplies by the processes (to undo
@@ -346,16 +347,32 @@ with zeros masked as `bfd`'s padding is. It keeps time-based RoPE's all-ones
 padding after it, and sdpa, given ones, keeps its causal fast path, where a mask
 with zeros would have it build a (rows, 1, len, len) one. The mixture TNT head
 needs no mask either: a row ends short of `max_seq_len` only where its record
-ends, and no batch pads past `max_seq_len`. `TrainerWithCustomLoss` draws the
-rows by `LengthGroupedRows`, HF's `LengthGroupedSampler` given the lengths off
-the arrow table and a generator of its own, seeded by `data_seed` or `seed`
-(accelerate leaves a custom sampler's generator unsynced under HF's default
-seedable sampler, so a draw from torch's global one could differ by process),
-unless `training_args.train_sampling_strategy` names another of HF's samplers
-(`Trainer.__init__` decides, taking `group_by_length` as its own). The tuning
-split comes longest first and `_get_eval_sampler` keeps it in order: HF's
-`group_by_length` eval sampler, unseeded on 5.5.4, would reshuffle it, and
-`eval_loss`, a mean of batch means, depends on which rows share a batch.
+ends, and no batch pads past `max_seq_len`.
+`TrainerWithCustomLoss._get_dataloader` (where HF 5.5.4 and 5.19 alike build
+every dataloader) hands `pad`'s rows to a `DataLoader` of its own, whose
+`batch_sampler` is `TokenBudgetBatches`: `util.token_budget_batches` fills each
+batch to `tokens_per_batch` padded tokens (`Trainer.token_budgets`; by default
+the batch size × `max_seq_len`, × `n_gpu` for `nn.DataParallel`), each of the
+loader's `n_epochs` passes apart, sorted by length over the whole pass and cut
+shortest first, the batches then shuffled, the one holding the longest row
+first; seeded by `data_seed` or `seed`, and redrawn by `set_epoch`, which
+accelerate (≥1.3) forwards to a batch sampler. Why a budget rather than a count
+of rows: a step's loss is a mean over its batch's tokens and every step counts
+alike (marabou's runs clip every step, their gradient norms ~100×
+`max_grad_norm: 1`, so rescaling a step's loss changes nothing), so a few rows
+of one length to a batch weigh each record about alike; a record's length being
+its outcome, that tilts a generative model toward records that end soon (on a
+NICU split, the discharge rate it was fit to rose 3.4×). Megabatches, as HF's
+length-grouped sampler sorts, would leave the rare short rows a batch spanning a
+wide range of lengths, badly filled, so the sort is over the whole pass,
+fairseq's way. Under `pad`, `tally` weights the logged terms by the tokens a
+batch's LM scores rather than its rows, and evaluation tallies the loss itself,
+so that `evaluation_loop`'s `eval_loss` is a mean over the tokens scored (HF's
+weighs batch means by rows, which a batch of hundreds of short records would
+dominate). `Trainer.__init__` refuses `pad` with `train_sampling_strategy` other
+than `group_by_length`, or with more than one process (how accelerate shards
+batches of varying size differs by version), and refuses `tokens_per_batch`
+without `pad` or below `max_seq_len`.
 
 ## Gotchas
 
@@ -406,10 +423,10 @@ split comes longest first and `_get_eval_sampler` keeps it in order: HF's
   mask of ones, though, and derives a one-row batch's sequences from its position
   ids anyway (its helpers give wrong segments on 5.19 and fail on 5.5.4; the
   kernel itself is untested, flash-attn needing CUDA), so time-based RoPE with
-  flash attention is only sound for batches of more than one row (which
-  `packing: pad` makes likelier, a long `max_seq_len` inviting
-  `per_device_train_batch_size: 1`). HF sets `training_args.use_cache` on the
-  model it builds in `__init__` (the one `built_trainer.model` saves in the
+  flash attention is only sound for batches of more than one row (`packing:
+  pad` puts a row over half of `tokens_per_batch` in a batch alone, and can leave
+  an epoch's last batch a single long row). HF sets `training_args.use_cache` on
+  the model it builds in `__init__` (the one `built_trainer.model` saves in the
   tests), not on the one `model_init` rebuilds in `train()`, which keeps its
   `AutoConfig`'s.
 - **HF's `label_smoothing_factor` only smooths HF's own loss.** On
