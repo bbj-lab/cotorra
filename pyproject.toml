@@ -53,10 +53,9 @@
         all = [ "cotorra[dev,docs,test]" ]
         dev = [ "pip>=23.1", "ruff>=0.15" ]
         docs = [
-            "mkdocs>=1.5.3,<2",
+            "mkdocs>=1.6,<2",
             "mkdocs-material>=9.5",
             "mkdocstrings[python]>=0.26.1",
-            "mkdocs-include-markdown-plugin>=2.6",
             "mkdocs-callouts>=1.10",
             "mkdocs-git-revision-date-localized-plugin>=0.7",
         ]

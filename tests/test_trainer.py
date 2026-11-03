@@ -602,7 +602,7 @@ def test_the_wandb_block_is_optional(processed, tmp_path, monkeypatch, block):
 
 
 def test_custom_loss_is_off_when_the_config_omits_it(processed, tmp_path):
-    """the README gives `custom_loss` a default of false, but it was read as
+    """the docs give `custom_loss` a default of false, but it was read as
     `self.cfg.custom_loss`, which a config without it raised on"""
     cfg = base_training_cfg()
     del cfg["custom_loss"]
