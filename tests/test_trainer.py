@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from transformers import AutoModelForCausalLM, TrainingArguments
 
 from cotorra.model import HEADS
-from cotorra.trainer import Trainer
+from cotorra.trainer import LengthGroupedRows, Trainer, row_lengths
 from cotorra.tuner import Tuner
 
 
@@ -951,10 +951,15 @@ def test_bfd_packing_needs_the_columns_hf_would_drop(how, processed, tmp_path):
 
 
 def test_doc_masking_needs_bfd_packing(processed, tmp_path):
-    with pytest.raises(ValueError, match="`doc_masking` needs `packing: bfd`"):
+    with pytest.raises(ValueError, match="`doc_masking` needs `packing: bfd`$"):
         trainer_with(
             packed_cfg(packing="concat", doc_masking=True), processed, tmp_path
         )
+
+
+def test_doc_masking_points_pad_at_the_rows_of_their_own_it_has(processed, tmp_path):
+    with pytest.raises(ValueError, match="`packing: pad` keeps each record in a row"):
+        trainer_with(packed_cfg(packing="pad", doc_masking=True), processed, tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -1166,6 +1171,247 @@ def test_time_based_positions_attend_across_timestamps_with_or_without_a_cache(
         split = mdl(**batch, use_cache=False).logits
     assert t.allclose(uncached, cached, atol=1e-5)
     assert not t.allclose(split, cached, atol=1e-3)
+
+
+# ------------------------------------------ a record to a row, padded by the batch
+
+
+@pytest.fixture(scope="module")
+def pad_trainer(processed, tmp_path_factory) -> Trainer:
+    """the shipped default, time-based rope and all, a record to a row"""
+    home = tmp_path_factory.mktemp("pad")
+    return trainer_with(base_training_cfg(packing="pad"), processed, home)
+
+
+def mixed_lengths(dataset, n: int = 2) -> list[dict]:
+    """`n` of the longest rows whose tokens span more than two timestamps, so
+    that their time-based positions jump, beside the `n` shortest, so that a
+    batch of them needs padding"""
+    rows = sorted(dataset, key=lambda eg: len(eg["input_ids"]))
+    jumpy = [eg for eg in rows[::-1] if eg["s_elapsed"].unique().numel() > 2]
+    assert len(jumpy) >= n
+    return jumpy[:n] + rows[:n]
+
+
+def test_pad_pads_each_batch_on_the_right_to_its_longest_row(pad_trainer):
+    """and only the padding goes unscored; time-based positions, read off each
+    row's own elapsed seconds, and a mask of ones, as for every packing"""
+    rows = mixed_lengths(pad_trainer.trainer.train_dataset)
+    batch = pad_trainer.collate_fn(rows)
+    n = [len(eg["input_ids"]) for eg in rows]
+    assert set(batch) == {"input_ids", "labels", "position_ids", "attention_mask"}
+    assert batch["input_ids"].shape == (len(rows), max(n)) and min(n) < max(n)
+    sec = pad_trainer.cfg.time_based_rope.sec_per_pos_id
+    for r, eg in enumerate(rows):
+        k = n[r]
+        assert t.equal(batch["input_ids"][r, :k], eg["input_ids"])
+        assert t.equal(batch["labels"][r, :k], eg["input_ids"])
+        assert (batch["labels"][r, k:] == -100).all()
+        expected = eg["s_elapsed"] / sec + t.arange(k)
+        assert t.allclose(batch["position_ids"][r, :k], expected)
+    assert t.equal(batch["attention_mask"], t.ones_like(batch["input_ids"]))
+
+
+def test_a_padded_row_gets_the_logits_it_gets_alone(pad_trainer):
+    """with a kv cache or without, as under gradient checkpointing: the padding
+    comes after every token it could reach, which causal attention keeps from
+    it, and the mask of ones keeps time-based positions from splitting a row
+    where they jump. Alone, with a cache, nothing is split either way"""
+    mdl = pad_trainer.model_init().eval()
+    rows = mixed_lengths(pad_trainer.trainer.train_dataset)
+    batch = pad_trainer.collate_fn(rows)
+    del batch["labels"]
+    sec = pad_trainer.cfg.time_based_rope.sec_per_pos_id
+    with t.no_grad():
+        for use_cache in (False, True):
+            padded = mdl(**batch, use_cache=use_cache).logits
+            for r, eg in enumerate(rows):
+                k = len(eg["input_ids"])
+                alone = mdl(
+                    input_ids=eg["input_ids"][None],
+                    position_ids=(eg["s_elapsed"] / sec + t.arange(k))[None],
+                    use_cache=True,
+                ).logits[0]
+                assert t.allclose(padded[r, :k], alone, atol=1e-5)
+
+
+def test_pad_padding_is_no_target_for_the_lm_or_any_head(
+    processed_with_end_times, tmp_path
+):
+    """the collator pads with zeros, which would train the time heads toward a
+    gap of none and the disposition head toward its first class: nan for a
+    time, -100 for a class or a token, which every loss skips; a per-record
+    head's weights are padded beside its targets"""
+    cfg = base_training_cfg(packing="pad")
+    cfg["tte_objective"] = {"per_record": True}
+    cfg["tnt_objective"] = {"mixture_components": 3}
+    cfg["disposition_objective"] = {"per_record": True}
+    trainer = trainer_with(cfg, processed_with_end_times, tmp_path)
+    dataset = trainer.trainer.train_dataset
+    rows = mixed_lengths(dataset)
+    batch = trainer.collate_fn(rows)
+    n = t.tensor([len(eg["input_ids"]) for eg in rows])
+    pad = t.arange(batch["input_ids"].shape[-1]) >= n[:, None]
+    assert pad.any()
+
+    assert (batch["labels"][pad] == -100).all()
+    for target in ("hours_to_end_time", "hours_to_next_token", "disposition"):
+        if batch[target].is_floating_point():
+            assert batch[target][pad].isnan().all()
+        else:
+            assert (batch[target][pad] == -100).all()
+        for r, eg in enumerate(rows):
+            got, raw = batch[target][r, : n[r]], eg[target]
+            assert t.equal(got.nan_to_num(-1.0), raw.nan_to_num(-1.0))
+    for weights in ("hours_to_end_time_weight", "disposition_weight"):
+        assert batch[weights].shape == batch["input_ids"].shape
+
+    mdl = trainer.model_init()
+    loss = trainer.trainer.compute_loss(mdl, batch)
+    loss.backward()
+    assert t.isfinite(loss)
+    for head in mdl.heads.values():
+        assert max(p.grad.abs().max().item() for p in head.parameters()) > 0
+
+    # a mixture head conditions each position's gap on the token after it in
+    # the row, the padding included, with no mask for it: a row ends short of
+    # `max_seq_len` only where its record ends, whose last token has no gap to
+    # score; one that a record continues past fills `max_seq_len`, which no
+    # batch pads past
+    ends = [eg["hours_to_next_token"][-1] for eg in dataset]
+    lengths = row_lengths(dataset)
+    assert all(e.isnan() for e, k in zip(ends, lengths) if k < trainer.cfg.max_seq_len)
+    assert any(e.isfinite() for e in ends)
+
+
+def drawn(sampler: LengthGroupedRows, epoch: int | None = None) -> list[int]:
+    if epoch is not None:
+        sampler.set_epoch(epoch)
+    return list(sampler)
+
+
+def test_length_grouped_rows_are_drawn_by_their_seed_and_epoch():
+    """alike in every process, and in every trial of a search, whatever else
+    drew from torch's own generator; reseeded by the epoch hf sets, so that a
+    resumed run draws the order it left off in"""
+    lengths = list(range(1, 200))
+    sampler = LengthGroupedRows(4, lengths, seed=0)
+    first = drawn(sampler)
+    assert sorted(first) == list(range(len(lengths)))
+    t.manual_seed(123)
+    assert drawn(LengthGroupedRows(4, lengths, seed=0)) == first
+    assert drawn(LengthGroupedRows(4, lengths, seed=1)) != first
+    assert drawn(sampler, epoch=1) != first
+    assert drawn(sampler, epoch=0) == first
+    assert drawn(LengthGroupedRows(4, lengths, seed=0), epoch=1) == drawn(
+        sampler, epoch=1
+    )
+
+
+def test_pad_groups_the_training_rows_by_length(pad_trainer):
+    """hf's length-grouped sampler, over the rows' own lengths and seeded as hf
+    seeds: rows of about one length to a batch, the longest first, padded far
+    less than rows drawn at random"""
+    trainer = pad_trainer.trainer
+    sampler = trainer._get_train_sampler()
+    assert type(sampler) is LengthGroupedRows
+    lengths = [len(eg["input_ids"]) for eg in trainer.train_dataset]
+    assert sampler.lengths == lengths
+    assert sampler.seed == trainer.args.seed
+    assert sampler.batch_size == (
+        trainer.args.train_batch_size * trainer.args.gradient_accumulation_steps
+    )
+    size = trainer.args.train_batch_size
+
+    def padding(order: list[int]) -> int:
+        batches = [order[i : i + size] for i in range(0, len(order), size)]
+        return sum(
+            len(b) * max(lengths[j] for j in b) - sum(lengths[j] for j in b)
+            for b in batches
+        )
+
+    grouped = drawn(sampler, epoch=0)
+    assert lengths[grouped[0]] == max(lengths)
+    shuffled = t.randperm(len(lengths), generator=t.Generator().manual_seed(0))
+    assert 0 < padding(grouped) < padding(shuffled.tolist()) / 2
+
+
+@pytest.mark.parametrize(
+    "strategy, sampler",
+    [
+        ("group_by_length", LengthGroupedRows),
+        ("random", t.utils.data.RandomSampler),
+        ("sequential", t.utils.data.SequentialSampler),
+    ],
+)
+def test_pad_leaves_its_rows_to_any_sampler_train_sampling_strategy_names(
+    strategy, sampler, processed, tmp_path
+):
+    """hf's own `group_by_length` is taken as cotorra's, its megabatches a
+    multiple, as hf's are, of a step's rows, gradient accumulation and all; the
+    tuning rows stay longest first whichever, which hf's `group_by_length` would
+    shuffle"""
+    cfg = base_training_cfg(packing="pad")
+    cfg["training_args"]["train_sampling_strategy"] = strategy
+    cfg["training_args"]["gradient_accumulation_steps"] = 2
+    trainer = trainer_with(cfg, processed, tmp_path).trainer
+    assert type(drawn := trainer._get_train_sampler()) is sampler
+    if sampler is LengthGroupedRows:
+        assert drawn.batch_size == 2 * trainer.args.train_batch_size
+    evaluated = trainer._get_eval_sampler(trainer.eval_dataset)
+    assert type(evaluated) is t.utils.data.SequentialSampler
+
+
+def test_other_packings_leave_their_rows_to_hfs_samplers(built_trainer):
+    trainer = built_trainer.trainer
+    assert type(trainer._get_train_sampler()) is t.utils.data.RandomSampler
+
+
+def test_pad_trains_and_evaluates_on_hfs_own_batches(pad_trainer):
+    """hf's dataloaders, through the samplers and the collator: training's
+    longest batch first, evaluation's batches longest first"""
+    trainer = pad_trainer.trainer
+    first = next(iter(trainer.get_train_dataloader()))
+    assert set(first) == {"input_ids", "labels", "position_ids", "attention_mask"}
+    assert first["input_ids"].shape[-1] == max(row_lengths(trainer.train_dataset))
+    widths = [b["input_ids"].shape[-1] for b in trainer.get_eval_dataloader()]
+    assert widths == sorted(widths, reverse=True) and len(set(widths)) > 1
+    # on the device accelerate moved the batch to
+    mdl = pad_trainer.model_init().to(first["input_ids"].device)
+    loss = trainer.compute_loss(mdl.train(), first)
+    loss.backward()
+    assert t.isfinite(loss)
+    assert math.isfinite(trainer.evaluate()["eval_loss"])
+
+
+def test_pad_gives_hfs_own_loss_a_target_in_every_batch(processed, tmp_path):
+    """which averages each batch's loss over its targets: a batch of rows of one
+    token, none of which has a next token to predict, would score a nan, and
+    under `eval_loss` or a step's gradient, spoil every other"""
+    trainer = trainer_with(
+        base_training_cfg(packing="pad", custom_loss=False), processed, tmp_path
+    )
+    for dataset in (trainer.trainer.train_dataset, trainer.trainer.eval_dataset):
+        assert min(row_lengths(dataset)) > 1
+    one_token = trainer.collate_fn(
+        [{"input_ids": t.tensor([3]), "s_elapsed": t.tensor([0.0])}] * 2
+    )
+    with t.no_grad():
+        assert trainer.model_init()(**one_token).loss.isnan()
+    assert math.isfinite(trainer.trainer.evaluate()["eval_loss"])
+
+
+@pytest.mark.slow
+def test_a_pad_model_with_heads_trains_evaluates_and_saves(
+    processed_with_end_times, tmp_path
+):
+    cfg = base_training_cfg(packing="pad", tnt_objective={"mixture_components": 3})
+    cfg["training_args"] |= {"eval_strategy": "steps", "eval_steps": 2}
+    trainer = trainer_with(cfg, processed_with_end_times, tmp_path)
+    trainer.train()
+    saved = AutoModelForCausalLM.from_pretrained(tmp_path / "out" / "mdl-test-run")
+    assert list(saved.heads) == ["tnt"]
+    assert saved.config.text_config.vocab_size == len(trainer.tkzr_cfg.lookup)
 
 
 # ------------------------------------------------------------- label smoothing

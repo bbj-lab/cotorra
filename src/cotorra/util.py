@@ -146,6 +146,52 @@ def best_fit_packed_iter(
         yield out
 
 
+def record_chunks_iter(
+    dset: ds.Dataset, seq_len: int, rng: Generator | None = None, n_epochs: int = 1
+) -> collections.abc.Iterator:
+    """
+    Each record in a row of its own, for `packing: pad`: a record is split only
+    when it is longer than `seq_len`, into chunks of at most `seq_len`, and each
+    chunk makes a row, unpadded, at its own length -- the collator pads each
+    batch to its longest row. Given `rng`, each of `n_epochs` passes over `dset`
+    takes its records in an order of its own drawn from it, a record's chunks in
+    turn. Without, every pass's chunks come longest first, ties in their
+    records' order, so that batches taken in turn each hold rows of about one
+    length, the longest batch first. A chunk of a single token is dropped: it
+    has no next token to predict, so a batch of such rows alone would have no
+    target at all, which hf's own loss averages to a nan. Only a record's last
+    chunk can be that short, and its one token, the record's last, has no time
+    to the next token or disposition to come either.
+    """
+    import pyarrow.compute as pc
+
+    # through the arrow formatter, as `best_fit_packed_iter` reads it, so that a
+    # shuffled dataset's lengths follow its indices mapping
+    arrow = dset.with_format("arrow")
+    lengths = pc.list_value_length(arrow["input_ids"]).to_numpy()
+    orders = [
+        np.arange(len(lengths)) if rng is None else rng.permutation(len(lengths))
+        for _ in range(n_epochs)
+    ]
+    chunks = [
+        (int(i), s, min(seq_len, int(lengths[i]) - s))
+        for order in orders
+        for i in order
+        for s in range(0, int(lengths[i]), seq_len)
+        if int(lengths[i]) - s > 1
+    ]
+    if rng is None:
+        chunks.sort(key=lambda c: -c[2])  # stable, so ties keep their order
+    for row, start, n in chunks:
+        # sliced before it's made python, so that a long record isn't made whole
+        # once for each of its chunks
+        record = arrow[row]
+        yield {
+            k: record[k][0].values.slice(start, n).to_pylist()
+            for k in dset.column_names
+        }
+
+
 def pr_auc_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
     precs, recs, *_ = skl_mets.precision_recall_curve(
         y_true, np.round(y_score, decimals=4), drop_intermediate=True

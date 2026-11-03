@@ -15,6 +15,7 @@ from cotorra.util import (
     bootstrap_ci,
     bootstrap_pval,
     pr_auc_score,
+    record_chunks_iter,
 )
 
 
@@ -191,6 +192,96 @@ def test_packing_is_reproducible_by_its_seed_and_shuffled_by_it():
 
 def test_an_empty_record_takes_no_room():
     assert [pieces(row) for row in packed(records(0, 3, 0))] == [[[100, 101, 102]]]
+
+
+# ------------------------------------------------- a record to a row, unpadded
+
+
+def chunked(dset: ds.Dataset, seed: int | None = 0, **kwargs) -> list[dict]:
+    rng = None if seed is None else np.random.default_rng(seed)
+    return list(record_chunks_iter(dset, SEQ_LEN, rng, **kwargs))
+
+
+def rows_of(*lengths: int) -> list[list[int]]:
+    """what a record to a row should make rows of: each record cut every
+    `SEQ_LEN` tokens, a chunk of a single token, with nothing to predict, left
+    out"""
+    return [c for c in chunks(*lengths) if len(c) > 1]
+
+
+def test_each_record_takes_rows_of_its_own_split_only_past_a_row():
+    """a record longer than a row is cut into chunks of at most a row, a
+    shorter one kept whole; each chunk is a row of its own, at its own length,
+    with every column in step: every token exactly once, nothing padded"""
+    rows = chunked(records(*LENGTHS))
+    assert sorted(row["input_ids"] for row in rows) == rows_of(*LENGTHS)
+    for row in rows:
+        assert set(row) == {"input_ids", "negated"}
+        assert row["negated"] == [-x for x in row["input_ids"]]
+        # a single record's tokens, in order
+        assert np.diff(row["input_ids"]).tolist() == [1] * (len(row["input_ids"]) - 1)
+
+
+def first_seen(rows: list[dict]) -> list[int]:
+    """the records `rows` come from, in the order each is first seen"""
+    return list(dict.fromkeys(row["input_ids"][0] // 100 for row in rows))
+
+
+def test_each_epoch_takes_the_records_in_an_order_of_its_own():
+    """every record's chunks once a pass, each pass shuffled apart and a split
+    record's chunks in turn"""
+    lengths = range(2, 20)
+    rows = chunked(records(*lengths), n_epochs=3)
+    per_pass = len(rows_of(*lengths))
+    passes = [rows[i * per_pass : (i + 1) * per_pass] for i in range(3)]
+    for p in passes:
+        assert sorted(row["input_ids"] for row in p) == rows_of(*lengths)
+        record = [row["input_ids"][0] // 100 for row in p]
+        assert len(first_seen(p)) == sum(a != b for a, b in zip(record, record[1:])) + 1
+    assert len({tuple(first_seen(p)) for p in passes}) == 3
+
+
+def test_record_chunks_are_reproducible_by_their_seed_and_shuffled_by_it():
+    dset = records(*range(1, 20))
+    assert chunked(dset, seed=1) == chunked(dset, seed=1)
+    assert chunked(dset, seed=1) != chunked(dset, seed=2)
+
+
+def test_without_a_generator_the_chunks_come_longest_first():
+    """as `packing: pad` evaluates them, so that batches taken in turn hold
+    rows of about one length; ties in their records' order, and a split
+    record's chunks in turn"""
+    rows = chunked(records(*LENGTHS), seed=None)
+    assert sorted(row["input_ids"] for row in rows) == rows_of(*LENGTHS)
+    keys = [(-len(row["input_ids"]), row["input_ids"][0]) for row in rows]
+    assert keys == sorted(keys)
+
+
+def test_a_shuffled_dataset_chunks_each_record_at_its_own_length():
+    """read through the shuffle's indices, as the packer reads them, or a
+    record's tokens would be cut to another record's length"""
+    dset = records(*LENGTHS).repeat(2).shuffle(seed=0)
+    assert sorted(row["input_ids"] for row in chunked(dset)) == sorted(
+        2 * rows_of(*LENGTHS)
+    )
+
+
+def test_an_empty_record_takes_no_row():
+    assert chunked(records(0, 3, 0)) == [
+        {"input_ids": [100, 101, 102], "negated": [-100, -101, -102]}
+    ]
+
+
+def test_a_single_token_left_over_takes_no_row():
+    """a record of one token, or a longer one's last chunk of one, has no next
+    token to predict: a batch of such rows alone would score nothing, which hf's
+    own loss averages to a nan. Two tokens make a row"""
+    rows = chunked(records(1, SEQ_LEN + 1, SEQ_LEN + 2), seed=None)
+    assert [row["input_ids"] for row in rows] == [
+        list(range(100, 100 + SEQ_LEN)),
+        list(range(200, 200 + SEQ_LEN)),
+        [200 + SEQ_LEN, 201 + SEQ_LEN],
+    ]
 
 
 def test_pr_auc_score_is_near_perfect_for_perfect_separation():

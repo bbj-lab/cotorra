@@ -10,8 +10,10 @@ import pathlib
 import typing
 import warnings
 
+import datasets as ds
 import torch as t
 from omegaconf import OmegaConf
+from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -19,14 +21,52 @@ from transformers import (
     TrainingArguments,
 )
 from transformers import Trainer as t_Trainer
-from transformers.trainer_pt_utils import find_batch_size, nested_gather
-from transformers.trainer_utils import EvalLoopOutput, TrainOutput
+from transformers.trainer_pt_utils import (
+    LengthGroupedSampler,
+    find_batch_size,
+    nested_gather,
+)
+from transformers.trainer_utils import EvalLoopOutput, TrainOutput, has_length
 from transformers.utils.generic import is_flash_attention_requested
 
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
 from cotorra.loss import Loss
 from cotorra.model import HEADS, CotorraConfig, head_options
+
+
+class LengthGroupedRows(LengthGroupedSampler):
+    """
+    hf's length-grouped sampler, for `packing: pad`'s rows: it shuffles them,
+    sorts each megabatch of 50 batches (fewer, for a small dataset) longest
+    first, and leads with the longest row, so that each batch holds rows of
+    about one length and running out of memory happens at the first step, not
+    later. Drawn from a generator of its own, seeded, rather than torch's
+    global one, so that every process, and every trial of a search, draws the
+    same order; reseeded by the epoch where hf's loop sets it, as accelerate's
+    seedable sampler is, so that a run resumed mid-epoch picks up the order it
+    left off in
+    """
+
+    def __init__(self, batch_size: int, lengths: list[int], seed: int) -> None:
+        super().__init__(
+            batch_size, lengths=lengths, generator=t.Generator().manual_seed(seed)
+        )
+        self.seed = seed
+
+    def set_epoch(self, epoch: int) -> None:
+        self.generator.manual_seed(self.seed + epoch)
+
+
+def row_lengths(dataset: ds.Dataset) -> list[int]:
+    """each row's tokens, read off the arrow table rather than row by row"""
+    import pyarrow.compute as pc
+
+    return (
+        pc.list_value_length(dataset.with_format("arrow")["input_ids"])
+        .to_numpy()
+        .tolist()
+    )
 
 
 class TrainerWithCustomLoss(t_Trainer):
@@ -105,12 +145,47 @@ class TrainerWithCustomLoss(t_Trainer):
                 # doesn't do -- so the accumulated micro-batches would sum. This
                 # weights each micro-batch alike, where hf's stock loss weights
                 # each scored token alike: the same while every micro-batch scores
-                # as many tokens, as concatenated rows do and `packing: bfd`'s
-                # needn't (set only inside its training loop, hence the default)
+                # as many tokens, as concatenated rows do and `packing: bfd`'s and
+                # `pad`'s needn't (set only inside its training loop, hence the
+                # default)
                 loss = loss / getattr(self, "current_gradient_accumulation_steps", 1)
             return (loss, outputs) if return_outputs else loss
         else:
             return super().compute_loss(model, inputs, return_outputs, **kwargs)
+
+    def _get_train_sampler(
+        self, train_dataset: t.utils.data.Dataset | None = None
+    ) -> t.utils.data.Sampler | None:
+        # `packing: pad`'s rows, each padded to its batch's longest, grouped by
+        # length unless `train_sampling_strategy` picks another of hf's samplers
+        # (`Trainer.__init__` decides); a `datasets.Dataset`, as the loader's is,
+        # gives its lengths without reading every row
+        dataset = self.train_dataset if train_dataset is None else train_dataset
+        if getattr(self, "group_by_length", False) and isinstance(dataset, ds.Dataset):
+            # as hf sizes its megabatches, and seeds its own samplers
+            seed = self.args.data_seed
+            return LengthGroupedRows(
+                self.args.train_batch_size * self.args.gradient_accumulation_steps,
+                lengths=row_lengths(dataset),
+                seed=self.args.seed if seed is None else seed,
+            )
+        return super()._get_train_sampler(train_dataset)
+
+    def _get_eval_sampler(
+        self, eval_dataset: t.utils.data.Dataset
+    ) -> t.utils.data.Sampler | None:
+        # `packing: pad`'s tuning rows come longest first, so that batches taken in
+        # turn pad them little. Kept in that order: given `train_sampling_strategy:
+        # group_by_length`, hf would shuffle them by megabatches, in some versions
+        # unseeded, and `eval_loss`, a mean of its batches' means, depends on
+        # which rows share a batch
+        if getattr(self, "pad_rows", False) and has_length(eval_dataset):
+            return (
+                t.utils.data.SequentialSampler(eval_dataset)
+                if self.args.world_size <= 1
+                else None
+            )
+        return super()._get_eval_sampler(eval_dataset)
 
     def train(self, *args, **kwargs) -> TrainOutput:
         # a search's trials share this trainer, so one trial's last steps would
@@ -216,7 +291,15 @@ class Trainer(Configurable):
             # at every packed piece, which bfd's `doc_pos` provides; time-based
             # position ids would take their place
             if packing != "bfd":
-                raise ValueError("`doc_masking` needs `packing: bfd`")
+                raise ValueError(
+                    "`doc_masking` needs `packing: bfd`"
+                    + (
+                        "; `packing: pad` keeps each record in a row of its own "
+                        "without it"
+                        if packing == "pad"
+                        else ""
+                    )
+                )
             if self.head_options or "time_based_rope" in self.cfg:
                 raise ValueError(
                     "`doc_masking` does not yet support secondary heads or "
@@ -255,6 +338,14 @@ class Trainer(Configurable):
         )
         self.model = self.trainer.model
         self.trainer.doc_masking = bool(self.cfg.get("doc_masking", False))
+        # `packing: pad`'s rows, padded by the batch, are grouped by length, so
+        # that a batch pads them little, unless `train_sampling_strategy` names
+        # another of hf's samplers; evaluated longest first either way
+        self.trainer.pad_rows = packing == "pad"
+        self.trainer.group_by_length = self.trainer.pad_rows and (
+            self.cfg.training_args.get("train_sampling_strategy", "group_by_length")
+            == "group_by_length"
+        )
         if (
             self.trainer.doc_masking
             and self.trainer.args.n_gpu > 1
@@ -311,36 +402,52 @@ class Trainer(Configurable):
         return mdl
 
     def collate_fn(self, batch: list[dict[str, t.Tensor]]) -> dict[str, t.Tensor]:
-        input_ids = t.stack([x["input_ids"] for x in batch])
+        # `packing: pad`'s rows (util.record_chunks_iter) each hold a record at
+        # its own length, padded here, on the right, to the batch's longest. A
+        # causal model's tokens never attend to the padding after them, so only
+        # the targets need masking, below; every other packing's rows are of one
+        # length already
+        pad_rows = self.cfg.get("packing", "concat") == "pad"
+
+        def column(k: str) -> t.Tensor:
+            rows = [x[k] for x in batch]
+            return pad_sequence(rows, batch_first=True) if pad_rows else t.stack(rows)
+
+        input_ids = column("input_ids")
+        if pad_rows:
+            n = t.tensor([len(x["input_ids"]) for x in batch])
+            pad = t.arange(input_ids.shape[-1]) >= n[:, None]
+        else:
+            # padding left by `packing: bfd` (util.best_fit_packed_iter), if any
+            pad = column("pad_mask").bool() if "pad_mask" in batch[0] else None
         f_set = {"input_ids": input_ids, "labels": input_ids}
         if "time_based_rope" in self.cfg:
-            p_ids = (
-                t.stack([x["s_elapsed"] for x in batch])
-                / self.cfg.time_based_rope.sec_per_pos_id
-            )
+            p_ids = column("s_elapsed") / self.cfg.time_based_rope.sec_per_pos_id
             p_ids += t.arange(p_ids.shape[-1], device=p_ids.device, dtype=p_ids.dtype)
             f_set["position_ids"] = p_ids
             # every token attends to all those before it: given neither a mask nor
             # a KV cache (which gradient checkpointing turns off), transformers
             # starts a new packed sequence wherever these ids don't step by exactly
             # 1, as at every gap between timestamps. Flash attention drops a mask
-            # of ones, though, and still reads a one-row batch's ids that way
+            # of ones, though, and still reads a one-row batch's ids that way.
+            # Ones over `packing: pad`'s padding too: the padding comes after
+            # every token that counts, which causal attention keeps from seeing
+            # it, and sdpa, given a mask of ones, keeps its causal fast path
             f_set["attention_mask"] = t.ones_like(input_ids)
         for name, options in self.head_options.items():
             target, weights = HEADS[name].target, HEADS[name].target_weight
-            f_set[target] = t.stack([x[target] for x in batch])
+            f_set[target] = column(target)
             if weights is not None and options.get("per_record", False):
                 # the weights the loader gives each record, beside its target
-                f_set[weights] = t.stack([x[weights] for x in batch])
-        if "pad_mask" in batch[0]:
-            # padding left by `packing: bfd` (util.best_fit_packed_iter) is never
-            # a target, neither the lm's (-100, which every loss skips) nor a
-            # head's (nan, or -100 for a class). Nothing else needs masking: a
-            # piece ends short of its row only where its record ends (a split
-            # record's other chunks each fill a row), and a record's last token
-            # has no time to the next, so a mixture time-to-next-token head never
-            # conditions a gap on another record's token
-            pad = t.stack([x["pad_mask"] for x in batch]).bool()
+                f_set[weights] = column(weights)
+        if pad is not None:
+            # padding, `packing: bfd`'s or `pad`'s, is never a target, neither
+            # the lm's (-100, which every loss skips) nor a head's (nan, or -100
+            # for a class). Nothing else needs masking: a piece ends short of its
+            # row only where its record ends (a split record's other chunks each
+            # fill a row), and a record's last token has no time to the next, so
+            # a mixture time-to-next-token head never conditions a gap on another
+            # record's token, or on the padding
             f_set["labels"] = f_set["labels"].masked_fill(pad, -100)
             for name in self.head_options:
                 target = HEADS[name].target

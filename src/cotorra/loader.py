@@ -14,7 +14,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from cotorra.configurable import Configurable
 from cotorra.model import HEADS, DispositionHead, TteHead, head_options
-from cotorra.util import batched_iter, best_fit_packed_iter
+from cotorra.util import batched_iter, best_fit_packed_iter, record_chunks_iter
 
 # the positions of a record that each head with a `target_weight` scores -- the
 # ones its loss doesn't mask -- as a polars expression over the record's targets
@@ -220,11 +220,25 @@ class Loader(Configurable):
     def get_train_data(self) -> ds.Dataset:
         # packing: "concat" (default) concatenates the shuffled records and cuts
         # every max_seq_len tokens; "bfd" packs them whole by Best-fit
-        # Decreasing, splitting only records longer than max_seq_len. See
-        # util.best_fit_packed_iter
+        # Decreasing, splitting only records longer than max_seq_len; "pad" puts
+        # each record, or each max_seq_len chunk of a longer one, in a row of its
+        # own, which the collator pads by the batch. See util.best_fit_packed_iter
+        # and util.record_chunks_iter
         packing = self.cfg.get("packing", "concat")
-        if packing not in ("concat", "bfd"):
-            raise ValueError(f"`packing` is `concat` or `bfd`; got {packing!r}")
+        if packing not in ("concat", "bfd", "pad"):
+            raise ValueError(f"`packing` is `concat`, `bfd` or `pad`; got {packing!r}")
+        if packing == "pad":
+            # each epoch's records in an order of their own, as bfd's are, though
+            # the trainer's sampler, grouping the rows by length, reorders them
+            return ds.Dataset.from_generator(
+                record_chunks_iter,
+                gen_kwargs={
+                    "dset": self.dataset[self.splits[0]],
+                    "seq_len": self.cfg.max_seq_len,
+                    "rng": self.rng,
+                    "n_epochs": self.cfg.n_epochs,
+                },
+            ).with_format("torch")
         if packing == "bfd":
             # the split as it is: the packer shuffles it, and packs each epoch
             # apart, so that no row holds a record twice
@@ -248,6 +262,18 @@ class Loader(Configurable):
         ).with_format("torch")
 
     def get_tuning_data(self) -> ds.Dataset:
+        if self.cfg.get("packing", "concat") == "pad":
+            # evaluate in the training format, each record in a row of its own:
+            # longest first, so that hf's evaluation, taking the rows in turn,
+            # batches rows of about one length and pads them little, the longest
+            # batch first
+            return ds.Dataset.from_generator(
+                record_chunks_iter,
+                gen_kwargs={
+                    "dset": self.dataset[self.splits[1]],
+                    "seq_len": self.cfg.max_seq_len,
+                },
+            ).with_format("torch")
         if self.cfg.get("doc_masking", False):
             # evaluate in the training format: BFD-packed, and (through the
             # collator) each record masked from the others.

@@ -185,7 +185,7 @@ Fixing a bug so a key does what it documents isn't a compatibility break: with
 gradients rather than average them (HF leaves that to a custom loss), and now
 averages them. It weights each micro-batch alike, where HF's stock path weights
 each scored token alike; the two agree while every micro-batch scores as many
-tokens, as concatenated rows do and `packing: bfd`'s needn't. With
+tokens, as concatenated rows do and `packing: bfd`'s and `pad`'s needn't. With
 `custom_loss: false`, a model with heads added each head's mean, as it was, to
 HF's LM term: a sum over the step's `num_items_in_batch` tokens, for which HF
 skips its division by the micro-batches and multiplies by the processes (to undo
@@ -336,6 +336,27 @@ first token -100; for flash attention, read off the built model (so
 `bfd`-packed too, by its own fixed seed, so `eval_loss` scores the masked format
 the model trains on (without `doc_masking` it stays concatenated).
 
+`pad` (`util.record_chunks_iter`) cuts records as `bfd` does but makes each chunk
+a row of its own, unpadded, each of `n_epochs` passes in an order of its own, and
+drops a last chunk of one token: with no next token to predict, a batch of such
+rows alone would give HF's own loss no target, a nan in `eval_loss` and a 0/0 in
+a step; `Trainer.collate_fn` pads each batch on the right to its longest row,
+with zeros masked as `bfd`'s padding is. It keeps time-based RoPE's all-ones
+`attention_mask` over the padding: causal attention keeps every token from the
+padding after it, and sdpa, given ones, keeps its causal fast path, where a mask
+with zeros would have it build a (rows, 1, len, len) one. The mixture TNT head
+needs no mask either: a row ends short of `max_seq_len` only where its record
+ends, and no batch pads past `max_seq_len`. `TrainerWithCustomLoss` draws the
+rows by `LengthGroupedRows`, HF's `LengthGroupedSampler` given the lengths off
+the arrow table and a generator of its own, seeded by `data_seed` or `seed`
+(accelerate leaves a custom sampler's generator unsynced under HF's default
+seedable sampler, so a draw from torch's global one could differ by process),
+unless `training_args.train_sampling_strategy` names another of HF's samplers
+(`Trainer.__init__` decides, taking `group_by_length` as its own). The tuning
+split comes longest first and `_get_eval_sampler` keeps it in order: HF's
+`group_by_length` eval sampler, unseeded on 5.5.4, would reshuffle it, and
+`eval_loss`, a mean of batch means, depends on which rows share a batch.
+
 ## Gotchas
 
 - **Install requires the PyTorch CUDA index.** Use the two-index `pip install`
@@ -385,10 +406,12 @@ the model trains on (without `doc_masking` it stays concatenated).
   mask of ones, though, and derives a one-row batch's sequences from its position
   ids anyway (its helpers give wrong segments on 5.19 and fail on 5.5.4; the
   kernel itself is untested, flash-attn needing CUDA), so time-based RoPE with
-  flash attention is only sound for batches of more than one row. HF sets
-  `training_args.use_cache` on the model it builds in `__init__` (the one
-  `built_trainer.model` saves in the tests), not on the one `model_init` rebuilds
-  in `train()`, which keeps its `AutoConfig`'s.
+  flash attention is only sound for batches of more than one row (which
+  `packing: pad` makes likelier, a long `max_seq_len` inviting
+  `per_device_train_batch_size: 1`). HF sets `training_args.use_cache` on the
+  model it builds in `__init__` (the one `built_trainer.model` saves in the
+  tests), not on the one `model_init` rebuilds in `train()`, which keeps its
+  `AutoConfig`'s.
 - **HF's `label_smoothing_factor` only smooths HF's own loss.** On
   `custom_loss: true` it does nothing (`Trainer.__init__` warns). On
   `custom_loss: false` with heads, HF pops `labels` to smooth the logits itself,
