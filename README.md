@@ -407,7 +407,9 @@ A few things to know:
 - `tokens_per_batch` defaults to `training_args.per_device_train_batch_size` ×
   `max_seq_len`, the most a batch of the other packings holds, and to
   `per_device_eval_batch_size` × `max_seq_len` for evaluation. When set, it's
-  used for both. Like the batch sizes, it's per GPU.
+  used for both. Like the batch sizes, it's per GPU: under `nn.DataParallel`,
+  which splits each batch's rows across the GPUs, a batch holds as many rows as
+  keep every GPU's share within it, however unevenly they divide.
 - Keep `tokens_per_batch` at 4 × `max_seq_len` or more. A row just over half the
   budget takes a batch alone, half empty, so its tokens count for up to twice as
   much. At 4 rows or more, a batch of rows of about one length fills to some 80%
@@ -420,17 +422,20 @@ A few things to know:
 - `training_args.train_sampling_strategy` can't apply: cotorra refuses `random`
   or `sequential` under `packing: pad`, and takes `group_by_length` as what it
   does anyway.
+- `training_args.auto_find_batch_size` can't shrink the batches, as it would try
+  to after running out of memory, so cotorra refuses it under `packing: pad`.
+  Lower `tokens_per_batch` instead.
 - `packing: pad` doesn't yet train across processes (`torchrun`,
   `accelerate launch`). How accelerate shares out batches of varying sizes across
   processes differs by version, so cotorra refuses it. One process on one or more
   GPUs works.
 - Each chunk of a record longer than `max_seq_len` starts a row of its own, so
   its tokens can't see where their record began.
-- With `time_based_rope` and `flash_attention_2`, a batch of a single row splits
-  attention wherever its position ids jump: flash attention drops a mask of ones,
-  and reads one row's time-based position ids as several sequences. A row over
-  half of `tokens_per_batch` takes a batch alone, and so can the longest rows of
-  an epoch's last batch.
+- With `time_based_rope`, cotorra refuses `flash_attention_2` under
+  `packing: pad`. Flash attention drops a mask of ones and reads a single row's
+  time-based position ids as several sequences, splitting attention wherever they
+  jump, and a row over half of `tokens_per_batch` takes a batch alone, as can the
+  longest rows of an epoch's last batch. Use `sdpa` (the default) or `eager`.
 
 ### Training secondary heads
 

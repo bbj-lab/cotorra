@@ -193,15 +193,22 @@ def record_chunks_iter(
 
 
 def fill_to_budget(
-    rows: collections.abc.Iterable[int], lengths: np.ndarray, budget: int
+    rows: collections.abc.Iterable[int],
+    lengths: np.ndarray,
+    budget: int,
+    shards: int = 1,
 ) -> list[list[int]]:
     """`rows`, in the order given, cut into batches of as many rows as fit
     `budget` tokens once each is padded to its batch's longest: k rows, the
-    longest of them n tokens, take k × n"""
+    longest of them n tokens, take k × n. Split across `shards` devices, as
+    `nn.DataParallel` splits a batch's rows, ceil(k / shards) to a device, the
+    budget is each device's: a batch takes ceil(k / shards) × n of it"""
     batches, batch, longest = [], [], 0
     for r in rows:
         n = int(lengths[r])
-        if batch and (len(batch) + 1) * max(longest, n) > budget:
+        # ceil((k + 1) / shards) rows to the busiest device, with this one
+        per_shard = (len(batch) + shards) // shards
+        if batch and per_shard * max(longest, n) > budget:
             batches.append(batch)
             batch, longest = [], 0
         batch.append(int(r))
@@ -216,18 +223,25 @@ def token_budget_batches(
     budget: int,
     rng: Generator | None = None,
     n_passes: int = 1,
+    shards: int = 1,
 ) -> list[list[int]]:
     """
     `packing: pad`'s rows, by index, in batches of as many rows as fit `budget`
     tokens once each is padded to its batch's longest, so that every batch holds
-    about as many tokens. A step's loss is a mean over its batch's tokens, and
-    every step weighs alike (clipping rescales each step's gradient whenever its
-    norm passes `max_grad_norm`, so no rescaling of a step's loss changes that),
-    so a batch of a fixed number of rows would weigh each of a row's tokens by
-    about 1 / the row's length: each record about alike, the short ones' tokens
-    far above the long ones'. A record's length is its outcome -- a short stay
-    is a short record -- so that tilts what the model learns toward the records
-    that end soon.
+    about as many tokens. Given `shards`, the gpus `nn.DataParallel` splits each
+    batch's rows across, `budget` is each gpu's, and a batch holds as many rows
+    as keep every gpu's share within it (`fill_to_budget`), where a budget of
+    them all together would let the gpu given the larger share of an uneven
+    split -- two of three long rows, say -- run past its own.
+
+    A step's loss is a mean over its batch's tokens, and every step weighs alike
+    (clipping rescales each step's gradient whenever its norm passes
+    `max_grad_norm`, so no rescaling of a step's loss changes that), so a batch
+    of a fixed number of rows would weigh each of a row's tokens by about 1 /
+    the row's length: each record about alike, the short ones' tokens far above
+    the long ones'. A record's length is its outcome -- a short stay is a short
+    record -- so that tilts what the model learns toward the records that end
+    soon.
 
     Given `rng`, for training: `lengths` holds `n_passes` passes over the
     records in turn, of as many rows each (`record_chunks_iter`'s), batched pass
@@ -260,14 +274,14 @@ def token_budget_batches(
             f"a row of {lengths.max()} tokens doesn't fit a batch of {budget}"
         )
     if rng is None:
-        return fill_to_budget(range(len(lengths)), lengths, budget)
+        return fill_to_budget(range(len(lengths)), lengths, budget, shards)
     per_pass = len(lengths) // n_passes
     batches = []
     for p in range(n_passes):
         rows = rng.permutation(np.arange(p * per_pass, (p + 1) * per_pass))
         # shortest first, ties in their shuffled order
         rows = rows[np.argsort(lengths[rows], kind="stable")]
-        cut = fill_to_budget(rows, lengths, budget)
+        cut = fill_to_budget(rows, lengths, budget, shards)
         batches += [cut[i] for i in rng.permutation(len(cut))]
         if p == 0 and batches:
             first = max(range(len(batches)), key=lambda i: lengths[batches[i]].max())

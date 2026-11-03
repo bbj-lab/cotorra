@@ -407,6 +407,25 @@ def test_without_a_generator_token_budget_batches_keep_the_rows_in_order():
     assert all(len(b) * lengths[b].max() <= BUDGET for b in batches)
 
 
+@pytest.mark.parametrize("shards", [2, 3])
+def test_token_budget_batches_hold_each_shards_share_to_its_budget(shards):
+    """split across `shards` gpus, as `nn.DataParallel` splits a batch's k rows,
+    ceil(k / shards) to a gpu, the budget is each gpu's own, and a batch holds as
+    many rows as keep the busiest one's share within it: three rows of 2700
+    tokens fit two gpus' budgets of 4096 together, 8100 tokens of 8192, but the
+    gpu given two of them would hold 5400"""
+    assert budgeted([2700] * 3, seed=None, shards=2) == [[0, 1], [2]]
+    lengths = lognormal_lengths()
+    batches = budgeted(lengths, shards=shards)
+    assert sorted(i for b in batches for i in b) == list(range(len(lengths)))
+    busiest = [-(-len(b) // shards) * lengths[b].max() for b in batches]
+    assert max(busiest) <= BUDGET
+    # and every gpu still gets most of its budget, all but a pass's last batch
+    assert sorted(busiest)[1] > BUDGET / 2
+    padded = [len(b) * lengths[b].max() for b in batches]
+    assert np.median(padded) > (shards - 1) * BUDGET
+
+
 def test_token_budget_batches_refuse_a_row_past_the_budget_or_uneven_passes():
     with pytest.raises(ValueError, match="a row of 4097 tokens doesn't fit"):
         budgeted([3, BUDGET + 1, 5])

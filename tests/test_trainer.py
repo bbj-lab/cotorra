@@ -1195,8 +1195,9 @@ def mixed_lengths(dataset, n: int = 2) -> list[dict]:
 
 
 def test_pad_pads_each_batch_on_the_right_to_its_longest_row(pad_trainer):
-    """and only the padding goes unscored; time-based positions, read off each
-    row's own elapsed seconds, and a mask of ones, as for every packing"""
+    """and only the padding goes unscored, beside each row's first token, which
+    the lm never predicts; time-based positions, read off each row's own elapsed
+    seconds, and a mask of ones, as for every packing"""
     rows = mixed_lengths(pad_trainer.trainer.train_dataset)
     batch = pad_trainer.collate_fn(rows)
     n = [len(eg["input_ids"]) for eg in rows]
@@ -1206,11 +1207,24 @@ def test_pad_pads_each_batch_on_the_right_to_its_longest_row(pad_trainer):
     for r, eg in enumerate(rows):
         k = n[r]
         assert t.equal(batch["input_ids"][r, :k], eg["input_ids"])
-        assert t.equal(batch["labels"][r, :k], eg["input_ids"])
+        assert batch["labels"][r, 0] == -100
+        assert t.equal(batch["labels"][r, 1:k], eg["input_ids"][1:])
         assert (batch["labels"][r, k:] == -100).all()
         expected = eg["s_elapsed"] / sec + t.arange(k)
         assert t.allclose(batch["position_ids"][r, :k], expected)
     assert t.equal(batch["attention_mask"], t.ones_like(batch["input_ids"]))
+
+
+def test_pad_batches_count_only_the_targets_the_lm_scores(pad_trainer):
+    """hf's own count of a batch's targets, `num_items_in_batch`, by which its
+    loss divides, is each row's tokens but its first, on every transformers
+    cotorra allows: 5.5.4 counts every label that isn't -100, so an unmasked
+    first label would count one target a row too many, shrinking a short
+    record's loss far more than a long one's"""
+    rows = mixed_lengths(pad_trainer.trainer.train_dataset)
+    batch = pad_trainer.collate_fn(rows)
+    counted = pad_trainer.trainer._get_num_items_in_batch([batch], t.device("cpu"))
+    assert int(counted) == sum(len(eg["input_ids"]) - 1 for eg in rows)
 
 
 def test_a_padded_row_gets_the_logits_it_gets_alone(pad_trainer):
@@ -1396,6 +1410,56 @@ def test_pad_refuses_to_train_across_processes(processed, tmp_path, monkeypatch)
         trainer_with(base_training_cfg(packing="pad"), processed, tmp_path)
 
 
+def test_pad_holds_each_gpus_share_of_a_batch_to_its_budget(
+    processed, tmp_path, monkeypatch
+):
+    """`nn.DataParallel` splits a batch's k rows ceil(k / n_gpu) to a gpu, so a
+    budget of all the gpus' tokens together would let the one given the larger
+    share of an uneven split run past its own; each gpu's is held to it"""
+    monkeypatch.setattr(TrainingArguments, "n_gpu", property(lambda self: 2))
+    trainer = trainer_with(base_training_cfg(packing="pad"), processed, tmp_path)
+    hf = trainer.trainer
+    budget = hf.args.per_device_train_batch_size * trainer.cfg.max_seq_len
+    assert hf.token_budget(True) == budget
+    sampler = hf.get_train_dataloader().batch_sampler
+    assert (sampler.budget, sampler.shards) == (budget, 2)
+    lengths = row_lengths(hf.train_dataset)
+    batches = drawn(sampler)
+    assert sorted(i for b in batches for i in b) == list(range(len(lengths)))
+    assert all(-(-len(b) // 2) * max(lengths[i] for i in b) <= budget for b in batches)
+    # and still more than one gpu's worth to a batch
+    assert any(len(b) * max(lengths[i] for i in b) > budget for b in batches)
+    assert hf.get_eval_dataloader().batch_sampler.shards == 2
+
+
+def test_pad_refuses_auto_find_batch_size(processed, tmp_path):
+    """which halves the batch size hf hands a dataloader once memory runs out,
+    where `pad`'s budget reads `tokens_per_batch` or the arguments' own batch
+    size, so that every retry would rebuild the batches that ran out"""
+    cfg = base_training_cfg(packing="pad")
+    cfg["training_args"]["auto_find_batch_size"] = True
+    with pytest.raises(ValueError, match="auto_find_batch_size` can't shrink"):
+        trainer_with(cfg, processed, tmp_path)
+
+
+def test_pad_refuses_time_based_rope_with_flash_attention(
+    processed, tmp_path, monkeypatch
+):
+    """which reads a batch of one row's time-based position ids as several
+    sequences, splitting attention wherever they jump, where `pad` puts a row
+    over half its budget in a batch alone; without time-based rope, flash
+    attention has no such ids to misread"""
+    monkeypatch.setattr(
+        "cotorra.trainer.is_flash_attention_requested", lambda **_: True
+    )
+    cfg = base_training_cfg(packing="pad")
+    assert "time_based_rope" in cfg
+    with pytest.raises(ValueError, match="does not support flash attention"):
+        trainer_with(cfg, processed, tmp_path / "rope")
+    del cfg["time_based_rope"]
+    assert trainer_with(cfg, processed, tmp_path).trainer.pad_rows
+
+
 def test_other_packings_leave_their_rows_to_hfs_samplers(built_trainer):
     trainer = built_trainer.trainer
     assert type(trainer._get_train_sampler()) is t.utils.data.RandomSampler
@@ -1461,9 +1525,7 @@ def test_pad_eval_loss_is_a_mean_over_the_tokens_scored(
         assert metrics["eval_loss"] == pytest.approx(sums["loss"] / n, rel=1e-5)
 
 
-def test_pad_eval_head_loss_uses_its_valid_targets(
-    processed_with_end_times, tmp_path
-):
+def test_pad_eval_head_loss_uses_its_valid_targets(processed_with_end_times, tmp_path):
     cfg = base_training_cfg(packing="pad", tte_objective={})
     trainer = trainer_with(cfg, processed_with_end_times, tmp_path)
     hf = trainer.trainer

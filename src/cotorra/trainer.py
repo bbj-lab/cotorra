@@ -42,7 +42,9 @@ class TokenBudgetBatches(t.utils.data.Sampler):
     drawn from a generator of its own rather than torch's global one, so that
     every trial of a search draws the same batches, and redrawn for each epoch
     hf's loop sets, so that a run resumed mid-epoch picks up the batches it left
-    off in. Unseeded, for evaluation: the rows in their own order
+    off in. Unseeded, for evaluation: the rows in their own order. `budget` is
+    each of the `shards` gpus' that `nn.DataParallel` splits a batch's rows
+    across
     """
 
     def __init__(
@@ -51,17 +53,18 @@ class TokenBudgetBatches(t.utils.data.Sampler):
         budget: int,
         seed: int | None = None,
         n_passes: int = 1,
+        shards: int = 1,
     ) -> None:
         super().__init__()
         self.lengths, self.budget = np.asarray(lengths), budget
-        self.seed, self.n_passes = seed, n_passes
+        self.seed, self.n_passes, self.shards = seed, n_passes, shards
         self.set_epoch(0)
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
         rng = None if self.seed is None else np.random.default_rng([self.seed, epoch])
         self.batches = token_budget_batches(
-            self.lengths, self.budget, rng, n_passes=self.n_passes
+            self.lengths, self.budget, rng, n_passes=self.n_passes, shards=self.shards
         )
 
     def __iter__(self) -> collections.abc.Iterator[list[int]]:
@@ -173,12 +176,7 @@ class TrainerWithCustomLoss(t_Trainer):
         scored = shifted != -100
         count = scored.sum()
         denominators = {
-            name: count
-            for name in (
-                "x_ent_loss",
-                "balanced_toi_loss",
-            )
-            if name in terms
+            name: count for name in ("x_ent_loss", "balanced_toi_loss") if name in terms
         }
         if "label_weighted_loss" in terms:
             class_weights = loss.weights.to(labels.device)[shifted.clamp(min=0)]
@@ -208,20 +206,16 @@ class TrainerWithCustomLoss(t_Trainer):
         if not isinstance(loss, Loss):
             raise TypeError("custom_loss_mean requires cotorra.loss.Loss")
         base = (
-            "label_weighted_loss"
-            if "label_weighted_loss" in loss.cfg
-            else "x_ent_loss"
+            "label_weighted_loss" if "label_weighted_loss" in loss.cfg else "x_ent_loss"
         )
         total = means.get(base, 0.0)
         if "balanced_toi_loss" in loss.cfg:
-            total += (
-                loss.cfg.balanced_toi_loss.get("bce_weight", 1.0)
-                * means.get("balanced_toi_loss", 0.0)
+            total += loss.cfg.balanced_toi_loss.get("bce_weight", 1.0) * means.get(
+                "balanced_toi_loss", 0.0
             )
         if "quantile_token_loss" in loss.cfg:
-            total += (
-                loss.cfg.quantile_token_loss.qt_weight
-                * means.get("quantile_token_loss", 0.0)
+            total += loss.cfg.quantile_token_loss.qt_weight * means.get(
+                "quantile_token_loss", 0.0
             )
         for name, options in loss.heads.items():
             total += options["weight"] * means.get(f"{name}_loss", 0.0)
@@ -292,11 +286,12 @@ class TrainerWithCustomLoss(t_Trainer):
         `per_device_train_batch_size` (`per_device_eval_batch_size`) rows of
         `max_seq_len`, the most a batch of any other packing holds. Read off the
         arguments as they are when a dataloader is built, so that a search's
-        trials follow a batch size it tunes. Per device, as hf's batch sizes are,
-        so that `nn.DataParallel`, splitting each batch's rows across the gpus,
-        gets a budget for each. A budget of fewer than about 4 rows of
-        `max_seq_len` lets a row just over half of it take a batch alone, half
-        empty, its tokens weighing up to twice the rest
+        trials follow a batch size it tunes. Per device, as hf's batch sizes are:
+        under `nn.DataParallel`, which splits each batch's rows across the gpus,
+        each gpu's share of a batch is held to it (`TokenBudgetBatches`'s
+        `shards`), however unevenly the rows divide. A budget of fewer than about
+        4 rows of `max_seq_len` lets a row just over half of it take a batch
+        alone, half empty, its tokens weighing up to twice the rest
         (`util.token_budget_batches`); of 4 or more, a batch of rows of about one
         length fills to some 80% of it at least
         """
@@ -305,8 +300,7 @@ class TrainerWithCustomLoss(t_Trainer):
             if is_training
             else self.args.per_device_eval_batch_size
         )
-        budget = self.tokens_per_batch or rows * self.max_seq_len
-        return budget * max(1, self.args.n_gpu)
+        return self.tokens_per_batch or rows * self.max_seq_len
 
     def _get_dataloader(
         self,
@@ -340,6 +334,7 @@ class TrainerWithCustomLoss(t_Trainer):
                 self.token_budget(is_training),
                 seed=seed if is_training else None,
                 n_passes=self.n_passes if is_training else 1,
+                shards=max(1, self.args.n_gpu),
             ),
             "collate_fn": self.data_collator,
             "num_workers": workers,
@@ -486,6 +481,16 @@ class Trainer(Configurable):
                     "of about one length, which `training_args.train_sampling_"
                     f"strategy: {strategy}` can't change; leave it unset"
                 )
+            if self.cfg.training_args.get("auto_find_batch_size", False):
+                # which, out of memory, halves the batch size hf hands a
+                # dataloader; the budget reads `tokens_per_batch` or the arguments'
+                # own batch size, so every retry would rebuild the same batches
+                raise ValueError(
+                    "`packing: pad` fills each batch to `tokens_per_batch` tokens "
+                    "(by default the batch size × `max_seq_len`), which "
+                    "`training_args.auto_find_batch_size` can't shrink once memory "
+                    "runs out; leave it off and lower `tokens_per_batch` instead"
+                )
             budget = self.cfg.get("tokens_per_batch")
             if budget is not None and budget < self.cfg.max_seq_len:
                 raise ValueError(
@@ -554,6 +559,12 @@ class Trainer(Configurable):
         # tokens, each of the loader's `n_epochs` passes apart
         self.trainer.pad_rows = packing == "pad"
         if self.trainer.pad_rows:
+            # flash attention drops a mask of ones and reads a batch of one row's
+            # time-based position ids as several sequences, splitting attention
+            # wherever they jump; `pad` puts a row over half its budget in a batch
+            # alone, and can leave a pass's last batch a single long row. Read off
+            # the built model, so that one built with it through
+            # `model.model_args` counts too
             if "time_based_rope" in self.cfg and is_flash_attention_requested(
                 config=self.model.config
             ):
@@ -680,6 +691,17 @@ class Trainer(Configurable):
                 f_set[target] = f_set[target].masked_fill(
                     pad, t.nan if f_set[target].is_floating_point() else -100
                 )
+        if pad_rows:
+            # nor is a row's first token, which the lm, scoring each token from
+            # those before it, never predicts: masked so that hf's own count of
+            # the targets a batch holds, `num_items_in_batch`, by which its loss
+            # divides, counts none it doesn't score. Transformers 5.5.4 counts
+            # every label that isn't -100, and a row here is a record of any
+            # length, so one target too many to each would shrink a short record's
+            # loss far more than a long one's. Every other loss, and each head,
+            # reads `labels[..., 1:]`, and goes unchanged
+            f_set["labels"] = f_set["labels"].clone()
+            f_set["labels"][:, 0] = -100
         if self.cfg.get("doc_masking", False):
             # each packed piece attends only to itself, by position ids restarting
             # at every one, which transformers -- given no attention mask or KV
