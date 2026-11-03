@@ -459,6 +459,14 @@ class Trainer(Configurable):
         # tokens, each of the loader's `n_epochs` passes apart
         self.trainer.pad_rows = packing == "pad"
         if self.trainer.pad_rows:
+            if "time_based_rope" in self.cfg and is_flash_attention_requested(
+                config=self.model.config
+            ):
+                raise ValueError(
+                    "`packing: pad` with `time_based_rope` does not support flash "
+                    "attention: singleton batches can split attention at timestamp "
+                    "jumps; use sdpa or eager attention instead"
+                )
             if self.trainer.args.world_size > 1:
                 # accelerate shards a batch sampler's batches across processes,
                 # and how it evens out batches of varying size varies by version
