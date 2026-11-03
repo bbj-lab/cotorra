@@ -92,18 +92,20 @@ class TrainerWithCustomLoss(t_Trainer):
         super().__init__(*args, **kwargs)
         self.compute_loss_func = compute_loss_func
         # the terms a custom loss records, summed over the batches scored since
-        # they were last reported, each weighted by its rows, as hf weights its
-        # `eval_loss` -- or under `packing: pad` by the tokens it scores --
-        # training's apart from evaluation's: `log` reports training's means
-        # beside hf's `loss`, and `evaluation_loop` reports evaluation's, over the
-        # whole eval set, beside its `eval_loss`
-        self.term_sums, self.term_weights = dict(), dict()
+        # they were last reported, weighted by their scoring positions for eval
+        # and by rows for training's logs
+        self.term_sums, self.term_weights, self.term_denominators = (
+            dict(),
+            dict(),
+            dict(),
+        )
         for mode in ("train", "eval"):
             self.reset_terms(mode)
 
     def reset_terms(self, mode: str) -> None:
         self.term_sums[mode] = collections.defaultdict(float)
         self.term_weights[mode] = 0
+        self.term_denominators[mode] = collections.defaultdict(float)
 
     def tally(
         self,
@@ -111,40 +113,119 @@ class TrainerWithCustomLoss(t_Trainer):
         terms: dict[str, t.Tensor],
         inputs: dict[str, t.Tensor | typing.Any],
         labels: t.Tensor | None,
+        denominators: dict[str, t.Tensor] | None = None,
     ) -> None:
-        """adds a batch's `terms` to `mode`'s sums, weighted by the batch's rows,
-        counted off the batch itself, which needn't carry `labels`. Under
-        `packing: pad`, by the tokens its lm scores instead: its batches hold
-        rows by the hundred or a few at a time, and a mean weighting each batch by
-        its rows would weigh each of a short record's tokens far above a long
-        one's. Left on the device, so that no batch waits on the host"""
+        """adds a batch's `terms` and denominators to `mode`'s sums. By default,
+        terms are weighted by rows, or under `packing: pad` by the tokens the lm
+        scores; a custom objective can supply each term's own denominator. Left on
+        the device, so that no batch waits on the host"""
         if getattr(self, "pad_rows", False) and labels is not None:
             weight = (labels[..., 1:] != -100).sum()
         else:
             weight = find_batch_size(inputs) or 0
         for name, term in terms.items():
-            self.term_sums[mode][name] += term * weight
+            denominator = (
+                weight if denominators is None else denominators.get(name, weight)
+            )
+            self.term_sums[mode][name] += term * denominator
+            self.term_denominators[mode][name] += denominator
         self.term_weights[mode] += weight
 
     def term_means(self, mode: str, prefix: str = "") -> dict[str, float]:
         """the means of `mode`'s terms since they were last reported, over every
         process, as hf gathers its own losses; reporting them resets them"""
-        if not (weight := self.term_weights[mode]):
+        if not self.term_sums[mode]:
             return dict()
         names = list(self.term_sums[mode])
         totals = t.stack(
             [
                 t.as_tensor(v, dtype=t.float32).to(self.args.device)
-                for v in (*self.term_sums[mode].values(), weight)
+                for v in (
+                    *self.term_sums[mode].values(),
+                    *(self.term_denominators[mode][name] for name in names),
+                )
             ]
         )
         totals = nested_gather(totals, self.args.parallel_mode)
-        totals = totals.view(-1, len(names) + 1).sum(dim=0)
+        totals = totals.view(-1, 2 * len(names)).sum(dim=0)
         self.reset_terms(mode)
         return {
-            f"{prefix}{name}": (total / totals[-1]).item()
-            for name, total in zip(names, totals[:-1])
+            f"{prefix}{name}": (
+                total / denominator if denominator else total.new_zeros(())
+            ).item()
+            for name, total, denominator in zip(
+                names, totals[: len(names)], totals[len(names) :]
+            )
         }
+
+    def evaluation_term_denominators(
+        self,
+        terms: dict[str, t.Tensor],
+        inputs: dict[str, t.Tensor | typing.Any],
+        labels: t.Tensor | None,
+    ) -> dict[str, t.Tensor]:
+        """the positions each configured loss term averages over"""
+        loss = getattr(self.compute_loss_func, "__self__", None)
+        if not isinstance(loss, Loss) or labels is None:
+            return {}
+
+        shifted = labels[..., 1:]
+        scored = shifted != -100
+        count = scored.sum()
+        denominators = {
+            name: count
+            for name in (
+                "x_ent_loss",
+                "balanced_toi_loss",
+            )
+            if name in terms
+        }
+        if "label_weighted_loss" in terms:
+            class_weights = loss.weights.to(labels.device)[shifted.clamp(min=0)]
+            denominators["label_weighted_loss"] = (class_weights * scored).sum()
+        if "quantile_token_loss" in terms:
+            categories = loss.label_to_cat.to(labels.device)[shifted.clamp(min=0)]
+            denominators["quantile_token_loss"] = (scored & (categories >= 0)).sum()
+
+        for name in loss.heads:
+            term_name = f"{name}_loss"
+            target = inputs.get(HEADS[name].target)
+            if term_name not in terms or target is None:
+                continue
+            target = target.to(labels.device)
+            if name == "disposition":
+                valid = target != -100
+            elif name == "tte":
+                valid = t.isfinite(target.clamp(min=0))
+            else:
+                valid = t.isfinite(target) & (target >= 0)
+            denominators[term_name] = valid.sum()
+        return denominators
+
+    def custom_loss_mean(self, means: dict[str, float]) -> float:
+        """the configured custom objective, combining its dataset-level means"""
+        loss = getattr(self.compute_loss_func, "__self__", None)
+        if not isinstance(loss, Loss):
+            raise TypeError("custom_loss_mean requires cotorra.loss.Loss")
+        base = (
+            "label_weighted_loss"
+            if "label_weighted_loss" in loss.cfg
+            else "x_ent_loss"
+        )
+        total = means.get(base, 0.0)
+        if "balanced_toi_loss" in loss.cfg:
+            total += (
+                loss.cfg.balanced_toi_loss.get("bce_weight", 1.0)
+                * means.get("balanced_toi_loss", 0.0)
+            )
+        if "quantile_token_loss" in loss.cfg:
+            total += (
+                loss.cfg.quantile_token_loss.qt_weight
+                * means.get("quantile_token_loss", 0.0)
+            )
+        for name, options in loss.heads.items():
+            total += options["weight"] * means.get(f"{name}_loss", 0.0)
+        return total
 
     def compute_loss(
         self,
@@ -169,10 +250,20 @@ class TrainerWithCustomLoss(t_Trainer):
             terms = dict()
             loss = self.compute_loss_func(outputs, labels, terms=terms)
             mode = "train" if model.training else "eval"
-            if mode == "eval" and getattr(self, "pad_rows", False):
+            loss_owner = getattr(self.compute_loss_func, "__self__", None)
+            if (
+                mode == "eval"
+                and getattr(self, "pad_rows", False)
+                and not isinstance(loss_owner, Loss)
+            ):
                 # `eval_loss` itself, by tokens (see `evaluation_loop`)
                 terms["loss"] = loss.detach()
-            self.tally(mode, terms, inputs, labels)
+            denominators = (
+                self.evaluation_term_denominators(terms, inputs, labels)
+                if mode == "eval"
+                else None
+            )
+            self.tally(mode, terms, inputs, labels, denominators)
             if model.training:
                 # with a custom loss set, hf's `training_step` leaves averaging
                 # over gradient accumulation to it -- which a per-batch mean
@@ -304,11 +395,15 @@ class TrainerWithCustomLoss(t_Trainer):
             ignore_keys,
             metric_key_prefix,
         )
-        # under `packing: pad`, `loss` among them, so that `eval_loss` -- which
-        # picks the best checkpoint and which `cotorra tune` minimizes -- is a
-        # mean over the tokens scored, where hf's own weighs each batch's mean by
-        # its rows, and a batch of short records holds many times a long one's
-        output.metrics.update(self.term_means("eval", prefix=f"{metric_key_prefix}_"))
+        # `eval_loss` picks the best checkpoint and is what `cotorra tune`
+        # minimizes; for the built-in custom loss, combine its dataset-level
+        # term means rather than weighting every batch mean by LM-token counts
+        means = self.term_means("eval")
+        output.metrics.update(
+            {f"{metric_key_prefix}_{name}": mean for name, mean in means.items()}
+        )
+        if isinstance(getattr(self.compute_loss_func, "__self__", None), Loss):
+            output.metrics[f"{metric_key_prefix}_loss"] = self.custom_loss_mean(means)
         return output
 
     def _report_to_hp_search(

@@ -1410,34 +1410,80 @@ def test_pad_eval_loss_is_a_mean_over_the_tokens_scored(
     """its batches hold rows by the dozen or a few at a time, and hf's own
     `eval_loss`, weighing each batch's mean by its rows, would weigh each of a
     short record's tokens far above a long one's: each row's mean loss, scored
-    alone, weighted by its targets, as are the custom loss's terms. Without the
-    quantile-token term, which averages over its own positions rather than
-    every target's, so that a batch's loss is the mean of its targets' own"""
+    alone, weighted by its targets. The quantile-token term averages over its
+    own positions, so its evaluation denominator must differ from the LM's"""
     cfg = base_training_cfg(packing="pad", custom_loss=custom_loss)
-    del cfg["quantile_token_loss"]
     trainer = trainer_with(cfg, processed, tmp_path)
     hf = trainer.trainer
     widths = [b["input_ids"].shape for b in hf.get_eval_dataloader()]
     assert len({rows for rows, _ in widths}) > 1
     mdl = hf.model.eval()
-    sums, n = collections.defaultdict(float), 0
+    sums = collections.defaultdict(float)
+    denominators, n = collections.defaultdict(int), 0
     with t.no_grad():
         for eg in hf.eval_dataset:
             batch = {k: v.to(mdl.device) for k, v in trainer.collate_fn([eg]).items()}
-            k = (batch["labels"][:, 1:] != -100).sum().item()
+            labels = batch["labels"]
+            scored = labels[:, 1:] != -100
+            k = scored.sum().item()
             labels = batch.pop("labels")
             if custom_loss:
                 terms = dict()
-                sums["loss"] += k * trainer.loss(mdl(**batch), labels, terms).item()
+                trainer.loss(mdl(**batch), labels, terms)
                 for name, term in terms.items():
-                    sums[name] += k * term.item()
+                    if name == "quantile_token_loss":
+                        categories = trainer.loss.__self__.label_to_cat.to(
+                            labels.device
+                        )[labels[:, 1:].clamp(min=0)]
+                        count = (scored & (categories >= 0)).sum().item()
+                    else:
+                        count = k
+                    sums[name] += count * term.item()
+                    denominators[name] += count
             else:
                 sums["loss"] += k * mdl(**batch, labels=labels).loss.item()
             n += k
     metrics = hf.evaluate()
-    assert metrics["eval_loss"] == pytest.approx(sums.pop("loss") / n, rel=1e-5)
-    for name, total in sums.items():
-        assert metrics[f"eval_{name}"] == pytest.approx(total / n, rel=1e-5)
+    if custom_loss:
+        expected = 0.0
+        for name, total in sums.items():
+            mean = total / denominators[name]
+            assert metrics[f"eval_{name}"] == pytest.approx(mean, rel=1e-5)
+            if name == "x_ent_loss":
+                expected += mean
+            elif name == "balanced_toi_loss":
+                expected += cfg["balanced_toi_loss"]["bce_weight"] * mean
+            elif name == "quantile_token_loss":
+                expected += cfg["quantile_token_loss"]["qt_weight"] * mean
+        assert denominators["quantile_token_loss"] != denominators["x_ent_loss"]
+        assert metrics["eval_loss"] == pytest.approx(expected, rel=1e-5)
+    else:
+        assert metrics["eval_loss"] == pytest.approx(sums["loss"] / n, rel=1e-5)
+
+
+def test_pad_eval_head_loss_uses_its_valid_targets(
+    processed_with_end_times, tmp_path
+):
+    cfg = base_training_cfg(packing="pad", tte_objective={})
+    trainer = trainer_with(cfg, processed_with_end_times, tmp_path)
+    hf = trainer.trainer
+    mdl = hf.model.eval()
+    total, denominator = 0.0, 0
+    with t.no_grad():
+        for eg in hf.eval_dataset:
+            batch = {k: v.to(mdl.device) for k, v in trainer.collate_fn([eg]).items()}
+            target = batch["hours_to_end_time"]
+            valid = t.isfinite(target)
+            labels = batch.pop("labels")
+            terms = {}
+            trainer.loss(mdl(**batch), labels, terms)
+            term = terms["tte_loss"]
+            count = valid.sum().item()
+            total += count * term.item()
+            denominator += count
+
+    metrics = hf.evaluate()
+    assert metrics["eval_tte_loss"] == pytest.approx(total / denominator, rel=1e-5)
 
 
 def test_pad_trains_and_evaluates_on_hfs_own_batches(pad_trainer):
