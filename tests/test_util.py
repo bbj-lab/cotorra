@@ -15,6 +15,8 @@ from cotorra.util import (
     bootstrap_ci,
     bootstrap_pval,
     pr_auc_score,
+    record_chunks_iter,
+    token_budget_batches,
 )
 
 
@@ -191,6 +193,245 @@ def test_packing_is_reproducible_by_its_seed_and_shuffled_by_it():
 
 def test_an_empty_record_takes_no_room():
     assert [pieces(row) for row in packed(records(0, 3, 0))] == [[[100, 101, 102]]]
+
+
+# ------------------------------------------------- a record to a row, unpadded
+
+
+def chunked(dset: ds.Dataset, seed: int | None = 0, **kwargs) -> list[dict]:
+    rng = None if seed is None else np.random.default_rng(seed)
+    return list(record_chunks_iter(dset, SEQ_LEN, rng, **kwargs))
+
+
+def rows_of(*lengths: int) -> list[list[int]]:
+    """what a record to a row should make rows of: each record cut every
+    `SEQ_LEN` tokens, a chunk of a single token, with nothing to predict, left
+    out"""
+    return [c for c in chunks(*lengths) if len(c) > 1]
+
+
+def test_each_record_takes_rows_of_its_own_split_only_past_a_row():
+    """a record longer than a row is cut into chunks of at most a row, a
+    shorter one kept whole; each chunk is a row of its own, at its own length,
+    with every column in step: every token exactly once, nothing padded"""
+    rows = chunked(records(*LENGTHS))
+    assert sorted(row["input_ids"] for row in rows) == rows_of(*LENGTHS)
+    for row in rows:
+        assert set(row) == {"input_ids", "negated"}
+        assert row["negated"] == [-x for x in row["input_ids"]]
+        # a single record's tokens, in order
+        assert np.diff(row["input_ids"]).tolist() == [1] * (len(row["input_ids"]) - 1)
+
+
+def first_seen(rows: list[dict]) -> list[int]:
+    """the records `rows` come from, in the order each is first seen"""
+    return list(dict.fromkeys(row["input_ids"][0] // 100 for row in rows))
+
+
+def test_each_epoch_takes_the_records_in_an_order_of_its_own():
+    """every record's chunks once a pass, each pass shuffled apart and a split
+    record's chunks in turn"""
+    lengths = range(2, 20)
+    rows = chunked(records(*lengths), n_epochs=3)
+    per_pass = len(rows_of(*lengths))
+    passes = [rows[i * per_pass : (i + 1) * per_pass] for i in range(3)]
+    for p in passes:
+        assert sorted(row["input_ids"] for row in p) == rows_of(*lengths)
+        record = [row["input_ids"][0] // 100 for row in p]
+        assert len(first_seen(p)) == sum(a != b for a, b in zip(record, record[1:])) + 1
+    assert len({tuple(first_seen(p)) for p in passes}) == 3
+
+
+def test_record_chunks_are_reproducible_by_their_seed_and_shuffled_by_it():
+    dset = records(*range(1, 20))
+    assert chunked(dset, seed=1) == chunked(dset, seed=1)
+    assert chunked(dset, seed=1) != chunked(dset, seed=2)
+
+
+def test_without_a_generator_the_chunks_come_longest_first():
+    """as `packing: pad` evaluates them, so that batches taken in turn hold
+    rows of about one length; ties in their records' order, and a split
+    record's chunks in turn"""
+    rows = chunked(records(*LENGTHS), seed=None)
+    assert sorted(row["input_ids"] for row in rows) == rows_of(*LENGTHS)
+    keys = [(-len(row["input_ids"]), row["input_ids"][0]) for row in rows]
+    assert keys == sorted(keys)
+
+
+def test_a_shuffled_dataset_chunks_each_record_at_its_own_length():
+    """read through the shuffle's indices, as the packer reads them, or a
+    record's tokens would be cut to another record's length"""
+    dset = records(*LENGTHS).repeat(2).shuffle(seed=0)
+    assert sorted(row["input_ids"] for row in chunked(dset)) == sorted(
+        2 * rows_of(*LENGTHS)
+    )
+
+
+def test_an_empty_record_takes_no_row():
+    assert chunked(records(0, 3, 0)) == [
+        {"input_ids": [100, 101, 102], "negated": [-100, -101, -102]}
+    ]
+
+
+def test_a_single_token_left_over_takes_no_row():
+    """a record of one token, or a longer one's last chunk of one, has no next
+    token to predict: a batch of such rows alone would score nothing, which hf's
+    own loss averages to a nan. Two tokens make a row"""
+    rows = chunked(records(1, SEQ_LEN + 1, SEQ_LEN + 2), seed=None)
+    assert [row["input_ids"] for row in rows] == [
+        list(range(100, 100 + SEQ_LEN)),
+        list(range(200, 200 + SEQ_LEN)),
+        [200 + SEQ_LEN, 201 + SEQ_LEN],
+    ]
+
+
+# ------------------------------------------------ batches by a budget of tokens
+
+
+def lognormal_lengths(n: int = 3000, seed: int = 0) -> np.ndarray:
+    """heavy-tailed, as records' lengths are: a median of ~250 tokens, a few
+    hundredths past 2000, up to a quarter of the budget `BUDGET`"""
+    rng = np.random.default_rng(seed)
+    return np.clip(np.exp(rng.normal(5.5, 1.3, n)).astype(int), 2, BUDGET // 4)
+
+
+BUDGET = 4096
+
+
+def budgeted(lengths, seed: int | None = 0, **kwargs) -> list[list[int]]:
+    rng = None if seed is None else np.random.default_rng(seed)
+    return token_budget_batches(lengths, BUDGET, rng, **kwargs)
+
+
+def test_token_budget_batches_take_every_row_once_each_batch_within_budget():
+    """padded to its longest row, no batch holds more than its budget; batches
+    of short rows hold more of them, and every batch but a pass's last, part
+    filled, holds most of the budget"""
+    lengths = lognormal_lengths()
+    batches = budgeted(lengths)
+    assert sorted(i for b in batches for i in b) == list(range(len(lengths)))
+    padded = [len(b) * lengths[b].max() for b in batches]
+    assert max(padded) <= BUDGET
+    assert sorted(padded)[1] > BUDGET / 2
+    sizes = {len(b) for b in batches}
+    assert min(sizes) <= 4 and max(sizes) > 100
+
+
+def per_token_weights(lengths: np.ndarray, batches: list[list[int]]) -> np.ndarray:
+    """each row's tokens' weight in training: every step counts alike, a mean
+    over its batch's scored tokens, its rows' all but their first"""
+    w = np.zeros(len(lengths))
+    for b in batches:
+        w[b] = 1 / (lengths[b] - 1).sum()
+    return w
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_token_budget_batches_weigh_short_and_long_rows_tokens_about_alike(seed):
+    """the point of them: batches of a fixed number of rows, sorted by length as
+    hf's length-grouped sampler sorts them, weigh each of the shortest quarter's
+    tokens several times the average and the longest quarter's at under half;
+    filled to a budget, each within a fifth of it"""
+    lengths = lognormal_lengths(seed=seed)
+    order = np.argsort(lengths)
+    scored = lengths - 1
+
+    def quarters(batches: list[list[int]]) -> tuple[float, float]:
+        w = per_token_weights(lengths, batches)
+        mean = (w * scored).sum() / scored.sum()
+        q = len(order) // 4
+        return tuple(
+            (w[i] * scored[i]).sum() / scored[i].sum() / mean
+            for i in (order[:q], order[-q:])
+        )
+
+    short, long = quarters(budgeted(lengths, seed=seed, n_passes=3))
+    assert 1 <= short < 1.25 and 0.9 < long <= 1
+    by_rows = [list(b) for b in np.array_split(order, len(order) // 4)]
+    short, long = quarters(by_rows)
+    assert short > 5 and long < 0.5
+
+
+def test_token_budget_batches_keep_each_pass_apart_in_turn():
+    """a record's copies, one a pass, never share a batch, and every pass's
+    rows are batched before the next one's"""
+    lengths = np.tile(lognormal_lengths(600), 3)
+    batches = budgeted(lengths, n_passes=3)
+    passes = [{i // 600 for i in b} for b in batches]
+    assert all(len(p) == 1 for p in passes)
+    passes = [min(p) for p in passes]
+    assert passes == sorted(passes) and set(passes) == {0, 1, 2}
+    # each pass shuffled apart: its batches, by their rows' lengths, in an order
+    # of their own
+    first, second = (
+        [tuple(sorted(lengths[b])) for b in batches if p * 600 <= b[0] < (p + 1) * 600]
+        for p in (0, 1)
+    )
+    assert sorted(first) == sorted(second) and first != second
+
+
+def test_token_budget_batches_lead_with_the_longest_row():
+    """so that a budget too large for memory fails at the first step"""
+    lengths = lognormal_lengths()
+    for seed in range(3):
+        assert lengths[budgeted(lengths, seed=seed)[0]].max() == lengths.max()
+
+
+def test_token_budget_batches_fill_all_but_the_longest_rows_batch():
+    """cut shortest first: where the lengths run densely, a batch closes only
+    when its next row, about as long as its own, won't fit, so that every batch
+    but a pass's last holds all but under a row of its budget, padded, and the
+    last, part filled, holds the pass's longest rows, a few of which fill most of
+    a budget -- never a sliver of short rows, each of whose tokens would weigh
+    many times the rest"""
+    lengths = np.random.default_rng(0).integers(20, BUDGET // 4 + 1, 3000)
+    batches = budgeted(lengths)
+    last = max(batches, key=lambda b: lengths[b].min())
+    assert lengths[last].min() >= np.quantile(lengths, 0.9)
+    padded = [len(b) * lengths[b].max() for b in batches if b is not last]
+    assert min(padded) > BUDGET - BUDGET // 4
+
+
+def test_token_budget_batches_are_reproducible_by_their_seed_and_shuffled_by_it():
+    lengths = lognormal_lengths(500)
+    assert budgeted(lengths, seed=1) == budgeted(lengths, seed=1)
+    assert budgeted(lengths, seed=1) != budgeted(lengths, seed=2)
+
+
+def test_without_a_generator_token_budget_batches_keep_the_rows_in_order():
+    """as `packing: pad` evaluates its tuning rows, longest first, whatever the
+    passes"""
+    lengths = np.sort(lognormal_lengths(500))[::-1]
+    batches = budgeted(lengths, seed=None, n_passes=2)
+    assert [i for b in batches for i in b] == list(range(len(lengths)))
+    assert all(len(b) * lengths[b].max() <= BUDGET for b in batches)
+
+
+@pytest.mark.parametrize("shards", [2, 3])
+def test_token_budget_batches_hold_each_shards_share_to_its_budget(shards):
+    """split across `shards` gpus, as `nn.DataParallel` splits a batch's k rows,
+    ceil(k / shards) to a gpu, the budget is each gpu's own, and a batch holds as
+    many rows as keep the busiest one's share within it: three rows of 2700
+    tokens fit two gpus' budgets of 4096 together, 8100 tokens of 8192, but the
+    gpu given two of them would hold 5400"""
+    assert budgeted([2700] * 3, seed=None, shards=2) == [[0, 1], [2]]
+    lengths = lognormal_lengths()
+    batches = budgeted(lengths, shards=shards)
+    assert sorted(i for b in batches for i in b) == list(range(len(lengths)))
+    busiest = [-(-len(b) // shards) * lengths[b].max() for b in batches]
+    assert max(busiest) <= BUDGET
+    # and every gpu still gets most of its budget, all but a pass's last batch
+    assert sorted(busiest)[1] > BUDGET / 2
+    padded = [len(b) * lengths[b].max() for b in batches]
+    assert np.median(padded) > (shards - 1) * BUDGET
+
+
+def test_token_budget_batches_refuse_a_row_past_the_budget_or_uneven_passes():
+    with pytest.raises(ValueError, match="a row of 4097 tokens doesn't fit"):
+        budgeted([3, BUDGET + 1, 5])
+    with pytest.raises(ValueError, match="3 rows don't make 2 passes"):
+        budgeted([3, 4, 5], n_passes=2)
+    assert budgeted([]) == []
 
 
 def test_pr_auc_score_is_near_perfect_for_perfect_separation():

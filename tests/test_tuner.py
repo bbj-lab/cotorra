@@ -193,6 +193,23 @@ def test_every_tuning_arg_but_the_space_reaches_the_search_as_it_is(
     assert searched["compute_objective"] is Tuner.compute_objective
 
 
+def test_prune_warmup_evals_hands_the_search_a_median_pruner_that_waits(
+    processed, tmp_path, monkeypatch
+):
+    """optuna's default pruner, but never before evaluation `prune_warmup_evals`
+    of a trial, its steps being evaluations (`_report_to_hp_search`); the key
+    itself goes no further, as no keyword of hf's search"""
+    tuning_args = {"direction": "minimize", "backend": "optuna", "n_trials": 2}
+    tuner = tuner_with(processed, tmp_path, tuning_args | {"prune_warmup_evals": 3})
+    searched = searched_with(tuner, monkeypatch)
+    assert "prune_warmup_evals" not in searched
+    assert isinstance(searched["pruner"], optuna.pruners.MedianPruner)
+    assert searched["pruner"]._n_warmup_steps == 3
+    # without the key, optuna's own default
+    tuner = tuner_with(processed, tmp_path / "default", tuning_args)
+    assert "pruner" not in searched_with(tuner, monkeypatch)
+
+
 @pytest.mark.parametrize("how", ["absent", "empty"])
 def test_without_a_space_the_search_samples_the_default_one(
     how, processed, tmp_path, monkeypatch

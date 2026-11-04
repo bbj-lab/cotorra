@@ -57,7 +57,8 @@ model: *llama_32
 max_seq_len: !!int &max_len 4096
 n_epochs: !!int 1
 run_name: &run_name cotorra-tuning
-# packing: bfd # packs records whole, padding the rest, rather than the default `concat`
+# packing: pad # a row per record, padded by the batch; `bfd` packs them whole; default `concat`
+# tokens_per_batch: !!int 16384 # with `packing: pad`, a batch's most tokens; default batch size × max_seq_len
 # doc_masking: !!bool true # with `packing: bfd`, keeps each packed record from attending to the others
 # attn_implementation: flash_attention_2 # with flash-attn installed; unset, transformers' own (sdpa)
 # prune_trial_checkpoints: !!bool true # `cotorra tune` deletes each trial's checkpoints as it ends

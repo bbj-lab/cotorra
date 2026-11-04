@@ -238,7 +238,7 @@ def test_bfd_hands_the_packer_the_split_and_its_epochs_to_pack_apart(
 
 def test_an_unknown_packing_is_refused(processed, tmp_path_factory):
     loader = loader_with(processed, tmp_path_factory, packing="best_fit")
-    with pytest.raises(ValueError, match="`packing` is `concat` or `bfd`"):
+    with pytest.raises(ValueError, match="`packing` is `concat`, `bfd` or `pad`"):
         loader.get_train_data()
 
 
@@ -259,6 +259,60 @@ def test_doc_masking_evaluates_on_tuning_data_packed_as_training_is(
     assert first.column_names == PACKED_COLUMNS
     assert all(t.equal(a["input_ids"], b["input_ids"]) for a, b in zip(first, again))
     assert unpadded(first) == in_records(loader.dataset["tuning"])
+
+
+# ------------------------------------------------- a record to a row, unpadded
+
+
+@pytest.fixture(scope="module")
+def pad_loader(processed, tmp_path_factory) -> Loader:
+    return loader_with(processed, tmp_path_factory, packing="pad", n_epochs=2)
+
+
+def as_rows(dset) -> list[tuple[tuple, tuple]]:
+    """each row's tokens beside their elapsed seconds, in `dset`'s order"""
+    return [
+        (tuple(eg["input_ids"].tolist()), tuple(eg["s_elapsed"].tolist()))
+        for eg in dset
+    ]
+
+
+def record_chunks(dset: ds.Dataset) -> list[tuple[tuple, tuple]]:
+    """what `packing: pad` should make rows of: each of `dset`'s records cut
+    every `SEQ_LEN` tokens, its elapsed seconds beside it, as the trainer gets
+    them, a chunk of a single token, with nothing to predict, left out"""
+    return sorted(
+        (
+            tuple(ids[s : s + SEQ_LEN]),
+            tuple(t.tensor(secs[s : s + SEQ_LEN], dtype=t.float32).tolist()),
+        )
+        for ids, secs in zip(dset["input_ids"], dset["s_elapsed"])
+        for s in range(0, len(ids), SEQ_LEN)
+        if len(ids) - s > 1
+    )
+
+
+def test_pad_trains_on_each_record_in_rows_of_its_own(pad_loader):
+    """each record, or each `max_seq_len` chunk of a longer one, a row at its own
+    length, unpadded, the collator padding each batch; once an epoch, and with
+    nothing marking padding or pieces"""
+    train = pad_loader.get_train_data()
+    assert train.column_names == ["input_ids", "s_elapsed"]
+    rows = as_rows(train)
+    assert sorted(rows) == sorted(2 * record_chunks(pad_loader.dataset["train"]))
+    assert len({len(ids) for ids, _ in rows}) > 1
+
+
+def test_pad_evaluates_each_tuning_record_in_rows_of_its_own_longest_first(pad_loader):
+    """in the format it trains on, once, whatever `n_epochs`; longest first, so
+    that hf's evaluation, taking the rows in turn, batches rows of about one
+    length, and in the same order whatever the training data drew"""
+    first = as_rows(pad_loader.get_tuning_data())
+    pad_loader.get_train_data()
+    assert as_rows(pad_loader.get_tuning_data()) == first
+    assert sorted(first) == record_chunks(pad_loader.dataset["tuning"])
+    lengths = [len(ids) for ids, _ in first]
+    assert lengths == sorted(lengths, reverse=True) and len(set(lengths)) > 1
 
 
 def test_for_inference_is_none_when_no_inference_files_exist(

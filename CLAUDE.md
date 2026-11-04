@@ -125,7 +125,11 @@ to compute the vocabulary's half once per call and chunks positions by
 `chunk_elements`; a change to `proj`'s layout has to change it too. Every head is
 scored unshifted (position i against its own target) over every position,
 whatever `logits_to_keep` trims, and each loss is summed then normalized so a
-batch with nothing to score still gives its head a gradient.
+batch with nothing to score still gives its head a gradient. It's normalized by
+the count of the positions `Head.scored` marks, which the head's `loss` reads
+too, so that `TrainerWithCustomLoss` can count them to average the head's term
+over a whole evaluation (see `pad`, below); a new head implements `scored` beside
+`loss`.
 
 ### Configuration model (important)
 
@@ -185,16 +189,20 @@ Fixing a bug so a key does what it documents isn't a compatibility break: with
 gradients rather than average them (HF leaves that to a custom loss), and now
 averages them. It weights each micro-batch alike, where HF's stock path weights
 each scored token alike; the two agree while every micro-batch scores as many
-tokens, as concatenated rows do and `packing: bfd`'s needn't. With
-`custom_loss: false`, a model with heads added each head's mean, as it was, to
-HF's LM term: a sum over the step's `num_items_in_batch` tokens, for which HF
-skips its division by the micro-batches and multiplies by the processes (to undo
-DDP's averaging), so the heads' weights were multiplied by both in training,
-though not in evaluation. Now `CotorraForCausalLM.forward` weights each head's
-term by its micro-batch's share of those tokens, so that it scales as the LM term
-does under any of HF's scalings. Transformers 5.5.4 counts every unmasked label,
-not the shifted ones the loss scores, so its count runs one token a row high,
-shrinking both terms alike by about one part in `max_seq_len`.
+tokens, as concatenated rows do, `packing: pad`'s, filled to a budget of tokens,
+about do, and `bfd`'s needn't. With `custom_loss: false`, a model with heads
+added each head's mean, as it was, to HF's LM term: a sum over the step's
+`num_items_in_batch` tokens, for which HF skips its division by the micro-batches
+and multiplies by the processes (to undo DDP's averaging), so the heads' weights
+were multiplied by both in training, though not in evaluation. Now
+`CotorraForCausalLM.forward` weights each head's term by its micro-batch's share
+of those tokens, so that it scales as the LM term does under any of HF's
+scalings. Transformers 5.5.4 counts every unmasked label, not the shifted ones
+the loss scores, so its count runs one token a row high, shrinking both terms
+alike by about one part in `max_seq_len`. `packing: pad`, whose rows are records
+of any length (where a target too many to each would shrink a short record's loss
+far more than a long one's), masks each row's first label in `collate_fn`, which
+no loss reads, so that its count is right on every version.
 
 Deprecating a key follows the same rule: `label_weighted_loss` (it made the model
 predict its tokens of interest more often) is still honored, and
@@ -336,6 +344,52 @@ first token -100; for flash attention, read off the built model (so
 `bfd`-packed too, by its own fixed seed, so `eval_loss` scores the masked format
 the model trains on (without `doc_masking` it stays concatenated).
 
+`pad` (`util.record_chunks_iter`) cuts records as `bfd` does but makes each chunk
+a row of its own, unpadded, each of `n_epochs` passes in an order of its own, and
+drops a last chunk of one token: with no next token to predict, a batch of such
+rows alone would give HF's own loss no target, a nan in `eval_loss` and a 0/0 in
+a step; `Trainer.collate_fn` pads each batch on the right to its longest row,
+with zeros masked as `bfd`'s padding is, and each row's first label masked too
+(see 5.5.4's count, above). It keeps time-based RoPE's all-ones `attention_mask`
+over the padding: causal attention keeps every token from the padding after it,
+and sdpa, given ones, keeps its causal fast path, where a mask with zeros would
+have it build a (rows, 1, len, len) one. The mixture TNT head needs no mask
+either: a row ends short of `max_seq_len` only where its record ends, and no
+batch pads past `max_seq_len`. `TrainerWithCustomLoss._get_dataloader` (where HF
+5.5.4 and 5.19 alike build every dataloader) hands `pad`'s rows to a `DataLoader`
+of its own, whose `batch_sampler` is `TokenBudgetBatches`:
+`util.token_budget_batches` fills each batch to `tokens_per_batch` padded tokens
+(`Trainer.token_budget`; by default the batch size × `max_seq_len`; per GPU, as
+`nn.DataParallel` splits a batch's k rows ceil(k / `n_gpu`) to a GPU, each GPU's
+share held to it), each of the loader's `n_epochs` passes apart, sorted by length
+over the whole pass and cut shortest first, the batches then shuffled, the one
+holding the longest row first; seeded by `data_seed` or `seed`, and redrawn by
+`set_epoch`, which accelerate (≥1.3) forwards to a batch sampler. Why a budget
+rather than a count of rows: a step's loss is a mean over its batch's tokens and
+every step counts alike (marabou's runs clip every step, their gradient norms
+~100× `max_grad_norm: 1`, so rescaling a step's loss changes nothing), so a few
+rows of one length to a batch weigh each record about alike; a record's length
+being its outcome, that tilts a generative model toward records that end soon (on
+a NICU split, the discharge rate it was fit to rose 3.4×). Megabatches, as HF's
+length-grouped sampler sorts, would leave the rare short rows a batch spanning a
+wide range of lengths, badly filled, so the sort is over the whole pass,
+fairseq's way. Under `pad`, `tally` weights the logged terms by the tokens a
+batch's LM scores rather than its rows, and in evaluation by the positions each
+term scores: `Loss.custom_loss` records each LM term's count beside it
+(`counts`), from the mask it averages over, and a head's is its `Head.scored`'s.
+`evaluation_loop`'s `eval_loss` is then `Loss.combine` of those means (the one
+place the objective's weights are applied, to a batch's terms in training too)
+or, for a loss function other than `Loss`'s, the loss's own mean over the tokens
+scored; HF's weighs batch means by rows, which a batch of hundreds of short
+records would dominate. Every other packing keeps HF's `eval_loss`, and terms
+weighted by rows, as released. `Trainer.__init__` refuses `pad` with
+`train_sampling_strategy` other than `group_by_length`, with more than one
+process (how accelerate shards batches of varying size differs by version), with
+`auto_find_batch_size` (which halves the batch size HF hands a dataloader, which
+the budget doesn't read, so every retry would rebuild the same batches), or with
+time-based RoPE under flash attention (see the gotcha below), and refuses
+`tokens_per_batch` without `pad` or below `max_seq_len`.
+
 ## Gotchas
 
 - **Install requires the PyTorch CUDA index.** Use the two-index `pip install`
@@ -385,10 +439,14 @@ the model trains on (without `doc_masking` it stays concatenated).
   mask of ones, though, and derives a one-row batch's sequences from its position
   ids anyway (its helpers give wrong segments on 5.19 and fail on 5.5.4; the
   kernel itself is untested, flash-attn needing CUDA), so time-based RoPE with
-  flash attention is only sound for batches of more than one row. HF sets
-  `training_args.use_cache` on the model it builds in `__init__` (the one
-  `built_trainer.model` saves in the tests), not on the one `model_init` rebuilds
-  in `train()`, which keeps its `AutoConfig`'s.
+  flash attention is only sound for batches of more than one row:
+  `Trainer.__init__` refuses it under `packing: pad`, which puts a row over half
+  of `tokens_per_batch` in a batch alone and can leave an epoch's last batch a
+  single long row, and any packing gets one-row batches from
+  `per_device_train_batch_size: 1`. HF sets `training_args.use_cache` on the
+  model it builds in `__init__` (the one `built_trainer.model` saves in the
+  tests), not on the one `model_init` rebuilds in `train()`, which keeps its
+  `AutoConfig`'s.
 - **HF's `label_smoothing_factor` only smooths HF's own loss.** On
   `custom_loss: true` it does nothing (`Trainer.__init__` warns). On
   `custom_loss: false` with heads, HF pops `labels` to smooth the logits itself,

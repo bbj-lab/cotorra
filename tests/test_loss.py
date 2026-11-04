@@ -192,6 +192,87 @@ def test_an_objective_naming_no_head_is_refused():
         Loss(make_cfg(mpp_objective={}), make_tkzr_cfg())
 
 
+def test_combine_weighs_the_terms_as_custom_loss_does(outputs, labels):
+    """the one place the objective's weights are applied: to a batch's terms in
+    training, and to their means over a whole evaluation under `packing: pad`"""
+    weights = {"tte": 0.25, "tnt": 0.125, "disposition": 0.5}
+    cfg = make_cfg(
+        balanced_toi_loss={"tokens_of_interest": ["DSCG//*"], "bce_weight": 0.5},
+        **{f"{n}_objective": {"weight": w} for n, w in weights.items()},
+    )
+    loss = Loss(cfg, make_tkzr_cfg())
+    terms = dict()
+    total = loss.custom_loss(dict(outputs) | HEAD_TERMS, labels, terms)
+    assert set(terms) == {
+        "x_ent_loss",
+        "balanced_toi_loss",
+        "quantile_token_loss",
+        *HEAD_TERMS,
+    }
+    assert t.equal(total, loss.combine(terms))
+    means = {name: term.item() for name, term in terms.items()}
+    assert loss.combine(means) == pytest.approx(total.item(), rel=1e-6)
+
+
+# rows holding quantile tokens, unscored labels, and tokens of interest in
+# proportions of their own
+MIXED_LABELS = t.tensor(
+    [
+        [1, 5, 7, 9, 2, 3],
+        [1, 10, -100, 14, 2, -100],
+        [1, 3, 4, 3, 2, -100],
+        [1, 12, 6, 13, 8, 2],
+    ]
+)
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        lambda: make_cfg(
+            balanced_toi_loss={"tokens_of_interest": ["DSCG//*"], "bce_weight": 0.5}
+        ),
+        lambda: weighted_cfg(),
+    ],
+    ids=["cross-entropy", "label-weighted"],
+)
+def test_each_lm_term_counts_what_it_divides_by(cfg):
+    """`custom_loss`'s `counts`, by which `TrainerWithCustomLoss` averages each
+    term over a whole evaluation under `packing: pad`: two batches' terms, each
+    weighted by its count, add up to the term of both together only if the
+    count is what the term divides by -- its targets, its quantile tokens, or
+    for the label-weighted cross-entropy, its targets' weights"""
+    loss = Loss(cfg(), make_tkzr_cfg())
+    logits = t.randn(4, 6, VOCAB_SIZE, generator=t.Generator().manual_seed(0))
+
+    def scored(rows: slice) -> tuple[dict, dict]:
+        terms, counts = dict(), dict()
+        loss.custom_loss({"logits": logits[rows]}, MIXED_LABELS[rows], terms, counts)
+        return terms, counts
+
+    both, top, bottom = (scored(r) for r in (slice(None), slice(0, 2), slice(2, 4)))
+    assert set(both[1]) == set(both[0])
+    for name in both[0]:
+        (term, n), (a, n_a), (b, n_b) = (
+            (terms[name], counts[name]) for terms, counts in (both, top, bottom)
+        )
+        assert n == n_a + n_b and n_a > 0 and n_b > 0
+        assert (term * n).item() == pytest.approx((a * n_a + b * n_b).item(), rel=1e-5)
+
+
+def test_a_quantile_term_without_quantile_tokens_counts_none(labels):
+    """and averages to 0 over an evaluation, as it trains: 0 in every batch"""
+    lookup = {"UNK": 0, "BOS": 1, "EOS": 2, "A": 3, "B": 4}
+    tkzr = OmegaConf.create({"lookup": lookup, "cfg": {"n_bins": N_BINS}})
+    loss = Loss(make_cfg(), tkzr)
+    assert loss.n_cats == 0
+    logits = t.randn(2, 5, len(lookup), generator=t.Generator().manual_seed(0))
+    terms, counts = dict(), dict()
+    loss.custom_loss({"logits": logits}, labels.clamp(max=4), terms, counts)
+    assert terms["quantile_token_loss"].item() == counts["quantile_token_loss"] == 0
+    assert counts["x_ent_loss"] == 8
+
+
 # ------------------------------------------- label_weighted_loss (deprecated)
 
 

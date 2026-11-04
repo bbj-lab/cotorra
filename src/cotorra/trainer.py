@@ -5,13 +5,17 @@ train a model
 """
 
 import collections.abc
+import functools
 import os
 import pathlib
 import typing
 import warnings
 
+import datasets as ds
+import numpy as np
 import torch as t
 from omegaconf import OmegaConf
+from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -20,13 +24,65 @@ from transformers import (
 )
 from transformers import Trainer as t_Trainer
 from transformers.trainer_pt_utils import find_batch_size, nested_gather
-from transformers.trainer_utils import EvalLoopOutput, TrainOutput
+from transformers.trainer_utils import EvalLoopOutput, TrainOutput, seed_worker
 from transformers.utils.generic import is_flash_attention_requested
 
 from cotorra.configurable import Configurable
 from cotorra.loader import Loader
 from cotorra.loss import Loss
 from cotorra.model import HEADS, CotorraConfig, head_options
+from cotorra.util import token_budget_batches
+
+
+class TokenBudgetBatches(t.utils.data.Sampler):
+    """
+    `packing: pad`'s batches for a `DataLoader`'s `batch_sampler`, each as many
+    rows as fit `budget` tokens once padded (`util.token_budget_batches`), so
+    that every step trains on about as many tokens. For training, `seed`ed:
+    drawn from a generator of its own rather than torch's global one, so that
+    every trial of a search draws the same batches, and redrawn for each epoch
+    hf's loop sets, so that a run resumed mid-epoch picks up the batches it left
+    off in. Unseeded, for evaluation: the rows in their own order. `budget` is
+    each of the `shards` gpus' that `nn.DataParallel` splits a batch's rows
+    across
+    """
+
+    def __init__(
+        self,
+        lengths: collections.abc.Sequence[int],
+        budget: int,
+        seed: int | None = None,
+        n_passes: int = 1,
+        shards: int = 1,
+    ) -> None:
+        super().__init__()
+        self.lengths, self.budget = np.asarray(lengths), budget
+        self.seed, self.n_passes, self.shards = seed, n_passes, shards
+        self.set_epoch(0)
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+        rng = None if self.seed is None else np.random.default_rng([self.seed, epoch])
+        self.batches = token_budget_batches(
+            self.lengths, self.budget, rng, n_passes=self.n_passes, shards=self.shards
+        )
+
+    def __iter__(self) -> collections.abc.Iterator[list[int]]:
+        return (list(batch) for batch in self.batches)
+
+    def __len__(self) -> int:
+        return len(self.batches)
+
+
+def row_lengths(dataset: ds.Dataset) -> list[int]:
+    """each row's tokens, read off the arrow table rather than row by row"""
+    import pyarrow.compute as pc
+
+    return (
+        pc.list_value_length(dataset.with_format("arrow")["input_ids"])
+        .to_numpy()
+        .tolist()
+    )
 
 
 class TrainerWithCustomLoss(t_Trainer):
@@ -38,36 +94,92 @@ class TrainerWithCustomLoss(t_Trainer):
     ) -> None:
         super().__init__(*args, **kwargs)
         self.compute_loss_func = compute_loss_func
-        # the terms a custom loss records, summed over the rows scored since they
-        # were last reported, training's apart from evaluation's: `log` reports
-        # training's means beside hf's `loss`, and `evaluation_loop` reports
-        # evaluation's, over the whole eval set, beside its `eval_loss`
-        self.term_sums, self.term_rows = dict(), dict()
+        # the terms a custom loss records, summed over the batches scored since
+        # they were last reported, each weighted by its batch's rows, as hf
+        # weights `eval_loss` -- or under `packing: pad` by the positions it
+        # scores -- training's apart from evaluation's: `log` reports training's
+        # means beside hf's `loss`, and `evaluation_loop` reports evaluation's,
+        # over the whole eval set, beside its `eval_loss`
+        self.term_sums, self.term_weights = dict(), dict()
         for mode in ("train", "eval"):
             self.reset_terms(mode)
 
     def reset_terms(self, mode: str) -> None:
         self.term_sums[mode] = collections.defaultdict(float)
-        self.term_rows[mode] = 0
+        self.term_weights[mode] = collections.defaultdict(float)
+
+    @property
+    def cotorra_loss(self) -> Loss | None:
+        """the `Loss` whose `custom_loss` is the loss function, if it is: it counts
+        the positions each of its terms averages over, and combines them"""
+        owner = getattr(self.compute_loss_func, "__self__", None)
+        return owner if isinstance(owner, Loss) else None
+
+    def tally(
+        self,
+        mode: str,
+        terms: dict[str, t.Tensor],
+        inputs: dict[str, t.Tensor | typing.Any],
+        labels: t.Tensor | None,
+        counts: dict[str, t.Tensor] | None = None,
+    ) -> None:
+        """adds a batch's `terms` to `mode`'s sums, each weighted by `counts`, the
+        positions it averaged over, where given, or else by the batch's rows,
+        counted off the batch itself, which needn't carry `labels`. Under
+        `packing: pad`, by the tokens its lm scores instead: its batches hold
+        rows by the hundred or a few at a time, and a mean weighting each batch
+        by its rows would weigh each of a short record's tokens far above a long
+        one's. Left on the device, so that no batch waits on the host"""
+        if getattr(self, "pad_rows", False) and labels is not None:
+            weight = (labels[..., 1:] != -100).sum()
+        else:
+            weight = find_batch_size(inputs) or 0
+        counts = counts or dict()
+        for name, term in terms.items():
+            count = counts.get(name, weight)
+            self.term_sums[mode][name] += term * count
+            self.term_weights[mode][name] += count
+
+    def head_counts(
+        self, model: t.nn.Module, inputs: dict[str, t.Tensor | typing.Any]
+    ) -> dict[str, t.Tensor]:
+        """the positions each of the model's heads scored in this batch, as the
+        head itself reckons them (`Head.scored`), under its term's name; asked
+        of the model itself, which `nn.DataParallel` wraps"""
+        heads = getattr(self.accelerator.unwrap_model(model), "heads", None) or {}
+        return {
+            f"{name}_loss": head.scored(inputs[head.target]).sum()
+            for name, head in heads.items()
+            if inputs.get(head.target) is not None
+        }
 
     def term_means(self, mode: str, prefix: str = "") -> dict[str, float]:
         """the means of `mode`'s terms since they were last reported, over every
         process, as hf gathers its own losses; reporting them resets them"""
-        if not (rows := self.term_rows[mode]):
+        if not self.term_sums[mode]:
             return dict()
         names = list(self.term_sums[mode])
         totals = t.stack(
             [
                 t.as_tensor(v, dtype=t.float32).to(self.args.device)
-                for v in (*self.term_sums[mode].values(), rows)
+                for v in (
+                    *self.term_sums[mode].values(),
+                    *(self.term_weights[mode][name] for name in names),
+                )
             ]
         )
         totals = nested_gather(totals, self.args.parallel_mode)
-        totals = totals.view(-1, len(names) + 1).sum(dim=0)
+        totals = totals.view(-1, 2 * len(names)).sum(dim=0)
         self.reset_terms(mode)
+        # a term that scored nothing all along (a quantile term without quantile
+        # tokens) averages to 0, as it trains: 0 over every batch
         return {
-            f"{prefix}{name}": (total / totals[-1]).item()
-            for name, total in zip(names, totals[:-1])
+            f"{prefix}{name}": (
+                total / weight if weight else total.new_zeros(())
+            ).item()
+            for name, total, weight in zip(
+                names, totals[: len(names)], totals[len(names) :]
+            )
         }
 
     def compute_loss(
@@ -91,26 +203,128 @@ class TrainerWithCustomLoss(t_Trainer):
             # a `compute_loss_func` fills `terms` as `Loss.custom_loss` does, or
             # takes it in a `**kwargs` and leaves it empty
             terms = dict()
-            loss = self.compute_loss_func(outputs, labels, terms=terms)
-            # weighted by the batch's rows, as hf weights `eval_loss`, counted off
-            # the batch itself, which needn't carry `labels`
             mode = "train" if model.training else "eval"
-            rows = find_batch_size(inputs) or 0
-            for name, term in terms.items():
-                self.term_sums[mode][name] += term * rows
-            self.term_rows[mode] += rows
+            if mode == "eval" and getattr(self, "pad_rows", False):
+                # each term weighted by the positions it averages over, so that
+                # its mean is over the whole evaluation, whatever the batches:
+                # those of `Loss`'s own terms, counted as it averages them, and
+                # each head's, as it does
+                counts = dict()
+                if self.cotorra_loss is not None:
+                    loss = self.compute_loss_func(
+                        outputs, labels, terms=terms, counts=counts
+                    )
+                    counts |= self.head_counts(model, inputs)
+                else:
+                    loss = self.compute_loss_func(outputs, labels, terms=terms)
+                    # `eval_loss` itself, by tokens (see `evaluation_loop`)
+                    terms["loss"] = loss.detach()
+                self.tally(mode, terms, inputs, labels, counts)
+            else:
+                loss = self.compute_loss_func(outputs, labels, terms=terms)
+                self.tally(mode, terms, inputs, labels)
             if model.training:
                 # with a custom loss set, hf's `training_step` leaves averaging
                 # over gradient accumulation to it -- which a per-batch mean
                 # doesn't do -- so the accumulated micro-batches would sum. This
                 # weights each micro-batch alike, where hf's stock loss weights
                 # each scored token alike: the same while every micro-batch scores
-                # as many tokens, as concatenated rows do and `packing: bfd`'s
-                # needn't (set only inside its training loop, hence the default)
+                # as many tokens, as concatenated rows do, `packing: pad`'s, filled
+                # to a budget of tokens, about do, and `bfd`'s needn't (set only
+                # inside its training loop, hence the default)
                 loss = loss / getattr(self, "current_gradient_accumulation_steps", 1)
             return (loss, outputs) if return_outputs else loss
-        else:
-            return super().compute_loss(model, inputs, return_outputs, **kwargs)
+        labels = inputs.get("labels")  # which hf's own loss may pop
+        result = super().compute_loss(model, inputs, return_outputs, **kwargs)
+        if not model.training and getattr(self, "pad_rows", False):
+            # hf's own loss, a mean over its batch's tokens, weighted by them too
+            # for `eval_loss` (see `evaluation_loop`); a replica's each, under
+            # `nn.DataParallel`, averaged as hf averages them
+            loss = result[0] if return_outputs else result
+            self.tally("eval", {"loss": loss.detach().mean()}, inputs, labels)
+        return result
+
+    def token_budget(self, is_training: bool) -> int:
+        """
+        the tokens each of `packing: pad`'s batches holds at most, padding
+        included: `tokens_per_batch`, for training and evaluation alike, or
+        `per_device_train_batch_size` (`per_device_eval_batch_size`) rows of
+        `max_seq_len`, the most a batch of any other packing holds. Read off the
+        arguments as they are when a dataloader is built, so that a search's
+        trials follow a batch size it tunes. Per device, as hf's batch sizes are:
+        under `nn.DataParallel`, which splits each batch's rows across the gpus,
+        each gpu's share of a batch is held to it (`TokenBudgetBatches`'s
+        `shards`), however unevenly the rows divide. A budget of fewer than about
+        4 rows of `max_seq_len` lets a row just over half of it take a batch
+        alone, half empty, its tokens weighing up to twice the rest
+        (`util.token_budget_batches`); of 4 or more, a batch of rows of about one
+        length fills to some 80% of it at least
+        """
+        rows = (
+            self.args.per_device_train_batch_size
+            if is_training
+            else self.args.per_device_eval_batch_size
+        )
+        return self.tokens_per_batch or rows * self.max_seq_len
+
+    def _get_dataloader(
+        self,
+        dataset: t.utils.data.Dataset,
+        description: str,
+        batch_size: int,
+        sampler_fn: collections.abc.Callable | None = None,
+        is_training: bool = False,
+        dataloader_key: str | None = None,
+    ) -> t.utils.data.DataLoader:
+        # `packing: pad`'s rows, batched by a budget of tokens rather than by a
+        # count of rows (`TokenBudgetBatches`), which hf's own dataloader can't
+        # do: it batches `batch_size` rows at a time, whatever sampler picks them.
+        # Otherwise as hf builds it (both 5.5.4 and 5.19 build every dataloader
+        # here), its `drop_last` aside: no batch is dropped
+        if not (getattr(self, "pad_rows", False) and isinstance(dataset, ds.Dataset)):
+            return super()._get_dataloader(
+                dataset,
+                description,
+                batch_size,
+                sampler_fn,
+                is_training,
+                dataloader_key,
+            )
+        dataset = self._remove_unused_columns(dataset, description=description)
+        seed = self.args.seed if self.args.data_seed is None else self.args.data_seed
+        workers = self.args.dataloader_num_workers
+        params = {
+            "batch_sampler": TokenBudgetBatches(
+                row_lengths(dataset),
+                self.token_budget(is_training),
+                seed=seed if is_training else None,
+                n_passes=self.n_passes if is_training else 1,
+                shards=max(1, self.args.n_gpu),
+            ),
+            "collate_fn": self.data_collator,
+            "num_workers": workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
+            "prefetch_factor": self.args.dataloader_prefetch_factor,
+            # newer hf's only
+            "multiprocessing_context": getattr(
+                self.args, "dataloader_multiprocessing_context", None
+            ),
+            "in_order": getattr(self.args, "dataloader_in_order", True),
+        }
+        if is_training:
+            params["worker_init_fn"] = functools.partial(
+                seed_worker, num_workers=workers, rank=self.args.process_index
+            )
+        dataloader = self.accelerator.prepare(
+            t.utils.data.DataLoader(dataset, **params)
+        )
+        # kept for later evaluations, as hf keeps its own, with persistent workers
+        if dataloader_key is not None and self.args.dataloader_persistent_workers:
+            self._eval_dataloaders = getattr(self, "_eval_dataloaders", dict()) | {
+                dataloader_key: dataloader
+            }
+        return dataloader
 
     def train(self, *args, **kwargs) -> TrainOutput:
         # a search's trials share this trainer, so one trial's last steps would
@@ -141,7 +355,21 @@ class TrainerWithCustomLoss(t_Trainer):
             ignore_keys,
             metric_key_prefix,
         )
-        output.metrics.update(self.term_means("eval", prefix=f"{metric_key_prefix}_"))
+        means = self.term_means("eval")
+        output.metrics.update(
+            {f"{metric_key_prefix}_{name}": mean for name, mean in means.items()}
+        )
+        if getattr(self, "pad_rows", False) and self.cotorra_loss is not None and means:
+            # under `packing: pad`, `eval_loss` -- which picks the best checkpoint
+            # and which `cotorra tune` minimizes -- is the objective made of each
+            # term's mean over the positions it scores, as a batch's loss is of
+            # the batch's means, where hf's own weighs each batch's loss by its
+            # rows, and a batch of short records holds many times a long one's.
+            # Without a `Loss` it is the loss's mean over the tokens scored,
+            # tallied as `loss`; every other packing keeps hf's
+            output.metrics[f"{metric_key_prefix}_loss"] = float(
+                self.cotorra_loss.combine(means)
+            )
         return output
 
     def _report_to_hp_search(
@@ -211,12 +439,55 @@ class Trainer(Configurable):
                 "or hf drops the `pad_mask` and `doc_pos` columns that keep its "
                 "padding out of the loss"
             )
+        if packing == "pad":
+            # its batches are filled to a budget of tokens, whatever hf's sampler
+            # would have drawn: by a count of rows, drawn at random or in turn,
+            # each of a short record's tokens would weigh far above a long one's
+            # (`util.token_budget_batches`); hf's `group_by_length` is what the
+            # budget does anyway
+            strategy = self.cfg.training_args.get("train_sampling_strategy")
+            if strategy not in (None, "group_by_length"):
+                raise ValueError(
+                    "`packing: pad` fills each batch to a budget of tokens, of rows "
+                    "of about one length, which `training_args.train_sampling_"
+                    f"strategy: {strategy}` can't change; leave it unset"
+                )
+            if self.cfg.training_args.get("auto_find_batch_size", False):
+                # which, out of memory, halves the batch size hf hands a
+                # dataloader; the budget reads `tokens_per_batch` or the arguments'
+                # own batch size, so every retry would rebuild the same batches
+                raise ValueError(
+                    "`packing: pad` fills each batch to `tokens_per_batch` tokens "
+                    "(by default the batch size × `max_seq_len`), which "
+                    "`training_args.auto_find_batch_size` can't shrink once memory "
+                    "runs out; leave it off and lower `tokens_per_batch` instead"
+                )
+            budget = self.cfg.get("tokens_per_batch")
+            if budget is not None and budget < self.cfg.max_seq_len:
+                raise ValueError(
+                    f"`tokens_per_batch: {budget}` can't hold a row of "
+                    f"`max_seq_len: {self.cfg.max_seq_len}` tokens"
+                )
+        elif self.cfg.get("tokens_per_batch") is not None:
+            raise ValueError(
+                "`tokens_per_batch` needs `packing: pad`, whose batches it fills; "
+                "every other packing's rows are `max_seq_len` tokens long, batched "
+                "by `training_args.per_device_train_batch_size`"
+            )
         if self.cfg.get("doc_masking", False):
             # each record attends only to itself through position ids restarting
             # at every packed piece, which bfd's `doc_pos` provides; time-based
             # position ids would take their place
             if packing != "bfd":
-                raise ValueError("`doc_masking` needs `packing: bfd`")
+                raise ValueError(
+                    "`doc_masking` needs `packing: bfd`"
+                    + (
+                        "; `packing: pad` keeps each record in a row of its own "
+                        "without it"
+                        if packing == "pad"
+                        else ""
+                    )
+                )
             if self.head_options or "time_based_rope" in self.cfg:
                 raise ValueError(
                     "`doc_masking` does not yet support secondary heads or "
@@ -255,6 +526,34 @@ class Trainer(Configurable):
         )
         self.model = self.trainer.model
         self.trainer.doc_masking = bool(self.cfg.get("doc_masking", False))
+        # `packing: pad`'s rows, padded by the batch, are batched by a budget of
+        # tokens, each of the loader's `n_epochs` passes apart
+        self.trainer.pad_rows = packing == "pad"
+        if self.trainer.pad_rows:
+            # flash attention drops a mask of ones and reads a batch of one row's
+            # time-based position ids as several sequences, splitting attention
+            # wherever they jump; `pad` puts a row over half its budget in a batch
+            # alone, and can leave a pass's last batch a single long row. Read off
+            # the built model, so that one built with it through
+            # `model.model_args` counts too
+            if "time_based_rope" in self.cfg and is_flash_attention_requested(
+                config=self.model.config
+            ):
+                raise ValueError(
+                    "`packing: pad` with `time_based_rope` does not support flash "
+                    "attention: singleton batches can split attention at timestamp "
+                    "jumps; use sdpa or eager attention instead"
+                )
+            if self.trainer.args.world_size > 1:
+                # accelerate shards a batch sampler's batches across processes,
+                # and how it evens out batches of varying size varies by version
+                raise ValueError(
+                    "`packing: pad` doesn't yet train across processes (`torchrun`, "
+                    "`accelerate launch`); run a single process"
+                )
+            self.trainer.n_passes = self.cfg.n_epochs
+            self.trainer.tokens_per_batch = self.cfg.get("tokens_per_batch")
+            self.trainer.max_seq_len = self.cfg.max_seq_len
         if (
             self.trainer.doc_masking
             and self.trainer.args.n_gpu > 1
@@ -311,42 +610,69 @@ class Trainer(Configurable):
         return mdl
 
     def collate_fn(self, batch: list[dict[str, t.Tensor]]) -> dict[str, t.Tensor]:
-        input_ids = t.stack([x["input_ids"] for x in batch])
+        # `packing: pad`'s rows (util.record_chunks_iter) each hold a record at
+        # its own length, padded here, on the right, to the batch's longest. A
+        # causal model's tokens never attend to the padding after them, so only
+        # the targets need masking, below; every other packing's rows are of one
+        # length already
+        pad_rows = self.cfg.get("packing", "concat") == "pad"
+
+        def column(k: str) -> t.Tensor:
+            rows = [x[k] for x in batch]
+            return pad_sequence(rows, batch_first=True) if pad_rows else t.stack(rows)
+
+        input_ids = column("input_ids")
+        if pad_rows:
+            n = t.tensor([len(x["input_ids"]) for x in batch])
+            pad = t.arange(input_ids.shape[-1]) >= n[:, None]
+        else:
+            # padding left by `packing: bfd` (util.best_fit_packed_iter), if any
+            pad = column("pad_mask").bool() if "pad_mask" in batch[0] else None
         f_set = {"input_ids": input_ids, "labels": input_ids}
         if "time_based_rope" in self.cfg:
-            p_ids = (
-                t.stack([x["s_elapsed"] for x in batch])
-                / self.cfg.time_based_rope.sec_per_pos_id
-            )
+            p_ids = column("s_elapsed") / self.cfg.time_based_rope.sec_per_pos_id
             p_ids += t.arange(p_ids.shape[-1], device=p_ids.device, dtype=p_ids.dtype)
             f_set["position_ids"] = p_ids
             # every token attends to all those before it: given neither a mask nor
             # a KV cache (which gradient checkpointing turns off), transformers
             # starts a new packed sequence wherever these ids don't step by exactly
             # 1, as at every gap between timestamps. Flash attention drops a mask
-            # of ones, though, and still reads a one-row batch's ids that way
+            # of ones, though, and still reads a one-row batch's ids that way.
+            # Ones over `packing: pad`'s padding too: the padding comes after
+            # every token that counts, which causal attention keeps from seeing
+            # it, and sdpa, given a mask of ones, keeps its causal fast path
             f_set["attention_mask"] = t.ones_like(input_ids)
         for name, options in self.head_options.items():
             target, weights = HEADS[name].target, HEADS[name].target_weight
-            f_set[target] = t.stack([x[target] for x in batch])
+            f_set[target] = column(target)
             if weights is not None and options.get("per_record", False):
                 # the weights the loader gives each record, beside its target
-                f_set[weights] = t.stack([x[weights] for x in batch])
-        if "pad_mask" in batch[0]:
-            # padding left by `packing: bfd` (util.best_fit_packed_iter) is never
-            # a target, neither the lm's (-100, which every loss skips) nor a
-            # head's (nan, or -100 for a class). Nothing else needs masking: a
-            # piece ends short of its row only where its record ends (a split
-            # record's other chunks each fill a row), and a record's last token
-            # has no time to the next, so a mixture time-to-next-token head never
-            # conditions a gap on another record's token
-            pad = t.stack([x["pad_mask"] for x in batch]).bool()
+                f_set[weights] = column(weights)
+        if pad is not None:
+            # padding, `packing: bfd`'s or `pad`'s, is never a target, neither
+            # the lm's (-100, which every loss skips) nor a head's (nan, or -100
+            # for a class). Nothing else needs masking: a piece ends short of its
+            # row only where its record ends (a split record's other chunks each
+            # fill a row), and a record's last token has no time to the next, so
+            # a mixture time-to-next-token head never conditions a gap on another
+            # record's token, or on the padding
             f_set["labels"] = f_set["labels"].masked_fill(pad, -100)
             for name in self.head_options:
                 target = HEADS[name].target
                 f_set[target] = f_set[target].masked_fill(
                     pad, t.nan if f_set[target].is_floating_point() else -100
                 )
+        if pad_rows:
+            # nor is a row's first token, which the lm, scoring each token from
+            # those before it, never predicts: masked so that hf's own count of
+            # the targets a batch holds, `num_items_in_batch`, by which its loss
+            # divides, counts none it doesn't score. Transformers 5.5.4 counts
+            # every label that isn't -100, and a row here is a record of any
+            # length, so one target too many to each would shrink a short record's
+            # loss far more than a long one's. Every other loss, and each head,
+            # reads `labels[..., 1:]`, and goes unchanged
+            f_set["labels"] = f_set["labels"].clone()
+            f_set["labels"][:, 0] = -100
         if self.cfg.get("doc_masking", False):
             # each packed piece attends only to itself, by position ids restarting
             # at every one, which transformers -- given no attention mask or KV

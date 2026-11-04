@@ -146,6 +146,149 @@ def best_fit_packed_iter(
         yield out
 
 
+def record_chunks_iter(
+    dset: ds.Dataset, seq_len: int, rng: Generator | None = None, n_epochs: int = 1
+) -> collections.abc.Iterator:
+    """
+    Each record in a row of its own, for `packing: pad`: a record is split only
+    when it is longer than `seq_len`, into chunks of at most `seq_len`, and each
+    chunk makes a row, unpadded, at its own length -- the collator pads each
+    batch to its longest row. Given `rng`, each of `n_epochs` passes over `dset`
+    takes its records in an order of its own drawn from it, a record's chunks in
+    turn. Without, every pass's chunks come longest first, ties in their
+    records' order, so that batches taken in turn each hold rows of about one
+    length, the longest batch first. A chunk of a single token is dropped: it
+    has no next token to predict, so a batch of such rows alone would have no
+    target at all, which hf's own loss averages to a nan. Only a record's last
+    chunk can be that short, and its one token, the record's last, has no time
+    to the next token or disposition to come either.
+    """
+    import pyarrow.compute as pc
+
+    # through the arrow formatter, as `best_fit_packed_iter` reads it, so that a
+    # shuffled dataset's lengths follow its indices mapping
+    arrow = dset.with_format("arrow")
+    lengths = pc.list_value_length(arrow["input_ids"]).to_numpy()
+    orders = [
+        np.arange(len(lengths)) if rng is None else rng.permutation(len(lengths))
+        for _ in range(n_epochs)
+    ]
+    chunks = [
+        (int(i), s, min(seq_len, int(lengths[i]) - s))
+        for order in orders
+        for i in order
+        for s in range(0, int(lengths[i]), seq_len)
+        if int(lengths[i]) - s > 1
+    ]
+    if rng is None:
+        chunks.sort(key=lambda c: -c[2])  # stable, so ties keep their order
+    for row, start, n in chunks:
+        # sliced before it's made python, so that a long record isn't made whole
+        # once for each of its chunks
+        record = arrow[row]
+        yield {
+            k: record[k][0].values.slice(start, n).to_pylist()
+            for k in dset.column_names
+        }
+
+
+def fill_to_budget(
+    rows: collections.abc.Iterable[int],
+    lengths: np.ndarray,
+    budget: int,
+    shards: int = 1,
+) -> list[list[int]]:
+    """`rows`, in the order given, cut into batches of as many rows as fit
+    `budget` tokens once each is padded to its batch's longest: k rows, the
+    longest of them n tokens, take k × n. Split across `shards` devices, as
+    `nn.DataParallel` splits a batch's rows, ceil(k / shards) to a device, the
+    budget is each device's: a batch takes ceil(k / shards) × n of it"""
+    batches, batch, longest = [], [], 0
+    for r in rows:
+        n = int(lengths[r])
+        # ceil((k + 1) / shards) rows to the busiest device, with this one
+        per_shard = (len(batch) + shards) // shards
+        if batch and per_shard * max(longest, n) > budget:
+            batches.append(batch)
+            batch, longest = [], 0
+        batch.append(int(r))
+        longest = max(longest, n)
+    if batch:
+        batches.append(batch)
+    return batches
+
+
+def token_budget_batches(
+    lengths: collections.abc.Sequence[int] | np.ndarray,
+    budget: int,
+    rng: Generator | None = None,
+    n_passes: int = 1,
+    shards: int = 1,
+) -> list[list[int]]:
+    """
+    `packing: pad`'s rows, by index, in batches of as many rows as fit `budget`
+    tokens once each is padded to its batch's longest, so that every batch holds
+    about as many tokens. Given `shards`, the gpus `nn.DataParallel` splits each
+    batch's rows across, `budget` is each gpu's, and a batch holds as many rows
+    as keep every gpu's share within it (`fill_to_budget`), where a budget of
+    them all together would let the gpu given the larger share of an uneven
+    split -- two of three long rows, say -- run past its own.
+
+    A step's loss is a mean over its batch's tokens, and every step weighs alike
+    (clipping rescales each step's gradient whenever its norm passes
+    `max_grad_norm`, so no rescaling of a step's loss changes that), so a batch
+    of a fixed number of rows would weigh each of a row's tokens by about 1 /
+    the row's length: each record about alike, the short ones' tokens far above
+    the long ones'. A record's length is its outcome -- a short stay is a short
+    record -- so that tilts what the model learns toward the records that end
+    soon.
+
+    Given `rng`, for training: `lengths` holds `n_passes` passes over the
+    records in turn, of as many rows each (`record_chunks_iter`'s), batched pass
+    by pass, so that a record's copies never share a batch, each pass's batches
+    in an order of their own. A pass's rows are sorted by length, ties in an
+    order drawn from `rng`, and cut in turn, shortest first, as fairseq buckets
+    its batches: rows of about one length to a batch, padded little. Where the
+    lengths run densely, a batch closes only when its next row, about as long as
+    its own, won't fit, so that every batch but the pass's last holds all but
+    under a row of its budget, and the last, part filled, holds its longest
+    rows, a few of which fill most of a budget. Sorted over the whole pass
+    rather than by megabatches, as hf's length-grouped sampler sorts: among a
+    few hundred rows, the short ones are few and far apart in length, so that a
+    batch of them, padded to its longest, would hold a fraction of the budget's
+    tokens, each of them -- short records', each ending soon -- weighing above
+    the rest. Where they're sparse all the same (records of a few dozen tokens),
+    some of that remains. The batch holding the first pass's longest row goes
+    first, so that a budget too large for memory fails at the first step.
+
+    Without `rng`, for evaluation: the rows in their own order (the tuning
+    split's come longest first), cut in turn, whatever `n_passes`.
+    """
+    lengths = np.asarray(lengths, dtype=np.int64)
+    if len(lengths) % n_passes:
+        raise ValueError(
+            f"{len(lengths)} rows don't make {n_passes} passes of as many rows each"
+        )
+    if len(lengths) and lengths.max() > budget:
+        raise ValueError(
+            f"a row of {lengths.max()} tokens doesn't fit a batch of {budget}"
+        )
+    if rng is None:
+        return fill_to_budget(range(len(lengths)), lengths, budget, shards)
+    per_pass = len(lengths) // n_passes
+    batches = []
+    for p in range(n_passes):
+        rows = rng.permutation(np.arange(p * per_pass, (p + 1) * per_pass))
+        # shortest first, ties in their shuffled order
+        rows = rows[np.argsort(lengths[rows], kind="stable")]
+        cut = fill_to_budget(rows, lengths, budget, shards)
+        batches += [cut[i] for i in rng.permutation(len(cut))]
+        if p == 0 and batches:
+            first = max(range(len(batches)), key=lambda i: lengths[batches[i]].max())
+            batches.insert(0, batches.pop(first))
+    return batches
+
+
 def pr_auc_score(y_true: np.ndarray, y_score: np.ndarray) -> float:
     precs, recs, *_ = skl_mets.precision_recall_curve(
         y_true, np.round(y_score, decimals=4), drop_intermediate=True
