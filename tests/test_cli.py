@@ -704,7 +704,8 @@ def test_the_top_level_help_names_the_installed_version():
 
 
 def test_main_runs_the_app(monkeypatch, capsys):
-    """the `cotorra` entry point pyproject.toml names"""
+    """what the `cotorra` command runs once `cotorra.openmp.main` has seen to
+    the OpenMP runtime"""
     monkeypatch.setattr(sys, "argv", ["cotorra", "--help"])
     with pytest.raises(SystemExit) as exited:
         cotorra.cli.main()
@@ -834,12 +835,13 @@ def test_a_baseline_option_left_out_takes_its_default(recorded):
 @pytest.mark.parametrize("baseline", ["counts", "one-hot"])
 def test_n_jobs_is_refused_for_a_bag_of_tokens(baseline, recorded):
     """only tsfresh extracts in processes; taken quietly, the flag would seem to
-    speed up a baseline it doesn't touch"""
+    speed up a baseline it doesn't touch; unstyled, as GitHub Actions has typer
+    color the error, and rich highlights `--n-jobs` in pieces"""
     result = runner.invoke(
         app, ["baseline-score", "-p", "data", "-b", baseline, "-j", "2"]
     )
     assert result.exit_code == 2
-    assert "--n-jobs" in result.output
+    assert "--n-jobs" in click.unstyle(result.output)
     assert not recorded
 
 

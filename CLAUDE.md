@@ -83,6 +83,7 @@ the classes.
 | [baselines.py](src/cotorra/baselines.py)                 | `BagOfTokensScorer`, `TsfreshScorer`    | baselines: estimators on token bags or tsfresh features      |
 | [logger.py](src/cotorra/logger.py)                       | `Logger`                                | rich logging + bootstrap-CI eval summaries                   |
 | [util.py](src/cotorra/util.py)                           | —                                       | batching helpers, `bootstrap_ci`                             |
+| [openmp.py](src/cotorra/openmp.py)                       | —                                       | on macOS, re-runs the CLI (and pytest) with torch's libomp   |
 
 Inheritance matters: `Tuner` extends `Trainer`, which extends `Configurable`;
 `Loss` and `Logger` stand alone. Changing `Trainer.__init__` or `collate_fn`
@@ -483,6 +484,28 @@ time-based RoPE under flash attention (see the gotcha below), and refuses
   `if __name__ == "__main__":` guard recurses; the tests pass `n_jobs=0`, which
   extracts in-process. tsfresh is imported inside `baselines.tsfresh_features`,
   as importing it takes a second (half a minute the first time).
+- **On macOS, `cotorra` and pytest run themselves again.** LightGBM's and
+  XGBoost's macOS wheels link `@rpath/libomp.dylib`, which their rpaths resolve
+  to Homebrew's libomp, while torch loads the one in its `lib`. Without
+  Homebrew's, importing either booster fails; with it, a process holds two OpenMP
+  runtimes and segfaults in them: as a booster fits after torch was imported, or
+  as torch next trains after a booster was imported, so that one test module
+  importing a booster at collection took the whole suite down. Which crash a
+  command meets depends on its import order (`cli.py` importing `baselines`
+  before `extractor` spares `rep-based-score` its), so don't rely on it. The
+  dynamic linker reads `DYLD_LIBRARY_PATH` only as a process starts, so
+  [openmp.py](src/cotorra/openmp.py) re-execs the process with torch's `lib`
+  first on it: `cotorra.openmp:main` is the console script, re-running before it
+  imports `cotorra.cli` (whose `main` stays, unguarded, for `python -m`), and
+  `tests/conftest.py`'s `pytest_configure` re-runs pytest, having stopped
+  pytest's capture, whose files the new process would otherwise write to. Neither
+  re-runs under `COTORRA_OPENMP_RERUN` (which the re-run sets, so that an
+  interpreter macOS protects, dropping `DYLD_*`, can't loop it; a user may set it
+  too), under a debugger (`pydevd`) or in a Jupyter kernel; there
+  `conftest.boosters_usable` still skips the boosters' fits, though not torch's
+  crash after their import. Keep `openmp.py` to the standard library, as it runs
+  before anything that loads a booster. CI never runs macOS, so there only
+  `test_openmp.py`'s fakes exercise it; its one real re-run skips off macOS.
 - **`--resume-from-checkpoint` is safe to pass unconditionally**: `Trainer.train`
   falls back to training from scratch if no checkpoint is found.
 - **`processed` is a symlink** (`-> ../cocoa/processed`) and `output/`, `wandb/`,

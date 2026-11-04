@@ -13,18 +13,18 @@ import tempfile
 
 from omegaconf import OmegaConf
 
-# On macOS the LightGBM and XGBoost wheels each link `@rpath/libomp.dylib`
-# against their own bundled copy, while torch and scikit-learn bundle theirs;
-# with more than one OpenMP runtime resident, fitting either booster
-# *segfaults the interpreter* rather than raising. `RepBasedScorer` uses
-# LightGBM by default and `cotorra.cli` imports torch (via `Extractor`) first,
-# so `cotorra rep-based-score` hits this too -- an environment problem rather
-# than a cotorra bug, but one that would otherwise take the whole session
-# down. `conftest.boosters_usable` probes both in a subprocess.
+# On macOS the LightGBM and XGBoost wheels link `@rpath/libomp.dylib`, which
+# their rpaths resolve to Homebrew's, while torch loads its own; with both
+# resident, fitting a booster *segfaults the interpreter* rather than raising,
+# and so does the next model torch trains, fit or no fit. `cotorra.openmp`
+# explains it, and `conftest.pytest_configure` re-runs the session with torch's
+# libomp alone; `conftest.boosters_usable` probes both boosters in a subprocess
+# for the sessions it doesn't re-run, whose fits would otherwise take them down.
 LIBOMP_HINT = (
     "torch and this boosting library resolve different libomp runtimes in this "
-    "environment, which segfaults on fit; re-run with DYLD_LIBRARY_PATH="
-    "<venv>/lib/python3.*/site-packages/torch/lib"
+    "environment, which segfaults on fit; the session wasn't re-run with torch's "
+    "(under a debugger or COTORRA_OPENMP_RERUN), so set DYLD_LIBRARY_PATH="
+    "<venv>/lib/python3.*/site-packages/torch/lib before starting pytest"
 )
 
 # a bare model config naming only `model_type`: everything else is filled in

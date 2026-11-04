@@ -55,13 +55,15 @@ and else on the CPU, so on a machine with an NVIDIA GPU, check that
 new environment, since pip would leave behind the CUDA 13 libraries it installed
 first.
 
-On a Mac, run one more command. cotorra imports LightGBM and XGBoost, whose
-builds for macOS look for Homebrew's OpenMP runtime (its `libomp` package), while
-PyTorch brings its own. Without Homebrew's, every `cotorra` command fails as it
-starts, with `Library not loaded: @rpath/libomp.dylib`; with it, more than one
-OpenMP runtime ends up in one process, and step 4 crashes Python with a
-segmentation fault as it fits its first classifier. Pointing macOS's dynamic
-linker at PyTorch's copy avoids both:
+On a Mac, cotorra 26.11.0 and earlier need one more command. cotorra imports
+LightGBM and XGBoost, whose builds for macOS look for Homebrew's OpenMP runtime
+(its `libomp` package), while PyTorch brings its own. Without Homebrew's, every
+`cotorra` command of those versions fails as it starts, with
+`Library not loaded: @rpath/libomp.dylib`; with it, more than one OpenMP runtime
+ends up in one process, and step 4 crashes Python with a segmentation fault as it
+fits its first classifier. Pointing macOS's dynamic linker at PyTorch's copy
+avoids both, as later versions' `cotorra` command does itself, starting again
+with it pointed there; on 26.11.0 or earlier, point it there yourself:
 
 ```sh
 export DYLD_LIBRARY_PATH="$(python -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib"

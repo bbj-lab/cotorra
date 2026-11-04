@@ -43,6 +43,17 @@ This installs the `cotorra` command. To see it run end to end on public data,
 follow the
 [MIMIC-IV demo](https://cotorra.readthedocs.io/latest/recipes/mimic-iv-demo/).
 
+On a Mac, LightGBM and XGBoost look for Homebrew's OpenMP runtime, while PyTorch
+brings its own: without Homebrew's, importing cotorra fails, and with it, a
+process holding both runtimes can crash. The `cotorra` command sees to this
+itself, starting again with PyTorch's runtime first on `DYLD_LIBRARY_PATH`. To
+import cotorra in Python of your own, such as a notebook, set that before Python
+starts:
+
+```sh
+export DYLD_LIBRARY_PATH="$(python -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib"
+```
+
 <!-- --8<-- [end:install] -->
 
 ## Usage

@@ -44,7 +44,7 @@
     version = "26.11.0"
 
     [project.scripts]
-        cotorra = "cotorra.cli:main"
+        cotorra = "cotorra.openmp:main"
 
     [project.urls]
         Documentation = "https://cotorra.readthedocs.io"
@@ -52,7 +52,8 @@
         Repository    = "https://github.com/bbj-lab/cotorra"
 
     [project.optional-dependencies]
-        all = [ "cotorra[dev,docs,test]" ]
+        all = [ "cotorra[dev,docs,test,demo]" ]
+        demo = [ "cocoa-tokenizer[demo]>=26.11" ]
         dev = [ "pip>=23.1", "ruff>=0.15" ]
         docs = [
             "mkdocs>=1.6,<2",
