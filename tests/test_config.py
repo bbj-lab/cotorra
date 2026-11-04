@@ -55,7 +55,7 @@ def packaged_text(name: str) -> str:
     ids=lambda x: x.rpartition(".")[2],
 )
 def test_each_stage_defaults_to_its_packaged_config(stage, name):
-    """what a stage reads when no config file is passed, as the README says"""
+    """what a stage reads when no config file is passed, as the docs say"""
     module, _, cls = stage.rpartition(".")
     assert getattr(importlib.import_module(module), cls).default_file == f"{name}.yaml"
 
@@ -100,7 +100,7 @@ def test_every_preset_names_a_model_these_tests_know_the_architecture_of():
 
 @pytest.mark.parametrize("name", list(PRESETS))
 def test_each_preset_can_be_swapped_in_by_an_override(name):
-    """as the README shows: `model=${model_presets.<name>}`"""
+    """as the docs show: `model=${model_presets.<name>}`"""
 
     class _Training(Configurable):
         default_file = "training.yaml"

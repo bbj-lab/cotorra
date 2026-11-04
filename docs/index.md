@@ -3,11 +3,7 @@ hide:
     - navigation
 ---
 
-{%
-   include-markdown "../README.md"
-   heading-offset=0
-   end="<!-- cards-anchor -->"
-%}
+--8<-- "README.md:intro"
 
 <div class="grid cards" markdown>
 
@@ -18,7 +14,7 @@ hide:
     Fit a causal LM to predict the next token in each subject's timeline —
     optionally with custom losses, time-aware RoPE, or hyperparameter tuning.
 
-    [:octicons-arrow-right-24: Training](#1-training)
+    [:octicons-arrow-right-24: Training](guide/training.md)
 
 - :material-table-arrow-right:{ .lg .middle } **Extract**
 
@@ -27,7 +23,7 @@ hide:
     Run a trained model over inference contexts and write hidden-state feature
     tables for downstream representation-based scoring.
 
-    [:octicons-arrow-right-24: Extraction](#2-extraction)
+    [:octicons-arrow-right-24: Extraction](guide/extraction.md)
 
 - :material-target:{ .lg .middle } **Score**
 
@@ -37,7 +33,7 @@ hide:
     scoring (MC / SCOPE / REACH) or a lightweight estimator on extracted
     features.
 
-    [:octicons-arrow-right-24: Scoring](#3-scoring)
+    [:octicons-arrow-right-24: Scoring](guide/scoring.md)
 
 - :material-book-open-variant:{ .lg .middle } **Recipes**
 
@@ -50,8 +46,6 @@ hide:
 
 </div>
 
-{%
-   include-markdown "../README.md"
-   heading-offset=0
-   start="<!-- cards-anchor -->"
-%}
+--8<-- "README.md:install"
+
+--8<-- "README.md:references"

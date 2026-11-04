@@ -1,9 +1,11 @@
 # CLAUDE.md
 
 Guidance for working in this repository. The [README.md](README.md) is the
-user-facing reference (data formats, every CLI flag, config keys, model presets);
-this file covers what you need to _work on the code_ — architecture, conventions,
-and gotchas that aren't obvious from the source.
+landing page on GitHub and PyPI; the user guide ([docs/guide/](docs/guide/)) and
+the CLI reference ([docs/api/cli.md](docs/api/cli.md)) are the user-facing
+reference (data formats, every CLI flag, config keys, model presets); this file
+covers what you need to _work on the code_ — architecture, conventions, and
+gotchas that aren't obvious from the source.
 
 ## What this is
 
@@ -215,7 +217,7 @@ The three packaged config files
 ([training.yaml](src/cotorra/config/training.yaml),
 [extraction.yaml](src/cotorra/config/extraction.yaml),
 [scoring.yaml](src/cotorra/config/scoring.yaml)) are the source of truth for
-defaults and are documented key-by-key in the README. `training.yaml` defines
+defaults and are documented key-by-key in the user guide. `training.yaml` defines
 reusable `model_presets` (YAML anchors) and selects one via the `model:` key.
 
 ## Conventions
@@ -238,8 +240,8 @@ reusable `model_presets` (YAML anchors) and selects one via the `model:` key.
 - **`if __name__ == "__main__":` blocks are dev scratch harnesses**, not tests or
   entry points. They often hardcode local paths (`./processed/mimic`, for which
   cocoa's MIMIC-IV demo builds a public stand-in, `processed/demo`, the one
-  [recipes/mimic-iv-demo.md](recipes/mimic-iv-demo.md) trains on) and a trailing
-  `# breakpoint()`. Leave them; they're for interactive debugging.
+  [docs/recipes/mimic-iv-demo.md](docs/recipes/mimic-iv-demo.md) trains on) and a
+  trailing `# breakpoint()`. Leave them; they're for interactive debugging.
 - **Tests: `pytest`** (config in [pyproject.toml](pyproject.toml); install with
   `pip install -e ".[test]"`). CI
   ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs it on every
@@ -499,14 +501,25 @@ comes from git. Don't build and upload by hand: a plain `python -m build` keeps
 `gen`, and PyPI rejects the upload. Once `quick-sco-re` is on PyPI, pin it by
 version and `gen` ships with no change to the workflow.
 
-`docs/recipes/` and top-level `recipes/` are kept in sync (the docs include the
-recipe markdown). `docs/index.md` likewise includes `README.md`, so README edits
-change the docs home page, and `docs/api/` renders docstrings via mkdocstrings.
-The end-to-end dev workflow (cocoa → tune → score) is in
-[recipes/development-workflow.md](recipes/development-workflow.md).
-[recipes/mimic-iv-demo.md](recipes/mimic-iv-demo.md) runs train → tune → extract
-→ rep-based-score on the public MIMIC-IV demo, with the shipped configs and a few
-overrides, and quotes what they make of it (parameter count, losses, Optuna's
-trials, AUC intervals, timings, warnings), so rerun it after changing a shipped
-config, a loss, the tuner, or the scorers, without a Hugging Face token, as the
-public would.
+The recipes live in `docs/recipes/`, a page each with its `nav` entry, so they
+link the guide relatively (`../guide/<page>.md`), which works on GitHub and the
+site alike. Top-level `recipes/` holds only forwarding notes for links to the old
+paths (v26.11.0's README links `recipes/mimic-iv-demo.md` on GitHub).
+`docs/index.md` includes three sections of `README.md` (`intro`, `install`,
+`references`, each between `<!-- --8<-- [start:<name>] -->` and `[end:<name>]`
+comments), so editing them changes the docs home page; snippets' `check_paths`
+fails the build if a marker goes missing. The rest of the README, a landing page
+whose links into the docs are absolute
+(`https://cotorra.readthedocs.io/latest/…`) since GitHub and PyPI render it,
+isn't in the docs. The reference lives in `docs/guide/` (a page per stage, plus
+packing, secondary heads, and configuration) and `docs/api/cli.md`, whose help
+blocks are pasted `COLUMNS=75 cotorra <command> --help` output, to repaste when a
+flag changes; `docs/api/` renders docstrings via mkdocstrings. The end-to-end dev
+workflow (cocoa → tune → score) is in
+[docs/recipes/development-workflow.md](docs/recipes/development-workflow.md).
+[docs/recipes/mimic-iv-demo.md](docs/recipes/mimic-iv-demo.md) runs train → tune
+→ extract → rep-based-score on the public MIMIC-IV demo, with the shipped configs
+and a few overrides, and quotes what they make of it (parameter count, losses,
+Optuna's trials, AUC intervals, timings, warnings), so rerun it after changing a
+shipped config, a loss, the tuner, or the scorers, without a Hugging Face token,
+as the public would.

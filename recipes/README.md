@@ -1,5 +1,5 @@
-You want to:
+# Recipes
 
-- [train, tune, and score a small model on public data (the MIMIC-IV demo)](mimic-iv-demo.md)
-- [run training on development data](development-workflow.md)
-- [learn a model on one dataset and apply it to another](transfer-learning.md)
+The recipes have moved to [docs/recipes/](../docs/recipes/) and are published
+with the rest of the documentation at
+<https://cotorra.readthedocs.io/latest/recipes/>.

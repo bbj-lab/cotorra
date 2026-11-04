@@ -39,6 +39,7 @@ markdown_extensions:
   - pymdownx.superfences
   - pymdownx.snippets:
       base_path: ["."]
+      check_paths: true
   - toc:
       permalink: true
 
@@ -48,10 +49,10 @@ extra_css:
 validation:
   links:
     not_found: warn
+    anchors: warn
 
 plugins:
   - search
-  - include-markdown
   - callouts
   - git-revision-date-localized:
       fallback_to_build_date: true
@@ -68,6 +69,14 @@ plugins:
 
 nav:
   - Home: index.md
+  - User Guide:
+      - Inputs: guide/inputs.md
+      - Training: guide/training.md
+      - Packing Records: guide/packing.md
+      - Secondary Heads: guide/secondary-heads.md
+      - Extraction: guide/extraction.md
+      - Scoring: guide/scoring.md
+      - Configuration: guide/configuration.md
   - API Reference:
       - CLI: api/cli.md
       - Training: api/training.md
