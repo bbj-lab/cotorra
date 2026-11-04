@@ -25,6 +25,8 @@ Everything is driven through the `cotorra` CLI
 ```
 train / tune   →  extract  →  rep-based-score
                ↘  generative-score
+
+baseline-score   (no model)
 ```
 
 - **train / tune** — fit a causal LM; write `mdl-<run_name>/` (HuggingFace
@@ -53,6 +55,12 @@ train / tune   →  extract  →  rep-based-score
   train/tuning features and labels and scores this one's `held_out`.
 - **generative-score** — Monte-Carlo sample trajectories to compute
   MC/SCOPE/REACH scores (does not need `extract`).
+- **baseline-score** — fit the same estimators on features of the timelines
+  alone, needing no model (`baselines.py`): `--baseline counts`/`one-hot`, a bag
+  of `tokens_past`, writing `scores-bag-of-tokens-<featurization>-<estimator>`,
+  or `tsfresh`, tsfresh's minimal features of `meds.parquet` up to the threshold,
+  writing `scores-tsfresh-<estimator>`; `--training-home` as for
+  `rep-based-score`.
 
 ## Architecture
 

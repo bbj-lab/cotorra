@@ -1,7 +1,8 @@
 # Scoring
 
 Scoring uses a trained model to produce outcome scores for the tokens of
-interest. Three complementary approaches are provided:
+interest. Three complementary approaches are provided, and
+[baselines](#baseline-scoring) that need no trained model to set them against:
 
 **Generative scoring** (`cotorra generative-score`) Monte Carlo samples future
 trajectories directly from the model. It:
@@ -82,8 +83,8 @@ afterward, and no trajectories are sampled. It needs no scoring command, nor
     )  # 95% intervals for roc_auc, pr_auc, and brier
     ```
 
-Generative and representation-based scoring are both driven by a YAML config (the
-package ships a default; see
+Generative, representation-based, and baseline scoring are all driven by a YAML
+config (the package ships a default; see
 [`./src/cotorra/config/scoring.yaml`](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/scoring.yaml))
 that specifies:
 
@@ -127,6 +128,44 @@ that specifies:
   longer than `score.max_len` — `"drop"` skips the patient, `"truncate_left"`
   keeps the last `max_len` tokens.
 
+## Baseline scoring
+
+**Baseline scoring** (`cotorra baseline-score`) scores the same outcomes with no
+trained model, for the scores above to be set against. It fits an estimator on
+features of each timeline's past alone, over the train split's timelines whose
+past doesn't already hold the outcome (as `rep-based-score` does), and scores the
+held-out split's. `--baseline` picks the features:
+
+- `counts` or `one-hot`: a bag of the tokens in each timeline's `tokens_past`,
+  how many times each token of the vocabulary appears there or whether it does at
+  all, keeping none of their order or timing.
+- `tsfresh`: [tsfresh](https://tsfresh.readthedocs.io)'s minimal features of the
+  timeline's rows of cocoa's `meds.parquet` up to the time of the last token in
+  its `tokens_past` (where the threshold is a time, the rows that past was
+  tokenized from). For each code with a value in the train split's pasts, these
+  are ten statistics of its values (their count, sum, mean, median, standard
+  deviation, variance, root mean square, maximum, largest magnitude and minimum);
+  for every other code (an order, a device, a transfer, a demographic, an
+  assessment's text result, fused to its code as cocoa's tokenizer fuses them),
+  how many times it comes up. A code a past lacks is missing.
+
+`--estimator` picks LightGBM (the default) or XGBoost, set as for
+`rep-based-score`, or logistic regression, which scales each feature by its
+largest magnitude in the training rows (filling a missing tsfresh feature with 0
+beside an indicator of its absence): fit on unscaled counts, which run into the
+hundreds, it does far worse. `--training-home` fits on another directory's train
+and tuning splits, as for `rep-based-score`; for a bag of tokens, both
+directories must be tokenized by one tokenizer (as in the
+[transfer-learning recipe](../recipes/transfer-learning.md)), since a column
+stands for a token id.
+
+tsfresh extracts its features in `--n-jobs` processes, half the CPUs by default.
+Where Python spawns them (macOS, and Linux from Python 3.14), each imports
+cotorra again as it starts, which takes a few seconds, so on a small dataset
+`--n-jobs 0`, extracting in the one process, can finish sooner. From Python
+(`TsfreshScorer(n_jobs=...)`), they import the calling script again too, which so
+has to keep its work under `if __name__ == "__main__":`.
+
 ## Outputs
 
 - `scores-generative-<model_name>.parquet` — held-out scores from
@@ -134,6 +173,12 @@ that specifies:
   `<TOKEN>_reach_score` column for each target token.
 - `scores-rep-based-<model_name>.parquet` — held-out scores from
   `rep-based-score`, with a `<TOKEN>_rep_score` column for each target token.
+- `scores-bag-of-tokens-<featurization>-<estimator>.parquet` — held-out scores
+  from `baseline-score --baseline counts` or `one-hot`, with a
+  `<TOKEN>_counts_score` or `<TOKEN>_one-hot_score` column for each target token.
+- `scores-tsfresh-<estimator>.parquet` — held-out scores from
+  `baseline-score --baseline tsfresh`, with a `<TOKEN>_tsfresh_score` column for
+  each target token.
 
 [^4]:
     L. Solo, M. McDermott, W. Parker, B. Ramadan, M. Burkhart, & B.

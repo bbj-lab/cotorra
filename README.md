@@ -52,6 +52,8 @@ Each stage of the pipeline is a `cotorra` command, driven by a YAML config:
 ```
 train / tune  →  extract  →  rep-based-score
                ↘  generative-score
+
+baseline-score  (no model)
 ```
 
 The [documentation](https://cotorra.readthedocs.io/latest/) covers:
@@ -71,7 +73,8 @@ The [documentation](https://cotorra.readthedocs.io/latest/) covers:
 - [Scoring](https://cotorra.readthedocs.io/latest/guide/scoring/): outcome scores
   for held-out data, from an estimator fit on extracted features
   (`cotorra rep-based-score`), from sampled trajectories
-  (`cotorra generative-score`), or from a supervised head.
+  (`cotorra generative-score`), or from a supervised head; and baselines that
+  need no model (`cotorra baseline-score`).
 - [Configuration](https://cotorra.readthedocs.io/latest/guide/configuration/):
   the YAML config each command reads, and how to change its keys on the command
   line.

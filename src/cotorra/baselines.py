@@ -34,6 +34,12 @@ class BaselineEstimator(str, enum.Enum):
     xgboost = "XGBoost"
 
 
+class Baseline(str, enum.Enum):
+    counts = "counts"
+    one_hot = "one-hot"
+    tsfresh = "tsfresh"
+
+
 def bag_of_tokens(
     tokens: pl.Series, n_tokens: int, one_hot: bool = False
 ) -> sp.csr_matrix:
