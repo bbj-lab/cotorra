@@ -72,7 +72,7 @@ the classes.
 | [extractor.py](src/cotorra/extractor.py)                 | `Extractor`                             | hidden-state and head-prediction extraction                  |
 | [scorer_rep_based.py](src/cotorra/scorer_rep_based.py)   | `RepBasedScorer`, `EstimatorType`       | estimator-on-features scoring                                |
 | [scorer_generative.py](src/cotorra/scorer_generative.py) | `GenerativeScorer`                      | SCOPE/REACH generative scoring                               |
-| [baselines.py](src/cotorra/baselines.py)                 | `BagOfTokensScorer`                     | estimator-on-token-bags baseline scoring                     |
+| [baselines.py](src/cotorra/baselines.py)                 | `BagOfTokensScorer`, `TsfreshScorer`    | baselines: estimators on token bags or tsfresh features      |
 | [logger.py](src/cotorra/logger.py)                       | `Logger`                                | rich logging + bootstrap-CI eval summaries                   |
 | [util.py](src/cotorra/util.py)                           | —                                       | batching helpers, `bootstrap_ci`                             |
 
@@ -307,6 +307,13 @@ Stages read from `--processed-data-home`. Expected files (produced by cocoa's
   anything else that gives the outcome away (`hours_to_end_time_past`,
   `end_time`, `s_total_duration`, the future): `Extractor.extract_final` writes
   the batch it reads back out beside the features.
+- `meds.parquet` — cocoa's collated rows (`subject_id`, `time`, `code`,
+  `numeric_value`, `text_value`), which only `TsfreshScorer` reads: each
+  subject's rows up to the last token of its inference row's `tokens_past`
+  (`baselines.past_meds`), the rows that past was tokenized from when the
+  threshold is a time. Like `BagOfTokensScorer`, which bags `tokens_past` alone,
+  it never reads an inference table's `tokens` or `times` past that cut: they
+  hold the whole timeline, future and all.
 
 `Loader` derives per-split `{split}_tokens_times.parquet` caches, adding
 `s_elapsed` and `hours_to_next_token` (the TNT target, nan on each record's last
@@ -462,6 +469,12 @@ time-based RoPE under flash attention (see the gotcha below), and refuses
   looks labels up in a per-token table (`label_to_cat`, `balanced_toi_flag`) has
   to clamp and mask them: a -100 index wraps around to a token from the end of
   the vocabulary.
+- **tsfresh spawns its workers.** `TsfreshScorer`'s `n_jobs` (tsfresh's; half the
+  CPUs by default) starts processes that, where Python spawns them (macOS, and
+  Linux from 3.14), import the calling script again, so a script without an
+  `if __name__ == "__main__":` guard recurses; the tests pass `n_jobs=0`, which
+  extracts in-process. tsfresh is imported inside `baselines.tsfresh_features`,
+  as importing it takes a second (half a minute the first time).
 - **`--resume-from-checkpoint` is safe to pass unconditionally**: `Trainer.train`
   falls back to training from scratch if no checkpoint is found.
 - **`processed` is a symlink** (`-> ../cocoa/processed`) and `output/`, `wandb/`,

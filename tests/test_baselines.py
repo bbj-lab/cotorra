@@ -3,6 +3,7 @@
 """tests for cotorra.baselines"""
 
 import collections
+import datetime
 import logging
 import shutil
 
@@ -21,7 +22,10 @@ from cotorra.baselines import (
     BagOfTokensScorer,
     BaselineEstimator,
     Featurization,
+    TsfreshScorer,
     bag_of_tokens,
+    past_meds,
+    tsfresh_points,
 )
 
 SPLITS = ("train", "tuning", "held_out")
@@ -29,6 +33,19 @@ SPLITS = ("train", "tuning", "held_out")
 ESTIMATORS = [e.value for e in BaselineEstimator]
 
 FEATURIZATIONS = [f.value for f in Featurization]
+
+# each baseline, and what it's built with here beyond what a test passes: the
+# tsfresh baseline extracts in this process, sparing the suite a pool of workers
+BASELINES = {
+    "bag-of-tokens": (BagOfTokensScorer, {}),
+    "tsfresh": (TsfreshScorer, {"n_jobs": 0}),
+}
+
+
+def baseline(name: str, **kwargs):
+    cls, defaults = BASELINES[name]
+    return cls(**defaults, **kwargs)
+
 
 # XGBoost's `min_child_weight=5` is a sum of hessians that the synthetic train
 # split's few dozen rows can't give both sides of any split, so it never splits
@@ -199,15 +216,27 @@ def test_score_label_finds_a_token_that_foretells_the_outcome(
         assert roc_auc_score(y_true[valid], scores[valid]) > 0.9
 
 
-# what `estimator` builds for each estimator type, and what the boosters are
-# handed to evaluate on: lightgbm 4.7 deprecates `eval_set` for `eval_X` and
-# `eval_y`, which xgboost's `fit` doesn't take
-EXPECTED_ESTIMATOR = {
-    "lightGBM": ["LGBMClassifier"],
-    "logistic": ["MaxAbsScaler", "LogisticRegression"],
-    "XGBoost": ["XGBClassifier"],
-}
+# what `estimator` builds for each estimator type, the logistic regression's
+# preparation of the features being each baseline's own, and what the boosters
+# are handed to evaluate on: lightgbm 4.7 deprecates `eval_set` for `eval_X`
+# and `eval_y`, which xgboost's `fit` doesn't take
+EXPECTED_ESTIMATOR = (
+    {
+        ("bag-of-tokens", "logistic"): ["MaxAbsScaler", "LogisticRegression"],
+        ("tsfresh", "logistic"): [
+            "SimpleImputer",
+            "MaxAbsScaler",
+            "LogisticRegression",
+        ],
+    }
+    | {(b, "lightGBM"): ["LGBMClassifier"] for b in BASELINES}
+    | {(b, "XGBoost"): ["XGBClassifier"] for b in BASELINES}
+)
 EVAL_KWARGS = {"lightGBM": {"eval_X", "eval_y", "eval_metric"}, "XGBoost": {"eval_set"}}
+
+
+def dense(features) -> np.ndarray:
+    return features.toarray() if sp.issparse(features) else np.asarray(features)
 
 
 @pytest.fixture
@@ -255,13 +284,15 @@ def partly_past(processed, target_token, tmp_path_factory):
 
 
 @pytest.mark.parametrize("estimator_type", ESTIMATORS)
+@pytest.mark.parametrize("name", BASELINES)
 def test_each_estimator_fits_and_scores_the_rows_whose_past_lacks_the_outcome(
-    partly_past, target_token, estimator_type, fit_spy
+    partly_past, target_token, name, estimator_type, fit_spy
 ):
-    """fit on the train split's bags, the boosters evaluating on the tuning
-    split's, and the rest of the held-out rows left a nan"""
-    scorer = BagOfTokensScorer(
-        processed_data_home=partly_past, estimator_type=estimator_type
+    """fit on the train split's features (a sparse bag, or tsfresh's dense
+    float32 ones), the boosters evaluating on the tuning split's, and the rest of
+    the held-out rows left a nan"""
+    scorer = baseline(
+        name, processed_data_home=partly_past, estimator_type=estimator_type
     )
     scores = scorer.score_label(target_token=target_token)
 
@@ -271,11 +302,15 @@ def test_each_estimator_fits_and_scores_the_rows_whose_past_lacks_the_outcome(
     }
     valid = {s: ~df[f"{target_token}_past"].to_numpy() for s, df in tables.items()}
     assert all(0 < v.sum() < len(v) for v in valid.values())  # each a choice
-    assert fit_spy["chosen"] == EXPECTED_ESTIMATOR[estimator_type]
+    assert fit_spy["chosen"] == EXPECTED_ESTIMATOR[name, estimator_type]
     assert set(fit_spy["fit_kwargs"]) == EVAL_KWARGS.get(estimator_type, set())
-    assert sp.issparse(fit_spy["X"])
+    if name == "bag-of-tokens":
+        assert sp.issparse(fit_spy["X"])
+    else:
+        assert isinstance(fit_spy["X"], np.ndarray)
+        assert fit_spy["X"].dtype == np.float32
     np.testing.assert_array_equal(
-        fit_spy["X"].toarray(), scorer.features["train"][valid["train"]].toarray()
+        dense(fit_spy["X"]), dense(scorer.features["train"][valid["train"]])
     )
     np.testing.assert_array_equal(
         fit_spy["y"],
@@ -301,19 +336,25 @@ def test_members_and_their_values_are_taken_alike(processed):
 
 
 @pytest.mark.parametrize(
-    "kwargs", [{"featurization": "tf-idf"}, {"estimator_type": "k-NN"}]
+    "name, kwargs",
+    [
+        ("bag-of-tokens", {"featurization": "tf-idf"}),
+        ("bag-of-tokens", {"estimator_type": "k-NN"}),
+        ("tsfresh", {"estimator_type": "k-NN"}),
+    ],
 )
-def test_an_unknown_featurization_or_estimator_is_refused(processed, kwargs):
+def test_an_unknown_featurization_or_estimator_is_refused(processed, name, kwargs):
     """rather than fit as something else, as `RepBasedScorer` does lightGBM"""
     with pytest.raises(ValueError, match="is not a valid"):
-        BagOfTokensScorer(processed_data_home=processed, **kwargs)
+        baseline(name, processed_data_home=processed, **kwargs)
 
 
-def test_a_scorer_without_its_data_is_refused_by_name():
+@pytest.mark.parametrize("name", BASELINES)
+def test_a_scorer_without_its_data_is_refused_by_name(name):
     with pytest.raises(
-        TypeError, match=r"^BagOfTokensScorer needs `processed_data_home`$"
+        TypeError, match=rf"^{BASELINES[name][0].__name__} needs `processed_data_home`$"
     ):
-        BagOfTokensScorer()
+        baseline(name)
 
 
 def test_target_tokens_give_a_score_column_per_matching_token_in_vocab_order(
@@ -469,3 +510,380 @@ def test_a_training_home_with_another_vocabulary_is_refused(processed, tmp_path)
     OmegaConf.save(tkzr, there / "tokenizer.yaml")
     with pytest.raises(ValueError, match="tokenize differently"):
         BagOfTokensScorer(processed_data_home=processed, training_home=there)
+
+
+# --------------------------------------------------------------------- tsfresh
+
+# tsfresh's minimal features, each measured code's
+MINIMAL = {
+    "absolute_maximum",
+    "length",
+    "maximum",
+    "mean",
+    "median",
+    "minimum",
+    "root_mean_square",
+    "standard_deviation",
+    "sum_values",
+    "variance",
+}
+
+T0 = datetime.datetime(2024, 1, 1)
+HOUR = datetime.timedelta(hours=1)
+
+
+def test_past_meds_are_a_subjects_rows_up_to_its_last_past_token(processed):
+    """
+    each split's, row by row: no later than the last token of its past, and so
+    before the first of its future, after every row its past was tokenized from
+    """
+    meds = pl.read_parquet(processed / "meds.parquet")
+    for split in SPLITS:
+        table = pl.read_parquet(processed / f"{split}_for_inference.parquet")
+        past = past_meds(table.lazy(), meds.lazy()).collect()
+        expected, futures = [], 0
+        for row, (subject, times, n_past) in enumerate(
+            table.select("subject_id", "times", pl.col("tokens_past").list.len()).rows()
+        ):
+            rows = meds.filter(
+                pl.col("subject_id") == subject, pl.col("time") <= times[n_past - 1]
+            )
+            expected += [(row, *r) for r in rows.select("time", "code").rows()]
+            if n_past < len(times):
+                futures += 1
+                assert (rows["time"] < times[n_past]).all()
+        assert sorted(past.select("id", "time", "code").rows()) == sorted(expected)
+        assert futures  # so that the check of the futures checked something
+
+
+def test_an_empty_past_takes_no_rows():
+    """where `list.get(-1)` would cut it at its timeline's last token, so taking
+    every row; cocoa never writes one"""
+    table = pl.LazyFrame(
+        {
+            "subject_id": ["a", "b"],
+            "times": [[T0, T0 + HOUR]] * 2,
+            "tokens_past": [[], [7]],
+        },
+        schema_overrides={
+            "times": pl.List(pl.Datetime("us")),
+            "tokens_past": pl.List(pl.UInt32),
+        },
+    )
+    meds = pl.LazyFrame(
+        {
+            "subject_id": ["a", "a", "b", "b"],
+            "time": [T0, T0 + HOUR] * 2,
+            "code": ["X"] * 4,
+            "numeric_value": [None] * 4,
+            "text_value": [None] * 4,
+        },
+        schema_overrides={
+            "time": pl.Datetime("us"),
+            "numeric_value": pl.Float32,
+            "text_value": pl.String,
+        },
+    )
+    assert past_meds(table, meds).collect().select("id", "time").rows() == [(1, T0)]
+
+
+def test_tsfresh_points_are_a_measured_codes_values_and_a_one_for_any_other_row():
+    """a measured code's rows without a finite value dropped; any other code's
+    rows each a 1, whatever value they hold, under the code fused with the row's
+    text value as cocoa's tokenizer fuses them"""
+    past = pl.LazyFrame(
+        {
+            "id": [0, 0, 0, 0, 0, 1, 1, 1],
+            "time": [T0] * 8,
+            "code": ["LAB//na"] * 4 + ["ASMT//cam", "ASMT//cam", "RESP//imv", "LAB//k"],
+            "numeric_value": [140.0, None, np.nan, np.inf, None, None, None, 4.0],
+            "text_value": [None] * 4 + ["yes", "no", None, None],
+        },
+        schema_overrides={"time": pl.Datetime("us"), "numeric_value": pl.Float32},
+    )
+    points = tsfresh_points(past, measured={"LAB//na"}).collect()
+    assert sorted(points.select("id", "kind", "value").rows()) == [
+        (0, "ASMT//cam_yes", 1.0),
+        (0, "LAB//na", 140.0),
+        (1, "ASMT//cam_no", 1.0),
+        (1, "LAB//k", 1.0),
+        (1, "RESP//imv", 1.0),
+    ]
+
+
+@pytest.fixture(scope="module")
+def tsfresh_scorer(processed, single_token_cfg_path, tmp_path_factory):
+    """the synthetic data's tsfresh baseline, extracted once for the tests that
+    read its features; it writes its scores beside the data, not into it"""
+    return baseline(
+        "tsfresh",
+        scoring_cfg=single_token_cfg_path,
+        processed_data_home=processed,
+        output_home=tmp_path_factory.mktemp("tsfresh-scores"),
+        estimator_type="logistic",
+    )
+
+
+def per_row(points: pl.DataFrame, n_rows: int, **aggs: pl.Expr) -> dict:
+    """each of `aggs` over each row's `points`, a nan for a row without any"""
+    out = {name: np.full(n_rows, np.nan) for name in aggs}
+    for row, *values in points.group_by("id").agg(**aggs).rows():
+        for name, value in zip(aggs, values):
+            out[name][row] = value
+    return out
+
+
+def test_tsfresh_features_summarize_each_code_in_each_past(processed, tsfresh_scorer):
+    """
+    the minimal features of each code with a value in the train split's pasts,
+    and only the count of every other kind, as computed here from each row's
+    past meds rows; missing where a past lacks the kind
+    """
+    meds = pl.scan_parquet(processed / "meds.parquet")
+    pasts = {
+        s: past_meds(pl.scan_parquet(processed / f"{s}_for_inference.parquet"), meds)
+        .collect()
+        .with_columns(
+            kind=pl.concat_str("code", "text_value", separator="_", ignore_nulls=True)
+        )
+        for s in SPLITS
+    }
+    measured = set(pasts["train"].filter(pl.col("numeric_value").is_finite())["code"])
+    names = tsfresh_scorer.feature_names
+    features = collections.defaultdict(set)
+    for name in names:
+        kind, feature = name.rsplit("__", 1)
+        features[kind].add(feature)
+    assert {kind for kind, f in features.items() if f == MINIMAL} == measured
+    assert all(f == {"length"} for kind, f in features.items() if kind not in measured)
+    assert any(kind not in measured for kind in features)  # some events
+    # the kinds of the train split's pasts, and not those only another's reach
+    # (the synthetic tuning and held-out splits' markers)
+    events = pasts["train"].filter(~pl.col("code").is_in(list(measured)))["kind"]
+    assert set(features) == measured | set(events)
+    assert {kind for s in ("tuning", "held_out") for kind in pasts[s]["kind"]} - set(
+        features
+    )
+
+    # the code measured most often, and the most frequent kind with a text value
+    code = (
+        pasts["train"]
+        .filter(pl.col("code").is_in(list(measured)))["code"]
+        .value_counts(sort=True)
+        .item(0, "code")
+    )
+    event = (
+        pasts["train"]
+        .filter(pl.col("text_value").is_not_null())["kind"]
+        .value_counts(sort=True)
+        .item(0, "kind")
+    )
+    missing = 0
+    for split in SPLITS:
+        X = tsfresh_scorer.features[split]
+        values = pasts[split].filter(
+            pl.col("code") == code, pl.col("numeric_value").is_finite()
+        )
+        expected = per_row(
+            values,
+            X.shape[0],
+            mean=pl.col("numeric_value").cast(pl.Float64).mean(),
+            maximum=pl.col("numeric_value").max(),
+            minimum=pl.col("numeric_value").min(),
+            length=pl.len(),
+        ) | per_row(
+            pasts[split].filter(pl.col("kind") == event), X.shape[0], count=pl.len()
+        )
+        for feature in ("mean", "maximum", "minimum", "length"):
+            np.testing.assert_allclose(
+                X[:, names.index(f"{code}__{feature}")], expected[feature], rtol=1e-6
+            )
+        np.testing.assert_array_equal(
+            X[:, names.index(f"{event}__length")], expected["count"]
+        )
+        missing += np.isnan(expected["mean"]).sum() + np.isnan(expected["count"]).sum()
+    assert missing  # so that a past without the kind, missing it, is checked too
+
+
+def write_meds(home, marked: dict[str, pl.Expr], marker: str) -> None:
+    """
+    replace `home`'s meds.parquet with one giving every subject the same two
+    rows at its timeline's first time (a measurement, `VTL//shared`, and an
+    event, `RESP//shared`), but for a marker beside them in the rows that
+    `marked` picks out of each split's table: a measurement of 1, where the
+    others' is 0 (`marker="measured"`), or an event the others lack (`"event"`).
+    As with `plant`, the marker is then all that tells one past from another,
+    the synthetic meds giving the outcomes away on their own
+    """
+    schema = pl.read_parquet_schema(home / "meds.parquet")
+    none = pl.lit(None, dtype=pl.Float64)
+    frames = []
+    for split, picked in marked.items():
+        first = pl.read_parquet(home / f"{split}_for_inference.parquet").select(
+            "subject_id", time=pl.col("times").list.first(), picked=picked
+        )
+        frames += [
+            first.with_columns(code=pl.lit("VTL//shared"), numeric_value=pl.lit(1.0)),
+            first.with_columns(code=pl.lit("RESP//shared"), numeric_value=none),
+            first.with_columns(
+                code=pl.lit("LAB-RES//marker"),
+                numeric_value=pl.col("picked").cast(pl.Float64),
+            )
+            if marker == "measured"
+            else first.filter("picked").with_columns(
+                code=pl.lit("RESP//marker"), numeric_value=none
+            ),
+        ]
+    pl.concat(
+        frame.select(
+            "subject_id",
+            "time",
+            "code",
+            "numeric_value",
+            text_value=pl.lit(None, dtype=pl.String),
+        )
+        for frame in frames
+    ).cast(schema).write_parquet(home / "meds.parquet")
+
+
+@pytest.fixture(scope="module", params=["measured", "event"])
+def meds_marked(request, processed, target_token, tmp_path_factory):
+    """a copy of `processed` whose meds give every row the same past, but for a
+    marker in those of the rows that go on to `target_token`: a measurement of
+    1 rather than 0 (`measured`), or an event the others lack (`event`)"""
+    home = tmp_path_factory.mktemp(f"tsfresh-marked-{request.param}")
+    shutil.copytree(processed, home, dirs_exist_ok=True)
+    future = pl.col(f"{target_token}_future")
+    write_meds(home, {split: future for split in SPLITS}, marker=request.param)
+    return home
+
+
+@pytest.mark.parametrize("estimator_type", ESTIMATORS)
+def test_tsfresh_finds_a_code_that_foretells_the_outcome(
+    meds_marked, target_token, estimator_type, boosters_usable
+):
+    """by a measured code's value, or an event's count"""
+    if not boosters_usable.get(estimator_type, True):
+        pytest.skip(LIBOMP_HINT)
+    scorer = baseline(
+        "tsfresh", processed_data_home=meds_marked, estimator_type=estimator_type
+    )
+    scores = scorer.score_label(target_token=target_token)
+
+    valid, y_true = held_out(meds_marked, target_token)
+    assert scores.shape == valid.shape
+    assert np.isnan(scores[~valid]).all()
+    assert ((scores[valid] >= 0) & (scores[valid] <= 1)).all()
+    if estimator_type not in NO_AUC_ON_TINY_TRAIN_SPLIT:
+        assert roc_auc_score(y_true[valid], scores[valid]) > 0.9
+
+
+def test_tsfresh_save_all_writes_and_summarizes_its_scores(
+    processed, tsfresh_scorer, target_token
+):
+    tsfresh_scorer.logger.addHandler(capture := Capture())
+    try:
+        tsfresh_scorer.save_all(verbose=True)
+    finally:
+        tsfresh_scorer.logger.removeHandler(capture)
+
+    assert tsfresh_scorer.output_home.name == "scores-tsfresh-logistic.parquet"
+    held_out_table = pl.read_parquet(processed / "held_out_for_inference.parquet")
+    scores = pl.read_parquet(tsfresh_scorer.output_home)
+    assert scores.columns == held_out_table.columns + [f"{target_token}_tsfresh_score"]
+    assert scores.height == held_out_table.height
+    assert "method='tsfresh'" in capture.messages
+    assert any(m.startswith("roc_auc") for m in capture.messages)
+
+
+@pytest.fixture
+def meds_transfer_homes(processed, target_token, tmp_path):
+    """
+    `transfer_homes` with meds: two copies of `processed` whose rows share a past
+    but for the measured marker, 1 by outcome in opposite ways: `there`, fit on,
+    for the train and tuning rows that go on to `target_token` and the held-out
+    rows that don't; `here`, scored, for the held-out rows that go on to it and
+    the train and tuning rows that don't
+    """
+    homes = {name: tmp_path / name for name in ("here", "there")}
+    for home in homes.values():
+        shutil.copytree(processed, home)
+    future = pl.col(f"{target_token}_future")
+    for name, held_out_marked in (("here", future), ("there", ~future)):
+        write_meds(
+            homes[name],
+            {
+                split: held_out_marked if split == "held_out" else ~held_out_marked
+                for split in SPLITS
+            },
+            marker="measured",
+        )
+    return homes
+
+
+def test_a_training_home_lends_tsfresh_its_meds_and_labels(
+    meds_transfer_homes, target_token, single_token_cfg_path
+):
+    """the train and tuning features from its meds, the held-out ones from
+    `processed_data_home`'s; fit on `here`'s, or scoring `there`'s held-out
+    split, the marker would foretell the reverse"""
+    here, there = meds_transfer_homes["here"], meds_transfer_homes["there"]
+    transferred = baseline(
+        "tsfresh",
+        scoring_cfg=single_token_cfg_path,
+        processed_data_home=here,
+        training_home=there,
+        estimator_type="logistic",
+    )
+    assert held_out_auc(transferred, here, target_token) > 0.9
+    assert transferred.output_home.parent == here.resolve()
+    at_home = baseline(
+        "tsfresh",
+        scoring_cfg=single_token_cfg_path,
+        processed_data_home=here,
+        estimator_type="logistic",
+    )
+    assert held_out_auc(at_home, here, target_token) < 0.1
+
+
+def test_tsfresh_without_meds_is_refused_saying_where_it_looked(processed, tmp_path):
+    home = tmp_path / "no-meds"
+    shutil.copytree(processed, home)
+    (home / "meds.parquet").unlink()
+    with pytest.raises(FileNotFoundError, match=r"no-meds/meds\.parquet"):
+        baseline("tsfresh", processed_data_home=home)
+
+
+def test_which_codes_are_measured_is_learned_on_the_train_split(processed, tmp_path):
+    """as cocoa learns its bins there: a code without a value in the train
+    split's pasts is counted, though the other splits' rows give it values"""
+    home = tmp_path / "valued-elsewhere"
+    shutil.copytree(processed, home)
+    meds = pl.scan_parquet(home / "meds.parquet")
+    pasts = {
+        s: past_meds(
+            pl.scan_parquet(home / f"{s}_for_inference.parquet"), meds
+        ).collect()
+        for s in SPLITS
+    }
+    measured = set(pasts["train"].filter(pl.col("numeric_value").is_finite())["code"])
+    counted = pasts["train"].filter(
+        ~pl.col("code").is_in(list(measured)), pl.col("text_value").is_null()
+    )["code"]
+    code = sorted(set(counted) & set(pasts["held_out"]["code"]))[0]
+    others = pl.concat(
+        pl.read_parquet(home / f"{s}_for_inference.parquet", columns=["subject_id"])
+        for s in ("tuning", "held_out")
+    )["subject_id"]
+    pl.read_parquet(home / "meds.parquet").with_columns(
+        numeric_value=pl.when(
+            pl.col("code") == code, pl.col("subject_id").is_in(others.to_list())
+        )
+        .then(pl.lit(1.0, dtype=pl.Float32))
+        .otherwise("numeric_value")
+    ).write_parquet(home / "meds.parquet")
+
+    names = baseline("tsfresh", processed_data_home=home).feature_names
+    assert [name for name in names if name.startswith(f"{code}__")] == [
+        f"{code}__length"
+    ]
