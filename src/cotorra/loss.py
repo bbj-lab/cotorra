@@ -98,7 +98,7 @@ class Loss:
             self.balanced_toi_flag[[self.tkzr_cfg.lookup[x] for x in matched]] = True
 
     def quantile_token_loss(
-        self, outputs: dict, labels: t.Tensor, **kwargs
+        self, outputs: dict, labels: t.Tensor, counts: dict | None = None, **kwargs
     ) -> t.Tensor:
         """
         squared error between the bin midpoint the model expects for a quantile
@@ -109,11 +109,14 @@ class Loss:
         squared error, which would reward piling mass onto one bin, so the true
         distribution still minimizes cross-entropy plus this term; and confined
         to a code's bins, it moves mass among them without making the code
-        likelier
+        likelier. Given `counts`, it records there the count of quantile tokens
+        it averaged over, as each term does its own
         """
         logits = outputs.get("logits")[:, :-1]
         # a tensor rather than a bare 0.0, since `custom_loss` calls `.detach()`
         if not self.n_cats:
+            if counts is not None:
+                counts["quantile_token_loss"] = t.zeros((), device=logits.device)
             return t.zeros((), device=logits.device, dtype=t.float32)
         shift_labels = labels[:, 1:].to(logits.device)
         # a -100 label isn't a target (`packing: bfd`'s padding, say), and has no
@@ -134,10 +137,12 @@ class Loss:
         pred = bin_logits.softmax(dim=-1) @ self.qt_vals.to(logits.device)
         true = self.label_to_q.to(logits.device)[shift_labels]
         sq_err = t.where(is_q, (pred - true) ** 2, 0.0)
+        if counts is not None:
+            counts["quantile_token_loss"] = is_q.sum()
         return sq_err.sum() / is_q.sum().clamp(min=1)
 
     def label_weighted_loss(
-        self, outputs: dict, labels: t.Tensor, **kwargs
+        self, outputs: dict, labels: t.Tensor, counts: dict | None = None, **kwargs
     ) -> t.Tensor:
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
         shift_logits = logits[:, :-1, :].contiguous()
@@ -147,10 +152,17 @@ class Loss:
         )(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)).to(
             dtype=t.float32
         )
+        scored = shift_labels != -100
+        if counts is not None:
+            # a weighted mean divides by its targets' weights, not their number
+            weights = self.weights.to(scored.device)[shift_labels.clamp(min=0)]
+            counts["label_weighted_loss"] = (weights * scored).sum()
         # as for `x_ent_loss`
-        return t.where((shift_labels != -100).any(), weighted, 0.0)
+        return t.where(scored.any(), weighted, 0.0)
 
-    def balanced_toi_loss(self, outputs: dict, labels: t.Tensor, **kwargs) -> t.Tensor:
+    def balanced_toi_loss(
+        self, outputs: dict, labels: t.Tensor, counts: dict | None = None, **kwargs
+    ) -> t.Tensor:
         """
         binary cross-entropy on whether the next token is a token of interest,
         scored with the total probability the softmax puts on those tokens. A
@@ -173,19 +185,27 @@ class Loss:
         lse_rest = logits.masked_fill(flag, -t.inf).logsumexp(dim=-1)
         lse_all = t.logaddexp(lse_toi, lse_rest)
         nll = -t.where(is_toi, lse_toi - lse_all, lse_rest - lse_all)
+        if counts is not None:
+            counts["balanced_toi_loss"] = scored.sum()
         return t.where(scored, nll, 0.0).sum() / scored.sum().clamp(min=1)
 
-    def x_ent_loss(self, outputs: dict, labels: t.Tensor, **kwargs) -> t.Tensor:
+    def x_ent_loss(
+        self, outputs: dict, labels: t.Tensor, counts: dict | None = None, **kwargs
+    ) -> t.Tensor:
         logits = outputs.get("logits")  # (batch, seq_len, vocab_size)
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = labels[:, 1:].contiguous()
         x_ent = t.nn.CrossEntropyLoss()(
             shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
         ).to(dtype=t.float32)
+        # the targets `ignore_index` doesn't skip, which the mean divides by
+        scored = shift_labels != -100
+        if counts is not None:
+            counts["x_ent_loss"] = scored.sum()
         # a mean over no target at all -- every label -100, which `packing: bfd`
         # can leave a batch -- is nan: 0.0 then, its gradient 0 rather than nan,
         # and the mean itself, to the bit, whenever there's a target
-        return t.where((shift_labels != -100).any(), x_ent, 0.0)
+        return t.where(scored.any(), x_ent, 0.0)
 
     def head_loss(self, outputs: dict, name: str) -> t.Tensor:
         """a secondary head's term, which the model computes itself -- it owns the
@@ -203,38 +223,66 @@ class Loss:
         return loss.to(dtype=t.float32)
 
     def custom_loss(
-        self, outputs: dict, labels: t.Tensor, terms: dict | None = None, **kwargs
+        self,
+        outputs: dict,
+        labels: t.Tensor,
+        terms: dict | None = None,
+        counts: dict | None = None,
+        **kwargs,
     ) -> t.Tensor:
         """
         the configured objective: cross-entropy plus each weighted term its blocks
-        ask for. Given a dict `terms`, it also records each term there, unweighted
-        and detached, under the name it gets logged by; `TrainerWithCustomLoss`
-        averages them for its logs, left on the device so that no batch waits on
-        the host
+        ask for (`combine`). Given a dict `terms`, it also records each term there,
+        unweighted and detached, under the name it gets logged by;
+        `TrainerWithCustomLoss` averages them for its logs, left on the device so
+        that no batch waits on the host. Given a dict `counts`, each lm term
+        records there, under the same name, the positions it averaged over, so
+        that a term can be averaged over a whole evaluation rather than batch by
+        batch; a head's are the head's own (`Head.scored`)
+        """
+        terms = dict() if terms is None else terms
+        parts = dict()
+        if "label_weighted_loss" in self.cfg:
+            parts["label_weighted_loss"] = self.label_weighted_loss(
+                outputs, labels, counts=counts
+            )
+        else:
+            parts["x_ent_loss"] = self.x_ent_loss(outputs, labels, counts=counts)
+        if "balanced_toi_loss" in self.cfg:
+            parts["balanced_toi_loss"] = self.balanced_toi_loss(
+                outputs, labels, counts=counts
+            )
+        if "quantile_token_loss" in self.cfg:
+            parts["quantile_token_loss"] = self.quantile_token_loss(
+                outputs, labels, counts=counts
+            )
+        for name in self.heads:
+            parts[f"{name}_loss"] = self.head_loss(outputs, name)
+        terms.update({name: part.detach() for name, part in parts.items()})
+        return self.combine(parts)
+
+    def combine(self, terms: dict) -> t.Tensor | float:
+        """
+        the objective from its `terms`, unweighted, under the names `custom_loss`
+        records them by: the cross-entropy, or the deprecated label-weighted one,
+        then each other term its blocks ask for, times its weight. A batch's
+        terms make the loss it trains on; their means over a whole evaluation,
+        which `TrainerWithCustomLoss` takes under `packing: pad`, its `eval_loss`
         """
         loss = 0.0
-        terms = dict() if terms is None else terms
         if "label_weighted_loss" in self.cfg:
-            label_weighted_loss = self.label_weighted_loss(outputs, labels)
-            terms["label_weighted_loss"] = label_weighted_loss.detach()
-            loss += label_weighted_loss
+            loss += terms["label_weighted_loss"]
         else:
-            x_ent_loss = self.x_ent_loss(outputs, labels)
-            terms["x_ent_loss"] = x_ent_loss.detach()
-            loss += x_ent_loss
+            loss += terms["x_ent_loss"]
         if "balanced_toi_loss" in self.cfg:
-            balanced_toi_loss = self.balanced_toi_loss(outputs, labels)
-            terms["balanced_toi_loss"] = balanced_toi_loss.detach()
             bce_weight = self.cfg.balanced_toi_loss.get("bce_weight", 1.0)
-            loss += bce_weight * balanced_toi_loss
+            loss += bce_weight * terms["balanced_toi_loss"]
         if "quantile_token_loss" in self.cfg:
-            quantile_token_loss = self.quantile_token_loss(outputs, labels)
-            terms["quantile_token_loss"] = quantile_token_loss.detach()
-            loss += self.cfg.quantile_token_loss.qt_weight * quantile_token_loss
+            loss += (
+                self.cfg.quantile_token_loss.qt_weight * terms["quantile_token_loss"]
+            )
         for name, options in self.heads.items():
-            head_loss = self.head_loss(outputs, name)
-            terms[f"{name}_loss"] = head_loss.detach()
-            loss += options["weight"] * head_loss
+            loss += options["weight"] * terms[f"{name}_loss"]
         return loss
 
 

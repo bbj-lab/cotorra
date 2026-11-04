@@ -63,39 +63,68 @@ With `packing: pad`, each record attends only to itself, with no need for
 it. Unlike `doc_masking`, it works with `time_based_rope` and with the secondary
 heads.
 
-Training draws the rows with HuggingFace's length-grouped sampler, so that each
-batch holds rows of about the same length and pads them little. The sampler
-shuffles the rows, sorts each run of 50 batches longest first, and puts the
-longest row in the first batch, so that a batch too large for memory fails at the
-first step. It's seeded by `training_args.data_seed`, or `seed` without one, so
-that every process and every trial of `cotorra tune` draws the same order. To
-draw the rows another way, set `training_args.train_sampling_strategy` to another
-of HuggingFace's samplers, e.g. `random`. Evaluation takes the tuning split's
-rows longest first, always in that order, so that `eval_loss`, which picks the
-best checkpoint and which `cotorra tune` minimizes, is computed on the same
-batches every time.
+Each batch holds as many rows as fit `tokens_per_batch` tokens once they're
+padded to the batch's longest: a few long records, or hundreds of short ones.
+That way every step trains on about as many tokens, as with the other packings. A
+step's loss is a mean over its batch's tokens, and every step counts alike, so a
+batch of a fixed number of rows would make each token of a short record count for
+far more than each token of a long one. A record's length is its outcome (a short
+stay makes a short record), so that would teach the model that records end sooner
+than they do.
+
+Each of the `n_epochs` passes over the records is batched on its own, so a
+record's copies never share a batch. Within a pass, the rows are sorted by
+length, ties in random order, and cut into batches shortest first, so that each
+batch holds rows of about one length and pads them little. The batches are then
+shuffled, and the one holding the longest row goes first, so that a budget too
+large for memory fails at the first step. The order is seeded by
+`training_args.data_seed`, or `seed` without one, so that every trial of
+`cotorra tune` draws the same batches. Evaluation takes the tuning split's rows
+longest first, batched the same way. Each logged `eval_*` term is a mean over the
+positions it scores, rather than HuggingFace's mean over the batches weighted by
+their rows: over the tokens for cross-entropy, the quantile tokens for
+`quantile_token_loss`, and each secondary head's usable targets for its head. Its
+`eval_loss`, which picks the best checkpoint and which `cotorra tune` minimizes,
+weighs those means together as training's loss weighs a batch's. The other
+packings keep HuggingFace's `eval_loss`.
 
 ```yaml
 packing: pad
 max_seq_len: !!int 16384
-training_args:
-    per_device_train_batch_size: !!int 2 # 2 × 16384 tokens at most, as 8 × 4096
-    per_device_eval_batch_size: !!int 2
+tokens_per_batch: !!int 65536 # 4 rows of 16384 at most, or more shorter ones
 ```
 
 A few things to know:
 
-- A batch holds up to `per_device_train_batch_size` × `max_seq_len` tokens, as
-  with the other packings, so a larger `max_seq_len` calls for a smaller batch.
-  Most batches hold far fewer tokens, since only the longest records fill a row.
-- A step's loss averages over its batch's tokens, and a batch of short records
-  holds far fewer of them than a batch of long ones. Each token of a short record
-  therefore counts for more than each token of a long one, so that each row
-  counts roughly alike, where `concat` counts each token alike. An epoch also
-  takes more, smaller steps than `concat`'s, so the learning rate may need
-  retuning.
+- `tokens_per_batch` defaults to `training_args.per_device_train_batch_size` ×
+  `max_seq_len`, the most a batch of the other packings holds, and to
+  `per_device_eval_batch_size` × `max_seq_len` for evaluation. When set, it's
+  used for both. Like the batch sizes, it's per GPU: under `nn.DataParallel`,
+  which splits each batch's rows across the GPUs, a batch holds as many rows as
+  keep every GPU's share within it, however unevenly they divide.
+- Keep `tokens_per_batch` at 4 × `max_seq_len` or more. A row just over half the
+  budget takes a batch alone, half empty, so its tokens count for up to twice as
+  much. At 4 rows or more, a batch of rows of about one length fills to some 80%
+  of its budget at least. Very short records, of a few dozen tokens, are rare
+  enough that a batch of them spans a wide range of lengths and fills less, so
+  their tokens still count for somewhat more.
+- An epoch takes about as many steps as `concat`'s with batches of
+  `tokens_per_batch` tokens, but the batches hold whole records, and their
+  padding isn't scored.
+- `training_args.train_sampling_strategy` can't apply: cotorra refuses `random`
+  or `sequential` under `packing: pad`, and takes `group_by_length` as what it
+  does anyway.
+- `training_args.auto_find_batch_size` can't shrink the batches, as it would try
+  to after running out of memory, so cotorra refuses it under `packing: pad`.
+  Lower `tokens_per_batch` instead.
+- `packing: pad` doesn't yet train across processes (`torchrun`,
+  `accelerate launch`). How accelerate shares out batches of varying sizes across
+  processes differs by version, so cotorra refuses it. One process on one or more
+  GPUs works.
 - Each chunk of a record longer than `max_seq_len` starts a row of its own, so
   its tokens can't see where their record began.
-- With `time_based_rope` and `flash_attention_2`, keep every batch above one row:
-  flash attention drops a mask of ones, and it reads a single row's time-based
-  position ids as several sequences, splitting attention wherever they jump.
+- With `time_based_rope`, cotorra refuses `flash_attention_2` under
+  `packing: pad`. Flash attention drops a mask of ones and reads a single row's
+  time-based position ids as several sequences, splitting attention wherever they
+  jump, and a row over half of `tokens_per_batch` takes a batch alone, as can the
+  longest rows of an epoch's last batch. Use `sdpa` (the default) or `eager`.

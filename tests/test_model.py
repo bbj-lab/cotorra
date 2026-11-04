@@ -493,6 +493,40 @@ def test_a_batch_with_nothing_to_score_still_reaches_every_parameter(model):
     assert all(t.isfinite(p.grad).all() for p in model.heads.parameters())
 
 
+def test_each_heads_loss_divides_by_the_positions_it_says_it_scores(model):
+    """`Head.scored`, which `TrainerWithCustomLoss` counts to average a head's
+    term over a whole evaluation: two batches' losses, each weighted by its
+    count, add up to the loss of both together only if the count is what the
+    loss divides by. Every row has an unscored position, and only the first two
+    end on a usable target, so that a count taking in a row's last position --
+    which a mixture head leaves out, with no next token to condition it on --
+    comes apart, as does one leaving out a time-to-event target recorded past
+    the end time, which counts as 0 hours remaining"""
+    t.manual_seed(1)
+    x, tg = ids(4, 6), targets(model.heads, 4, 6)
+    for name, head in model.heads.items():
+        target = tg[head.target]
+        unusable = NAN if target.is_floating_point() else -100
+        target[:, 1] = unusable
+        target[2:, -1] = unusable
+        if name == "tte":
+            target[:, 2] = -3.0
+
+    def scored(rows: slice) -> dict:
+        out = model(input_ids=x[rows], **{k: v[rows] for k, v in tg.items()})
+        return {
+            name: (getattr(out, f"{name}_loss"), head.scored(tg[head.target][rows]))
+            for name, head in model.heads.items()
+        }
+
+    both, top, bottom = (scored(r) for r in (slice(None), slice(0, 2), slice(2, 4)))
+    for name in model.heads:
+        (loss, n), (a, n_a), (b, n_b) = both[name], top[name], bottom[name]
+        n, n_a, n_b = n.sum(), n_a.sum(), n_b.sum()
+        assert n == n_a + n_b and n_a > 0 and n_b > 0
+        assert (loss * n).item() == pytest.approx((a * n_a + b * n_b).item(), rel=1e-5)
+
+
 def test_logits_to_keep_trims_what_is_returned_but_not_what_is_scored(model):
     """generation asks for the last position alone; training never trims, but
     a target still scores every position whatever comes back"""
@@ -1520,7 +1554,8 @@ def test_a_real_training_step_updates_every_head(configured, tmp_path):
 
 
 def test_a_head_has_to_say_what_it_predicts_and_how_it_is_scored():
-    """the base class leaves both to the subclass that sets its name and target"""
+    """the base class leaves both to the subclass that sets its name and target,
+    and with them, which positions its loss scores"""
 
     class Bare(Head):
         name, target = "bare", "bare_target"
@@ -1531,6 +1566,8 @@ def test_a_head_has_to_say_what_it_predicts_and_how_it_is_scored():
         head(t.zeros(1, 2, 4))
     with pytest.raises(NotImplementedError):
         head.loss(None, t.zeros(1, 2))
+    with pytest.raises(NotImplementedError):
+        head.scored(t.zeros(1, 2))
 
 
 def test_a_time_to_next_token_head_has_to_say_how_it_samples_and_averages():

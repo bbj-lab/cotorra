@@ -37,6 +37,9 @@ that specifies:
   `max_seq_len` tokens: `concat` (default) joins them end to end, `bfd` packs
   them whole, padding the room left over, and `pad` gives each a row of its own,
   padding each batch to its longest row. See [Packing records](packing.md).
+- **tokens_per_batch** _(optional)_: With `packing: pad`, the most tokens a batch
+  holds, padding included (default: the batch size × `max_seq_len`). See
+  [A record to a row](packing.md#a-record-to-a-row).
 - **doc_masking** _(optional)_: With `packing: bfd`, keeps each packed record
   from attending to the others in its row (default: `false`). See
   [Packing records](packing.md).
