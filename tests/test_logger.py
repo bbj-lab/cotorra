@@ -150,3 +150,24 @@ def test_summarize_preds_summarizes_each_method_it_has_scores_for(
     assert methods == ["method='mc'", "method='reach'", "method='rep'"]
     assert [kwargs["stratified"] for kwargs in fast_bootstrap] == [False] * 3
     assert "using stratified sampling due to rarity" not in capture.messages
+
+
+def test_summarize_preds_summarizes_the_methods_it_is_told_of(
+    preds_df, logger, capture, fast_bootstrap
+):
+    """a scorer whose columns are named for a method of its own (a baseline's
+    featurization) names it, and only those columns are summarized, for each
+    token in turn"""
+    df = preds_df.with_columns(
+        pl.col(f"foo//bar_{name}").alias(f"foo//baz_{name}")
+        for name in ("past", "future", "rep_score")
+    ).with_columns(
+        pl.col(f"foo//{tt}_rep_score").alias(f"foo//{tt}_counts_score")
+        for tt in ("bar", "baz")
+    )
+    logger.summarize_preds(
+        df, ["foo//bar", "foo//baz"], methods=(m for m in ["counts"])
+    )
+    methods = [m for m in capture.messages if m.startswith("method=")]
+    assert methods == ["method='counts'"] * 2
+    assert len(fast_bootstrap) == 2

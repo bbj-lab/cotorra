@@ -72,6 +72,7 @@ the classes.
 | [extractor.py](src/cotorra/extractor.py)                 | `Extractor`                             | hidden-state and head-prediction extraction                  |
 | [scorer_rep_based.py](src/cotorra/scorer_rep_based.py)   | `RepBasedScorer`, `EstimatorType`       | estimator-on-features scoring                                |
 | [scorer_generative.py](src/cotorra/scorer_generative.py) | `GenerativeScorer`                      | SCOPE/REACH generative scoring                               |
+| [baselines.py](src/cotorra/baselines.py)                 | `BagOfTokensScorer`                     | estimator-on-token-bags baseline scoring                     |
 | [logger.py](src/cotorra/logger.py)                       | `Logger`                                | rich logging + bootstrap-CI eval summaries                   |
 | [util.py](src/cotorra/util.py)                           | —                                       | batching helpers, `bootstrap_ci`                             |
 

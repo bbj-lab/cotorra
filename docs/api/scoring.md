@@ -11,13 +11,14 @@ count as outcomes of interest.
 ## `GenerativeScorer`
 
 `GenerativeScorer` predicts outcomes by _generating_ them. Using the
-[`quick_sco_re`](https://pypi.org/project/quick-sco-re/) implementation of the
-SCORE and REACH algorithms, it autoregressively samples many possible
-continuations of each timeline and estimates the probability that a target
-outcome token occurs. For every outcome it reports three Monte-Carlo estimates —
-a raw occurrence score (`mc`), a SCOPE score, and a REACH score — computed only
-for subjects who have not already experienced the outcome. Generation runs
-asynchronously in batches and the scores are written to a parquet file.
+[`quick_sco_re`](https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git)
+implementation of the SCORE and REACH algorithms, it autoregressively samples
+many possible continuations of each timeline and estimates the probability that a
+target outcome token occurs. For every outcome it reports three Monte-Carlo
+estimates — a raw occurrence score (`mc`), a SCOPE score, and a REACH score —
+computed only for subjects who have not already experienced the outcome.
+Generation runs asynchronously in batches and the scores are written to a parquet
+file.
 
 ::: cotorra.scorer_generative.GenerativeScorer
 

@@ -20,6 +20,7 @@
         "polars>=1.36.1",
         "rich>=13.8",
         "scikit-learn>=1.8",
+        "scipy>=1.13.1",
         "torch>=2.6",
         "torch>=2.8; sys_platform == 'darwin'",
         "tqdm>=4.66.3",
