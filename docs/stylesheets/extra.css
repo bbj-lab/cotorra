@@ -99,6 +99,15 @@
   background-color: var(--md-primary-fg-color);
 }
 
+/* No page shows a table of contents: neither its sidebar, on the right of a
+   wide screen, nor the button that opens it on a narrow one (the modern
+   variant never repeats it in the navigation), so the text takes the width.
+   The theme shows the sidebar by a rule as specific as this one, which wins by
+   coming later. */
+.md-sidebar.md-sidebar--secondary {
+  display: none;
+}
+
 /* The copyright strip at the foot of each page. */
 .md-footer-meta {
   background-color: #ececec; /* light greystone, half strength */

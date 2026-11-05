@@ -642,14 +642,18 @@ trailing `# breakpoint()`. Leave them; they're for interactive debugging.
   greystone at half strength, `#ececec`, for the larger surfaces. Admonitions
   take the UChicago colors of cocoa's visualizer, a link turns dark brick under
   the pointer, and a card on the home page has a maroon icon, and a maroon border
-  under the pointer. [docs/index.md](docs/index.md) wraps the README's `intro` in
-  a `.hero` block, and the stylesheet centers its title, the paragraph right
-  after it (the badges), and its blockquote (the tagline), so keep them in that
-  order. The `glightbox` plugin zooms an image on click; the README's hero opts
-  out with `class="off-glb"`. cocoa's docs share the stylesheet, overrides, and
-  theme settings, so a change to how one site looks goes to the other too.
-  Zensical runs its own versions of the plugins listed there and silently skips
-  any it lacks: so far just `git-revision-date-localized`, so the footer's "Last
+  under the pointer. It hides every page's table of contents, both the sidebar on
+  the right and the button that stands in for it on a narrow screen (the modern
+  variant never repeats it in the navigation), so a page's text takes the width;
+  the home page's `hide: toc` front matter predates that rule.
+  [docs/index.md](docs/index.md) wraps the README's `intro` in a `.hero` block,
+  and the stylesheet centers its title, the paragraph right after it (the
+  badges), and its blockquote (the tagline), so keep them in that order. The
+  `glightbox` plugin zooms an image on click; the README's hero opts out with
+  `class="off-glb"`. cocoa's docs share the stylesheet, overrides, and theme
+  settings, so a change to how one site looks goes to the other too. Zensical
+  runs its own versions of the plugins listed there and silently skips any it
+  lacks: so far just `git-revision-date-localized`, so the footer's "Last
   updated" line ([copyright.html](overrides/partials/copyright.html)) stays empty
   until Zensical ships it. It caches builds in `.cache/` and doesn't notice when
   the docs dependencies change, so run `zensical build --clean` after upgrading
