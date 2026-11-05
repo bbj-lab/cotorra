@@ -147,7 +147,9 @@ prevent the need to maintain multiple similar configurations.
 ## Training / tuning
 
 The `train` command supports any model architecture compatible with Hugging
-Face's `transformers` library [@Wol20], and offers configurable:
+Face's `transformers` library [@Wol20]. It provides pre-configured Llama 3.2
+[@Gra24], Gemma 3 [@Kam25], and Qwen 3 [@Yan25] architectures in two sizing
+regimes (~8M & ~75M parameters) for ease of use. It also offers:
 
 - customized loss functions (including a inspired quantile token loss _a la_
   @Zau25),
