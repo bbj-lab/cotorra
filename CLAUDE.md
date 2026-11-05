@@ -562,9 +562,10 @@ blocks are pasted `COLUMNS=75 cotorra <command> --help` output, to repaste when 
 flag changes; `docs/api/` renders docstrings via mkdocstrings. The end-to-end dev
 workflow (cocoa → tune → score) is in
 [docs/recipes/development-workflow.md](docs/recipes/development-workflow.md).
-[docs/recipes/mimic-iv-demo.md](docs/recipes/mimic-iv-demo.md) runs train → tune
-→ extract → rep-based-score on the public MIMIC-IV demo, with the shipped configs
-and a few overrides, and quotes what they make of it (parameter count, losses,
-Optuna's trials, AUC intervals, timings, warnings), so rerun it after changing a
-shipped config, a loss, the tuner, or the scorers, without a Hugging Face token,
-as the public would.
+[docs/recipes/mimic-iv-demo.md](docs/recipes/mimic-iv-demo.md) re-cuts cocoa's
+public MIMIC-IV demo at 6 hours and runs train → extract → rep-based-score →
+baseline-score on it (tune is left to its next steps, for slower laptops), with
+the shipped configs and a few overrides, and quotes what they make of it
+(parameter count, losses, AUC intervals, timings, warnings), so rerun it after
+changing a shipped config, a loss, the scorers or the baselines, or cocoa's demo
+(whose timelines it counts), without a Hugging Face token, as the public would.

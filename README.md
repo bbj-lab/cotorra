@@ -64,7 +64,7 @@ Each stage of the pipeline is a `cotorra` command, driven by a YAML config:
 train / tune  →  extract  →  rep-based-score
                ↘  generative-score
 
-baseline-score  (no model)
+baseline-score (transformer-free)
 ```
 
 The [documentation](https://cotorra.readthedocs.io/latest/) covers:
