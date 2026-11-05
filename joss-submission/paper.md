@@ -65,7 +65,7 @@ sequences capture a wide variety of important events during a patient's stay,
 such as vitals measurements, lab tests, medicine administration, intrahospital
 transfers, continuous kidney replacement therapy [@Tei25], respiratory support
 [@Hoh25], changes in code status [@Ste17], proning [@Gue20], estimated sequential
-organ failure assessment (SOFA) scores [@Sin16], _inter alia_.
+organ failure assessment (SOFA) scores [@Vin96], _inter alia_.
 
 Given a trained model, inference for downstream events on partially completed
 novel sequences typically proceeds in one of the following ways (see Figure
@@ -96,10 +96,10 @@ novel sequences typically proceeds in one of the following ways (see Figure
    @Bur25, and @Cha26 for examples.
 
 Cotorra supports all three types of inference, along with training and
-hyperparameter tuning, and does so via a configurable CLI interface. The library began with code originally developed in 2025
-[@Bur25; @Bur26] and has been continuously extended to support work in generative
-inference [@Sol26], tokenization best practices [@Lee26], and federated learning
-[@Bur26b].
+hyperparameter tuning, and does so via a configurable command-line interface. The
+library began with code originally developed in 2025 [@Bur25; @Bur26] and has
+been continuously extended to support work in generative inference [@Sol26],
+tokenization best practices [@Lee26], and federated learning [@Bur26b].
 
 ![The three types of inference supported by `cotorra`.\label{fig:inference}](img/inference.pdf)
 
@@ -107,16 +107,15 @@ inference [@Sol26], tokenization best practices [@Lee26], and federated learning
 
 Generative event models, or foundation model on tokenized event sequences, have
 generated a great deal of excitement in the research community for their
-promising performance and resilience to distribution shift. In healthcare, they 
-holistically encode a patient’s hospital admission and could be used to
-overcome some of the challenges associated with fragmented model deployment
-[@Ram26]. Outside of medicine, they have found applications in recommender
-systems [@Zha24; @Li26] and finance [@Dou26]. However, they have yet to be widely
-adopted or deployed in real-world scenarios [@Wor23b; @Guo26]. These models
-require data preprocessing and training to achieve their
-promised benefits. Configurable, open source tools to prepare data, train models,
-and perform inference lower the barrier to entry and empower
-potential practitioners.
+promising performance and resilience to distribution shift. In healthcare, they
+holistically encode a patient’s hospital admission and could be used to overcome
+some of the challenges associated with fragmented model deployment [@Ram26].
+Outside of medicine, they have found applications in recommender systems [@Zha24;
+@Li26] and finance [@Dou26]. However, they have yet to be widely adopted or
+deployed in real-world scenarios [@Wor23b; @Guo26]. These models require data
+preprocessing and training to achieve their promised benefits. Configurable, open
+source tools to prepare data, train models, and perform inference lower the
+barrier to entry and empower potential practitioners.
 
 # State of the field
 
@@ -129,7 +128,7 @@ Vector Institute's [odyssey](https://github.com/VectorInstitute/odyssey) library
 grew out of EHRMamba [@Fal25]; it takes MEDS event streams as input. The Shah
 lab's [femr](https://github.com/som-shahlab/femr) library grew out of work on the
 MOTOR [@Ste24] paper. However, at the time of writing, the most recent commit to
-the default / main branch occurred over a year ago.
+the default (main) branch occurred over a year ago.
 
 # Software design
 
