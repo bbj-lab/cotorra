@@ -5,6 +5,7 @@
 import importlib.metadata
 import json
 import pathlib
+import platform
 import re
 import shutil
 import sys
@@ -40,6 +41,7 @@ def test_top_level_help_lists_every_pipeline_stage():
     assert result.exit_code == 0
     for command in COMMANDS:
         assert command in result.output
+    assert "--version" in click.unstyle(result.output)
 
 
 @pytest.mark.parametrize("command", COMMANDS)
@@ -701,6 +703,24 @@ def test_the_top_level_help_names_the_installed_version():
     result = runner.invoke(app, ["--help"], env={"COLUMNS": "200"})
     assert result.exit_code == 0
     assert f"(v{importlib.metadata.version('cotorra')})" in result.output
+
+
+def test_version_flag_prints_what_a_bug_report_needs_and_exits():
+    """cotorra's version first, then python's, torch's cuda build, the
+    accelerator, and each required dependency's version, but none from the
+    extras; the flag runs no command"""
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    lines = click.unstyle(result.output).splitlines()
+    assert lines[0].split() == ["cotorra", importlib.metadata.version("cotorra")]
+    found = dict(line.split(maxsplit=1) for line in lines)
+    assert found["python"] == platform.python_version()
+    assert found["platform"] == platform.platform()
+    assert {"cuda", "accelerator"} <= found.keys()
+    for name in ("torch", "cocoa-tokenizer"):
+        assert found[name] == importlib.metadata.version(name)
+    assert "not installed" not in found.values()
+    assert "pytest" not in found  # an optional dependency, of the test extra
 
 
 def test_main_runs_the_app(monkeypatch, capsys):

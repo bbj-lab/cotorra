@@ -54,8 +54,8 @@ or the public MIMIC-IV demo.
 [Search the existing issues](https://github.com/bbj-lab/cotorra/issues) first. If
 yours is new, open one, and for a bug include:
 
-- your Cotorra (`pip show cotorra`), Python, and PyTorch versions, and your GPU
-  and the CUDA version PyTorch was built for, if you have one
+- the output of `cotorra --version`, which lists the versions of Cotorra, its
+  dependencies, and Python, the CUDA version PyTorch was built for, and your GPU
 - the command you ran, with any configs and overrides you passed
 - the full traceback, and what you expected to happen
 

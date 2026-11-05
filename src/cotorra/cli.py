@@ -5,8 +5,11 @@ CLI for cotorra - configurable training for generative event models
 """
 
 import pathlib
+import platform
+import re
 import time
-from importlib.metadata import version
+from collections import Counter
+from importlib.metadata import PackageNotFoundError, requires, version
 from typing import Annotated, Optional
 
 import typer
@@ -42,6 +45,61 @@ Overrides = Annotated[
         show_default=False,
     ),
 ]
+
+
+def show_versions(show: bool) -> None:
+    """
+    print the versions of cotorra, python, and each dependency cotorra requires,
+    with the cuda that torch was built for and the accelerator it finds, and exit;
+    for `--version`, so a bug report can paste them
+    """
+    if not show:
+        return
+    import torch as t  # loaded already, by the stages imported above
+
+    if t.cuda.is_available():
+        gpus = Counter(map(t.cuda.get_device_name, range(t.cuda.device_count())))
+        accelerator = ", ".join(f"{n} x {gpu}" for gpu, n in gpus.items())
+    elif t.backends.mps.is_available():
+        accelerator = "mps"
+    else:
+        accelerator = "none"
+    found = {
+        "cotorra": __version__,
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "cuda": t.version.cuda or "none",
+        "accelerator": accelerator,
+    }
+    for requirement in requires("cotorra") or ():
+        spec, _, marker = requirement.partition(";")
+        if "extra" in marker:  # an optional dependency, of one of the extras
+            continue
+        name = re.match(r"[\w.-]+", spec.strip())[0]
+        try:
+            found[name] = version(name)
+        except PackageNotFoundError:
+            found[name] = "not installed"
+    width = max(map(len, found))
+    for name, v in found.items():
+        typer.echo(f"{name:<{width}}  {v}")
+    raise typer.Exit()
+
+
+@app.callback()
+def options(
+    show_version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=show_versions,
+            is_eager=True,
+            help="Show the versions of cotorra, its dependencies, Python, and CUDA, "
+            "and exit.",
+        ),
+    ] = False,
+) -> None:
+    """the options `cotorra` takes before a command"""
 
 
 @app.command()

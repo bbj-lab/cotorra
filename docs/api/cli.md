@@ -37,6 +37,10 @@ cotorra --help
 cotorra train --help
 ```
 
+`cotorra --version` prints the versions of cotorra, its dependencies, and Python,
+the CUDA version PyTorch was built for, and the GPU it finds, which a
+[bug report](https://github.com/bbj-lab/cotorra/issues/new/choose) asks for.
+
 ## Typical usage
 
 Train a model, extract its representations, and score held-out data:
