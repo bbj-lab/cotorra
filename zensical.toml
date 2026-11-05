@@ -44,6 +44,7 @@
             "navigation.footer",
             "content.code.copy",
             "content.code.annotate",
+            "content.footnote.tooltips",
             "toc.follow",
             "search.highlight",
         ]
@@ -78,6 +79,9 @@
     # until it does, so pages carry no "Last updated" line for now
     [project.plugins.git-revision-date-localized]
         fallback_to_build_date = true
+
+    # zooms an image on click; the README's hero opts out with class off-glb
+    [project.plugins.glightbox]
 
     [project.plugins.mkdocstrings.handlers.python]
         paths = [ "src" ]

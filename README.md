@@ -1,7 +1,7 @@
 <!-- --8<-- [start:intro] -->
 
 <p align="center">
-<img src="https://raw.githubusercontent.com/burkh4rt/cotorra/master/img/cotorra.png" alt="friendly parrot" width="400" />
+<img src="https://raw.githubusercontent.com/burkh4rt/cotorra/master/img/cotorra.png" alt="friendly parrot" width="400" class="off-glb" />
 </p>
 
 # Cotorra: a configurable trainer

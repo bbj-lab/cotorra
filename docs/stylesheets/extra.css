@@ -47,8 +47,11 @@
   --md-primary-fg-color--dark: #800000;
 }
 
+/* The accent marks a link, or a nav entry, under the pointer. Links are maroon
+   and already underlined, so a maroon accent changed nothing; dark brick
+   does. */
 [data-md-color-accent="custom"] {
-  --md-accent-fg-color: #800000;
+  --md-accent-fg-color: #643335; /* dark brick */
   --md-accent-fg-color--transparent: #d9d9d9;
 }
 
@@ -113,4 +116,84 @@ h1 {
 
 .md-typeset h1 {
   font-weight: 700;
+}
+
+/* A table's first column holds names (a field, a key, a command). The theme lets
+   inline code break anywhere, so a long description column squeezes the names
+   into fragments; keeping them on one line sizes the column to the longest. */
+.md-typeset table:not([class]) td:first-child {
+  white-space: nowrap;
+}
+
+/* The home page opens with the README's intro, which index.md wraps in a .hero
+   block. Its title, badges and tagline sit centered under the image, and the
+   tagline, a blockquote in the README, reads as a subtitle. */
+.md-typeset .hero > h1,
+.md-typeset .hero > h1 + p {
+  text-align: center;
+}
+
+/* The title's permalink would push it off center. */
+.md-typeset .hero > h1 .headerlink {
+  display: none;
+}
+
+.md-typeset .hero > blockquote {
+  padding: 0;
+  border: none;
+  font-size: 1.1em;
+  text-align: center;
+}
+
+/* A card's icon is maroon, and so is its border under the pointer, where the
+   theme only lifts the card with a shadow. */
+.md-typeset .grid.cards .twemoji.lg {
+  color: var(--md-primary-fg-color);
+}
+
+.md-typeset .grid.cards > ul > li:is(:hover, :focus-within) {
+  border-color: var(--md-primary-fg-color);
+}
+
+/* Admonitions take UChicago colors, as the visualizer's lanes do, in place of
+   the theme's. Each type sets one, which tints its box at 10% and paints its
+   icon and chevron; an alias (hint, faq) takes the default, lake, as it takes
+   the theme's default blue. mkdocstrings' source boxes keep their greys. */
+.md-typeset :is(.admonition, details) {
+  --admonition-color: #007396; /* lake, for note */
+}
+
+/* prettier-ignore */
+.md-typeset :is(.admonition, details) {
+  &.abstract { --admonition-color: #002a3a; } /* dark lake */
+  &.info { --admonition-color: #3eb1c8; } /* light lake */
+  &.tip { --admonition-color: #275d38; } /* forest */
+  &.success { --admonition-color: #789d4a; } /* ivy */
+  &.question { --admonition-color: #86647a; } /* light violet */
+  &.warning { --admonition-color: #cc8a00; } /* dark goldenrod */
+  &.failure { --admonition-color: #b46a55; } /* light brick */
+  &.danger { --admonition-color: #a4343a; } /* brick */
+  &.bug { --admonition-color: #a9431e; } /* dark terracotta */
+  &.example { --admonition-color: #59315f; } /* violet */
+  &.quote { --admonition-color: #737373; } /* dark greystone */
+}
+
+.md-typeset :is(.admonition, details):not(.mkdocstrings-source) {
+  background-color: color-mix(in srgb, var(--admonition-color) 10%, transparent);
+
+  & > :is(.admonition-title, summary)::before {
+    background-color: var(--admonition-color);
+  }
+
+  & > :is(.admonition-title, summary)::after {
+    color: var(--admonition-color);
+  }
+}
+
+/* Images that zoom on click (glightbox wraps them in a link; the README's hero
+   opts out with off-glb) are screenshots, mostly of white pages, so a hairline
+   border keeps them from running into the page. */
+.md-typeset a.glightbox img {
+  border: 0.05rem solid var(--md-default-fg-color--lightest);
+  border-radius: 0.2rem;
 }

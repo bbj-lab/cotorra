@@ -1,11 +1,25 @@
 ---
 hide:
     - navigation
+    - toc
 ---
+
+<div class="hero" markdown>
 
 --8<-- "README.md:intro"
 
+</div>
+
 <div class="grid cards" markdown>
+
+- :material-database-import:{ .lg .middle } **Inputs**
+
+    ***
+
+    Start from what cocoa writes: tokenized timelines, the learned vocabulary,
+    subject splits, and the winnowed tables that extraction and scoring read.
+
+    [:octicons-arrow-right-24: Inputs](guide/inputs.md)
 
 - :material-school:{ .lg .middle } **Train**
 
@@ -43,6 +57,15 @@ hide:
     public MIMIC-IV demo to the development workflow and transfer learning.
 
     [:octicons-arrow-right-24: Recipes](recipes/index.md)
+
+- :material-console:{ .lg .middle } **Reference**
+
+    ***
+
+    Every `cotorra` command's options, and the Python classes behind each stage,
+    from their docstrings.
+
+    [:octicons-arrow-right-24: CLI reference](api/cli.md)
 
 </div>
 
