@@ -12,6 +12,10 @@ build:
     # (zensical doesn't run that plugin yet; see zensical.toml)
     post_checkout:
       - git fetch --unshallow || true
+    # with neither a sphinx nor a mkdocs key, RTD makes no virtualenv and ignores
+    # a python.install block, so the install is a job of its own
+    install:
+      - pip install ".[docs]"
     build:
       html:
         - zensical build
@@ -19,9 +23,3 @@ build:
       # Read the Docs publishes what's in $READTHEDOCS_OUTPUT/html
       - mkdir -p $READTHEDOCS_OUTPUT/html/
       - cp --recursive site/* $READTHEDOCS_OUTPUT/html/
-
-python:
-  install:
-    - path: .
-      extra_requirements:
-        - docs
