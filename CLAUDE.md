@@ -515,9 +515,9 @@ time-based RoPE under flash attention (see the gotcha below), and refuses
 ## Build, docs, release
 
 ```sh
-# docs (mkdocs-material; config in mkdocs.yml, sources in docs/)
-mkdocs build
-mkdocs serve --dev-addr 127.0.0.1:8001
+# docs (zensical; config in zensical.toml, sources in docs/)
+zensical build [--strict]          # --strict fails on a broken link or anchor
+zensical serve --dev-addr 127.0.0.1:8001
 
 # release: bump pyproject.toml `version`, commit, then push a signed tag for it
 git tag -s vXX.X.X -m "message"
@@ -569,3 +569,27 @@ the shipped configs and a few overrides, and quotes what they make of it
 (parameter count, losses, AUC intervals, timings, warnings), so rerun it after
 changing a shipped config, a loss, the scorers or the baselines, or cocoa's demo
 (whose timelines it counts), without a Hugging Face token, as the public would.
+
+The docs build with [Zensical](https://zensical.org) from
+[zensical.toml](zensical.toml), formatted like `pyproject.toml` (taplo, with
+4-space indents). Taplo sorts the keys between blank lines and comments, so a
+comment on a key goes inline or above its table. The theme is the `modern`
+variant, which draws the header and tabs in the page's colors, so
+[extra.css](docs/stylesheets/extra.css) paints them maroon itself, by redefining
+the page's colors inside them. It also swaps the theme's greys for UChicago's
+neutrals (black, the three greystones, white), taking light greystone at half
+strength, `#ececec`, for the larger surfaces. Admonitions take the UChicago
+colors of cocoa's visualizer, a link turns dark brick under the pointer, and a
+card on the home page has a maroon icon, and a maroon border under the pointer.
+[docs/index.md](docs/index.md) wraps the README's `intro` in a `.hero` block, and
+the stylesheet centers its title, the paragraph right after it (the badges), and
+its blockquote (the tagline), so keep them in that order. The `glightbox` plugin
+zooms an image on click; the README's hero opts out with `class="off-glb"`.
+cocoa's docs share the stylesheet, overrides, and theme settings, so a change to
+how one site looks goes to the other too. Zensical runs its own versions of the
+plugins listed there and silently skips any it lacks: so far just
+`git-revision-date-localized`, so the footer's "Last updated" line
+([copyright.html](overrides/partials/copyright.html)) stays empty until Zensical
+ships it. It caches builds in `.cache/` and doesn't notice when the docs
+dependencies change, so run `zensical build --clean` after upgrading them; a
+stale cache once passed a build that a clean one failed.

@@ -17,7 +17,7 @@
 }
 
 /* Medium is the heaviest weight we ship. The 500-700 range maps bold text
-   (Material requests 700) onto Medium without the browser synthesizing a
+   (the theme requests 700) onto Medium without the browser synthesizing a
    heavier faux-bold. */
 @font-face {
   font-family: "Gotham";
@@ -36,8 +36,8 @@
 }
 
 :root {
-  /* Material combines this with its own system fallbacks. Code font is
-     left unset so it falls back to Material's default monospace stack. */
+  /* The theme combines this with its own system fallbacks. Code font is
+     left unset so it falls back to the theme's default monospace stack. */
   --md-text-font: "Gotham";
 }
 
@@ -47,16 +47,33 @@
   --md-primary-fg-color--dark: #800000;
 }
 
+/* The accent marks a link, or a nav entry, under the pointer. Links are maroon
+   and already underlined, so a maroon accent changed nothing; dark brick
+   does. */
 [data-md-color-accent="custom"] {
-  --md-accent-fg-color: #800000;
+  --md-accent-fg-color: #643335; /* dark brick */
   --md-accent-fg-color--transparent: #d9d9d9;
 }
 
-/* The greys carry neutral surfaces, muted text and dividers. */
+/* The greys are UChicago's neutrals: black, dark greystone, greystone, light
+   greystone and white, in place of the theme's translucent blacks and its own
+   code greys. Light greystone is too heavy for the larger surfaces (code, a
+   table row under the pointer, the copyright strip), which take it at half
+   strength over white, #ececec, as the visualizer's soft grid lines do. */
 [data-md-color-scheme="default"] {
+  --md-default-fg-color: #000000; /* black */
   --md-default-fg-color--light: #737373; /* dark greystone */
   --md-default-fg-color--lighter: #a6a6a6; /* greystone */
-  --md-default-fg-color--lightest: #d9d9d9; /* light grey */
+  --md-default-fg-color--lightest: #d9d9d9; /* light greystone */
+  --md-code-fg-color: #000000; /* black */
+  --md-code-bg-color: #ececec; /* light greystone, half strength */
+  --md-code-bg-color--light: rgba(236, 236, 236, 0.7);
+  --md-code-bg-color--lighter: rgba(236, 236, 236, 0.3);
+  --md-typeset-table-color: #d9d9d9; /* light greystone */
+  --md-typeset-table-color--light: #ececec; /* light greystone, half strength */
+  --md-typeset-kbd-color: #ffffff; /* white */
+  --md-typeset-kbd-accent-color: #ffffff; /* white */
+  --md-typeset-kbd-border-color: #a6a6a6; /* greystone */
   --md-code-hl-keyword-color: #007396;
   --md-code-hl-string-color: #275d38;
   --md-code-hl-special-color: #a4343a;
@@ -64,10 +81,33 @@
   --md-code-hl-constant-color: #59315f;
 }
 
-/* Last-updated line in the footer copyright block, in muted small type. */
+/* The header, and the tabs under it, wear maroon. The modern variant draws
+   them in the page's colors, so inside them those turn to white on maroon,
+   which carries to the title, the search button, the repository link and the
+   active tab's underline. Search opens in a dialog outside the header, which
+   keeps the page's colors. */
+.md-header,
+.md-tabs {
+  --md-default-fg-color: #ffffff;
+  --md-default-fg-color--light: rgba(255, 255, 255, 0.7);
+  --md-default-fg-color--lighter: rgba(255, 255, 255, 0.3);
+  --md-default-fg-color--lightest: rgba(255, 255, 255, 0.12);
+  --md-default-bg-color: var(--md-primary-fg-color);
+  --md-default-bg-color--light: var(--md-primary-fg-color);
+  --md-accent-fg-color: #ffffff; /* focus rings, which maroon would hide */
+  color: var(--md-primary-bg-color);
+  background-color: var(--md-primary-fg-color);
+}
+
+/* The copyright strip at the foot of each page. */
+.md-footer-meta {
+  background-color: #ececec; /* light greystone, half strength */
+}
+
+/* Last-updated line in the copyright strip, in small type. */
 .md-copyright__revision {
   font-size: 0.6rem;
-  color: var(--md-footer-fg-color--lighter);
+  color: var(--md-default-fg-color--light);
 }
 
 h1 {
@@ -76,4 +116,84 @@ h1 {
 
 .md-typeset h1 {
   font-weight: 700;
+}
+
+/* A table's first column holds names (a field, a key, a command). The theme lets
+   inline code break anywhere, so a long description column squeezes the names
+   into fragments; keeping them on one line sizes the column to the longest. */
+.md-typeset table:not([class]) td:first-child {
+  white-space: nowrap;
+}
+
+/* The home page opens with the README's intro, which index.md wraps in a .hero
+   block. Its title, badges and tagline sit centered under the image, and the
+   tagline, a blockquote in the README, reads as a subtitle. */
+.md-typeset .hero > h1,
+.md-typeset .hero > h1 + p {
+  text-align: center;
+}
+
+/* The title's permalink would push it off center. */
+.md-typeset .hero > h1 .headerlink {
+  display: none;
+}
+
+.md-typeset .hero > blockquote {
+  padding: 0;
+  border: none;
+  font-size: 1.1em;
+  text-align: center;
+}
+
+/* A card's icon is maroon, and so is its border under the pointer, where the
+   theme only lifts the card with a shadow. */
+.md-typeset .grid.cards .twemoji.lg {
+  color: var(--md-primary-fg-color);
+}
+
+.md-typeset .grid.cards > ul > li:is(:hover, :focus-within) {
+  border-color: var(--md-primary-fg-color);
+}
+
+/* Admonitions take UChicago colors, as the visualizer's lanes do, in place of
+   the theme's. Each type sets one, which tints its box at 10% and paints its
+   icon and chevron; an alias (hint, faq) takes the default, lake, as it takes
+   the theme's default blue. mkdocstrings' source boxes keep their greys. */
+.md-typeset :is(.admonition, details) {
+  --admonition-color: #007396; /* lake, for note */
+}
+
+/* prettier-ignore */
+.md-typeset :is(.admonition, details) {
+  &.abstract { --admonition-color: #002a3a; } /* dark lake */
+  &.info { --admonition-color: #3eb1c8; } /* light lake */
+  &.tip { --admonition-color: #275d38; } /* forest */
+  &.success { --admonition-color: #789d4a; } /* ivy */
+  &.question { --admonition-color: #86647a; } /* light violet */
+  &.warning { --admonition-color: #cc8a00; } /* dark goldenrod */
+  &.failure { --admonition-color: #b46a55; } /* light brick */
+  &.danger { --admonition-color: #a4343a; } /* brick */
+  &.bug { --admonition-color: #a9431e; } /* dark terracotta */
+  &.example { --admonition-color: #59315f; } /* violet */
+  &.quote { --admonition-color: #737373; } /* dark greystone */
+}
+
+.md-typeset :is(.admonition, details):not(.mkdocstrings-source) {
+  background-color: color-mix(in srgb, var(--admonition-color) 10%, transparent);
+
+  & > :is(.admonition-title, summary)::before {
+    background-color: var(--admonition-color);
+  }
+
+  & > :is(.admonition-title, summary)::after {
+    color: var(--admonition-color);
+  }
+}
+
+/* Images that zoom on click (glightbox wraps them in a link; the README's hero
+   opts out with off-glb) are screenshots, mostly of white pages, so a hairline
+   border keeps them from running into the page. */
+.md-typeset a.glightbox img {
+  border: 0.05rem solid var(--md-default-fg-color--lightest);
+  border-radius: 0.2rem;
 }

@@ -1,7 +1,7 @@
 <!-- --8<-- [start:intro] -->
 
 <p align="center">
-<img src="https://raw.githubusercontent.com/burkh4rt/cotorra/master/img/cotorra.png" alt="friendly parrot" width="400" />
+<img src="https://raw.githubusercontent.com/burkh4rt/cotorra/master/img/cotorra.png" alt="friendly parrot" width="400" class="off-glb" />
 </p>
 
 # Cotorra: a configurable trainer
@@ -208,8 +208,8 @@ srun -p gpuq \
 
 Make docs:
 ```
-mkdocs build
-mkdocs serve --dev-addr 127.0.0.1:8002
+zensical build
+zensical serve --dev-addr 127.0.0.1:8002
 ```
 
 Make tag and send to pypi and testpypi (pushing a `v*` tag runs

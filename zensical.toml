@@ -1,0 +1,94 @@
+# the docs' config, for zensical (https://zensical.org/docs/setup/basics/)
+
+[project]
+    extra_css        = [ "stylesheets/extra.css" ]
+    repo_name        = "bbj-lab/cotorra"
+    repo_url         = "https://github.com/bbj-lab/cotorra"
+    site_description = "Configurable trainer for generative event models"
+    site_name        = "Cotorra"
+    site_url         = "https://cotorra.readthedocs.io/"
+
+    nav = [
+        { "Home" = "index.md" },
+        { "User Guide" = [
+            { "Inputs" = "guide/inputs.md" },
+            { "Training" = "guide/training.md" },
+            { "Packing Records" = "guide/packing.md" },
+            { "Secondary Heads" = "guide/secondary-heads.md" },
+            { "Extraction" = "guide/extraction.md" },
+            { "Scoring" = "guide/scoring.md" },
+            { "Configuration" = "guide/configuration.md" },
+        ] },
+        { "API Reference" = [
+            { "CLI" = "api/cli.md" },
+            { "Training" = "api/training.md" },
+            { "Extraction" = "api/extraction.md" },
+            { "Scoring" = "api/scoring.md" },
+        ] },
+        { "Recipes" = [
+            { "Overview" = "recipes/index.md" },
+            { "MIMIC-IV Demo" = "recipes/mimic-iv-demo.md" },
+            { "Development Workflow" = "recipes/development-workflow.md" },
+            { "Transfer Learning" = "recipes/transfer-learning.md" },
+        ] },
+    ]
+
+    [project.theme]
+        custom_dir = "overrides"
+        favicon = "svg/emoji_u1f99c.svg"
+        features = [
+            "navigation.instant",
+            "navigation.tracking",
+            "navigation.tabs",
+            "navigation.top",
+            "navigation.footer",
+            "content.code.copy",
+            "content.code.annotate",
+            "content.footnote.tooltips",
+            "toc.follow",
+            "search.highlight",
+        ]
+        font = false # gotham, which extra.css self-hosts
+        logo = "svg/emoji_u1f99c.svg"
+        variant = "modern"
+
+        # extra.css defines the custom colors
+        [project.theme.palette]
+            accent  = "custom"
+            primary = "custom"
+            scheme  = "default"
+
+    # under check_paths, a missing section of README.md, which the docs pull in,
+    # fails the build
+    [project.markdown_extensions]
+        admonition                         = {}
+        attr_list                          = {}
+        footnotes                          = {}
+        md_in_html                         = {}
+        pymdownx.emoji.emoji_generator     = "zensical.extensions.emoji.to_svg"
+        pymdownx.emoji.emoji_index         = "zensical.extensions.emoji.twemoji"
+        pymdownx.highlight.anchor_linenums = true
+        pymdownx.snippets.base_path        = [ "." ]
+        pymdownx.snippets.check_paths      = true
+        pymdownx.superfences               = {}
+        toc.permalink                      = true
+
+    [project.plugins.callouts]
+
+    # zensical doesn't implement this plugin yet (it's on its roadmap) and skips it
+    # until it does, so pages carry no "Last updated" line for now
+    [project.plugins.git-revision-date-localized]
+        fallback_to_build_date = true
+
+    # zooms an image on click; the README's hero opts out with class off-glb
+    [project.plugins.glightbox]
+
+    [project.plugins.mkdocstrings.handlers.python]
+        paths = [ "src" ]
+
+        [project.plugins.mkdocstrings.handlers.python.options]
+            heading_level       = 3
+            show_bases          = true
+            show_root_heading   = false
+            show_root_toc_entry = false
+            show_source         = true
