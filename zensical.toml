@@ -16,7 +16,13 @@
             { "Packing Records" = "guide/packing.md" },
             { "Secondary Heads" = "guide/secondary-heads.md" },
             { "Extraction" = "guide/extraction.md" },
-            { "Scoring" = "guide/scoring.md" },
+            { "Scoring" = [
+                { "Overview" = "guide/scoring/index.md" },
+                { "Representation-Based" = "guide/scoring/rep-based.md" },
+                { "Generative" = "guide/scoring/generative.md" },
+                { "Supervised Finetuning" = "guide/scoring/supervised-finetuning.md" },
+                { "Baselines" = "guide/scoring/baselines.md" },
+            ] },
             { "Configuration" = "guide/configuration.md" },
         ] },
         { "API Reference" = [

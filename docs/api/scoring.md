@@ -1,30 +1,19 @@
 # Scoring
 
-Scoring turns a trained model into per-timeline outcome predictions. Cotorra
-offers two complementary approaches, both driven by a `scoring.yaml`
-configuration and both operating on the held-out split: generation-based scoring,
-which lets the model simulate the future directly, and representation-based
-scoring, which fits a classifier on extracted features. In each case the
-`target_tokens` glob patterns in the configuration select which vocabulary tokens
-count as outcomes of interest.
+Scoring turns a trained model into per-timeline outcome predictions on the
+held-out split. Two approaches have scorers of their own, both driven by a
+`scoring.yaml` configuration: representation-based scoring, which fits a
+classifier on extracted features, and generation-based scoring, which lets the
+model simulate the future directly. In each case the `target_tokens` glob
+patterns in the configuration select which vocabulary tokens count as outcomes of
+interest. A third, supervised finetuning, has none: a head trained beside the
+language-modelling head predicts the outcome, and the
+[`Extractor`](extraction.md#extractor) reads its predictions off.
 
 Against those predictions, Cotorra also scores [baselines](#baselinescorer) that
 need no trained model: classifiers fit on features of the timelines alone, from
-the same configuration.
-
-## `GenerativeScorer`
-
-`GenerativeScorer` predicts outcomes by _generating_ them. Using the
-[`quick_sco_re`](https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git)
-implementation of the SCORE and REACH algorithms, it autoregressively samples
-many possible continuations of each timeline and estimates the probability that a
-target outcome token occurs. For every outcome it reports three Monte-Carlo
-estimates — a raw occurrence score (`mc`), a SCOPE score, and a REACH score —
-computed only for subjects who have not already experienced the outcome.
-Generation runs asynchronously in batches and the scores are written to a parquet
-file.
-
-::: cotorra.scorer_generative.GenerativeScorer
+the same configuration. The [scoring guide](../guide/scoring/index.md) sets the
+four side by side.
 
 ## `RepBasedScorer`
 
@@ -47,6 +36,20 @@ and cross-validated). It exists so the choice of estimator can be passed as a
 plain string on the CLI or in configuration.
 
 ::: cotorra.scorer_rep_based.EstimatorType
+
+## `GenerativeScorer`
+
+`GenerativeScorer` predicts outcomes by _generating_ them. Using the
+[`quick_sco_re`](https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git)
+implementation of the SCORE and REACH algorithms, it autoregressively samples
+many possible continuations of each timeline and estimates the probability that a
+target outcome token occurs. For every outcome it reports three Monte-Carlo
+estimates — a raw occurrence score (`mc`), a SCOPE score, and a REACH score —
+computed only for subjects who have not already experienced the outcome.
+Generation runs asynchronously in batches and the scores are written to a parquet
+file.
+
+::: cotorra.scorer_generative.GenerativeScorer
 
 ## `BaselineScorer`
 

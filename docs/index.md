@@ -43,11 +43,11 @@ hide:
 
     ***
 
-    Produce outcome scores for tokens of interest — Monte-Carlo generative
-    scoring (MC / SCOPE / REACH) or a lightweight estimator on extracted
-    features.
+    Produce outcome scores for tokens of interest — from extracted features,
+    sampled trajectories (MC / SCOPE / REACH), or a supervised head — and
+    baselines that need no model to set them against.
 
-    [:octicons-arrow-right-24: Scoring](guide/scoring.md)
+    [:octicons-arrow-right-24: Scoring](guide/scoring/index.md)
 
 - :material-book-open-variant:{ .lg .middle } **Recipes**
 

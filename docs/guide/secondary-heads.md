@@ -184,6 +184,7 @@ To train one or more:
     `out.hidden_states[-1]` from a forward pass with `output_hidden_states=True`.
 
 Of the other stages, `cotorra extract` can add the heads' predictions to the
-feature tables it writes (see [Extraction](extraction.md)); `rep-based-score`
-fits on the features alone, and `generative-score` hasn't been tested with a
-`cotorra` model.
+feature tables it writes (see [Extraction](extraction.md)), which is how
+[supervised finetuning](scoring/supervised-finetuning.md) scores outcomes;
+`rep-based-score` fits on the features alone, and `generative-score` hasn't been
+tested with a `cotorra` model.

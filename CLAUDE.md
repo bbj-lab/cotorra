@@ -492,23 +492,30 @@ trailing `# breakpoint()`. Leave them; they're for interactive debugging.
   `python -m build` keeps `gen`, and PyPI rejects the upload. Once `quick-sco-re`
   is on PyPI, pin it by version and `gen` ships with no change to the workflow.
 - Keep the user guide in [docs/guide/](docs/guide/) (a page per stage, plus
-  packing, secondary heads, and configuration; it documents every config key),
+  packing, secondary heads, and configuration; scoring is a section of its own,
+  [docs/guide/scoring/](docs/guide/scoring/): an overview holding the shared
+  `scoring.yaml` keys and a page each for representation-based, generative,
+  supervised-finetuning, and baseline scoring; it documents every config key),
   the recipes in [docs/recipes/](docs/recipes/), the CLI reference in
   [docs/api/cli.md](docs/api/cli.md) (whose help blocks are pasted
   `COLUMNS=75 cotorra <command> --help` output, to repaste when a flag changes;
   the rest of `docs/api/` renders docstrings via mkdocstrings),
   [README.md](README.md), and the shipped configs in sync when behavior changes.
-  The recipes, a page each with its `nav` entry, link the guide relatively
-  (`../guide/<page>.md`), which works on GitHub and the site alike. Top-level
-  `recipes/` holds only forwarding notes for links to the old paths (v26.11.0's
-  README links `recipes/mimic-iv-demo.md` on GitHub). `docs/index.md` includes
-  three sections of `README.md` (`intro`, `install`, `references`, each between
-  `<!-- --8<-- [start:<name>] -->` and `[end:<name>]` comments), so editing them
-  changes the docs home page; snippets' `check_paths` fails the build if a marker
-  goes missing. The rest of the README, a landing page whose links into the docs
-  are absolute (`https://cotorra.readthedocs.io/latest/…`) since GitHub and PyPI
-  render it, isn't in the docs. The end-to-end dev workflow (cocoa → tune →
-  score) is in
+  The scoring overview's figure,
+  [docs/img/scoring-approaches.svg](docs/img/scoring-approaches.svg), is the JOSS
+  paper's Figure 1, converted from its PDF by `pdftocairo -svg`, which turns its
+  Gotham text into outlines so that it renders without the font; convert a
+  revised PDF the same way. The recipes, a page each with its `nav` entry, link
+  the guide relatively (`../guide/<page>.md`), which works on GitHub and the site
+  alike. Top-level `recipes/` holds only forwarding notes for links to the old
+  paths (v26.11.0's README links `recipes/mimic-iv-demo.md` on GitHub).
+  `docs/index.md` includes three sections of `README.md` (`intro`, `install`,
+  `references`, each between `<!-- --8<-- [start:<name>] -->` and `[end:<name>]`
+  comments), so editing them changes the docs home page; snippets' `check_paths`
+  fails the build if a marker goes missing. The rest of the README, a landing
+  page whose links into the docs are absolute
+  (`https://cotorra.readthedocs.io/latest/…`) since GitHub and PyPI render it,
+  isn't in the docs. The end-to-end dev workflow (cocoa → tune → score) is in
   [docs/recipes/development-workflow.md](docs/recipes/development-workflow.md).
   [docs/recipes/mimic-iv-demo.md](docs/recipes/mimic-iv-demo.md) re-cuts cocoa's
   public MIMIC-IV demo at 6 hours and runs train → extract → rep-based-score →

@@ -180,9 +180,7 @@ cotorra train \
 
 Send to randi:
 ```
-for d in data-raw processed; do
-	ln -s /gpfs/data/bbj-lab/users/burkh4rt/$d $d
-done
+for d in data-raw processed; do ln -s /gpfs/data/bbj-lab/users/burkh4rt/$d $d done
 ```
 ```
 rsync -avh \
