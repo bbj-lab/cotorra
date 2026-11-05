@@ -208,8 +208,8 @@ srun -p gpuq \
 
 Make docs:
 ```
-mkdocs build
-mkdocs serve --dev-addr 127.0.0.1:8002
+zensical build
+zensical serve --dev-addr 127.0.0.1:8002
 ```
 
 Make tag and send to pypi and testpypi (pushing a `v*` tag runs

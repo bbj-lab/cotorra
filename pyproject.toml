@@ -52,15 +52,15 @@
         Repository    = "https://github.com/bbj-lab/cotorra"
 
     [project.optional-dependencies]
-        all = [ "cotorra[dev,docs,test,demo]" ]
+        all  = [ "cotorra[dev,docs,test,demo]" ]
         demo = [ "cocoa-tokenizer[demo]>=26.11" ]
-        dev = [ "pip>=23.1", "ruff>=0.15" ]
+        dev  = [ "pip>=23.1", "ruff>=0.15" ]
+        # zensical builds the api pages through mkdocstrings, whose releases before
+        # 1.0.7 fail on the pymdown-extensions that zensical installs
         docs = [
-            "mkdocs>=1.6,<2",
-            "mkdocs-material>=9.5",
-            "mkdocstrings[python]>=0.26.1",
-            "mkdocs-callouts>=1.10",
-            "mkdocs-git-revision-date-localized-plugin>=0.7",
+            "zensical>=0.1.0",
+            "mkdocstrings>=1.0.7",
+            "mkdocstrings-python>=2",
         ]
         gen = [
             "quick-sco-re @ git+https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git",

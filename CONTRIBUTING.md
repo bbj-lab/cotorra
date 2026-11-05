@@ -97,7 +97,7 @@ As you work:
   changed command's `COLUMNS=75 cotorra <command> --help` into its block), the
   [recipes](docs/recipes/), the [API docs](docs/api/), and the shipped configs. A
   new recipe or page of the guide also needs a `nav` entry in
-  [mkdocs.yml](mkdocs.yml).
+  [zensical.toml](zensical.toml).
 - **Match the surrounding style.** Ruff formats and lints the Python (line length
   88, double quotes); the code imports `torch as t` and logs through
   `self.logger` rather than `print`. Prettier wraps the Markdown, following

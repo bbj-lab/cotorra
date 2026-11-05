@@ -1,5 +1,5 @@
 # Read the Docs configuration file
-# See https://docs.readthedocs.io/en/stable/config-file/v2.html
+# See https://docs.readthedocs.com/platform/stable/intro/zensical.html
 
 version: 2
 
@@ -9,11 +9,16 @@ build:
     python: "3.12"
   jobs:
     # git-revision-date-localized needs full history; RTD clones shallow by default
+    # (zensical doesn't run that plugin yet; see zensical.toml)
     post_checkout:
       - git fetch --unshallow || true
-
-mkdocs:
-  configuration: mkdocs.yml
+    build:
+      html:
+        - zensical build
+    post_build:
+      # Read the Docs publishes what's in $READTHEDOCS_OUTPUT/html
+      - mkdir -p $READTHEDOCS_OUTPUT/html/
+      - cp --recursive site/* $READTHEDOCS_OUTPUT/html/
 
 python:
   install:
