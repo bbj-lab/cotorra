@@ -25,6 +25,8 @@ Everything is driven through the `cotorra` CLI
 ```
 train / tune   →  extract  →  rep-based-score
                ↘  generative-score
+
+baseline-score   (no model)
 ```
 
 - **train / tune** — fit a causal LM; write `mdl-<run_name>/` (HuggingFace
@@ -53,6 +55,12 @@ train / tune   →  extract  →  rep-based-score
   train/tuning features and labels and scores this one's `held_out`.
 - **generative-score** — Monte-Carlo sample trajectories to compute
   MC/SCOPE/REACH scores (does not need `extract`).
+- **baseline-score** — fit the same estimators on features of the timelines
+  alone, needing no model (`baselines.py`): `--baseline counts`/`one-hot`, a bag
+  of `tokens_past`, writing `scores-bag-of-tokens-<featurization>-<estimator>`,
+  or `tsfresh`, tsfresh's minimal features of `meds.parquet` up to the threshold,
+  writing `scores-tsfresh-<estimator>`; `--training-home` as for
+  `rep-based-score`.
 
 ## Architecture
 
@@ -72,8 +80,10 @@ the classes.
 | [extractor.py](src/cotorra/extractor.py)                 | `Extractor`                             | hidden-state and head-prediction extraction                  |
 | [scorer_rep_based.py](src/cotorra/scorer_rep_based.py)   | `RepBasedScorer`, `EstimatorType`       | estimator-on-features scoring                                |
 | [scorer_generative.py](src/cotorra/scorer_generative.py) | `GenerativeScorer`                      | SCOPE/REACH generative scoring                               |
+| [baselines.py](src/cotorra/baselines.py)                 | `BagOfTokensScorer`, `TsfreshScorer`    | baselines: estimators on token bags or tsfresh features      |
 | [logger.py](src/cotorra/logger.py)                       | `Logger`                                | rich logging + bootstrap-CI eval summaries                   |
 | [util.py](src/cotorra/util.py)                           | —                                       | batching helpers, `bootstrap_ci`                             |
+| [openmp.py](src/cotorra/openmp.py)                       | —                                       | on macOS, re-runs the CLI (and pytest) with torch's libomp   |
 
 Inheritance matters: `Tuner` extends `Trainer`, which extends `Configurable`;
 `Loss` and `Logger` stand alone. Changing `Trainer.__init__` or `collate_fn`
@@ -306,6 +316,13 @@ Stages read from `--processed-data-home`. Expected files (produced by cocoa's
   anything else that gives the outcome away (`hours_to_end_time_past`,
   `end_time`, `s_total_duration`, the future): `Extractor.extract_final` writes
   the batch it reads back out beside the features.
+- `meds.parquet` — cocoa's collated rows (`subject_id`, `time`, `code`,
+  `numeric_value`, `text_value`), which only `TsfreshScorer` reads: each
+  subject's rows up to the last token of its inference row's `tokens_past`
+  (`baselines.past_meds`), the rows that past was tokenized from when the
+  threshold is a time. Like `BagOfTokensScorer`, which bags `tokens_past` alone,
+  it never reads an inference table's `tokens` or `times` past that cut: they
+  hold the whole timeline, future and all.
 
 `Loader` derives per-split `{split}_tokens_times.parquet` caches, adding
 `s_elapsed` and `hours_to_next_token` (the TNT target, nan on each record's last
@@ -461,6 +478,34 @@ time-based RoPE under flash attention (see the gotcha below), and refuses
   looks labels up in a per-token table (`label_to_cat`, `balanced_toi_flag`) has
   to clamp and mask them: a -100 index wraps around to a token from the end of
   the vocabulary.
+- **tsfresh spawns its workers.** `TsfreshScorer`'s `n_jobs` (tsfresh's; half the
+  CPUs by default) starts processes that, where Python spawns them (macOS, and
+  Linux from 3.14), import the calling script again, so a script without an
+  `if __name__ == "__main__":` guard recurses; the tests pass `n_jobs=0`, which
+  extracts in-process. tsfresh is imported inside `baselines.tsfresh_features`,
+  as importing it takes a second (half a minute the first time).
+- **On macOS, `cotorra` and pytest run themselves again.** LightGBM's and
+  XGBoost's macOS wheels link `@rpath/libomp.dylib`, which their rpaths resolve
+  to Homebrew's libomp, while torch loads the one in its `lib`. Without
+  Homebrew's, importing either booster fails; with it, a process holds two OpenMP
+  runtimes and segfaults in them: as a booster fits after torch was imported, or
+  as torch next trains after a booster was imported, so that one test module
+  importing a booster at collection took the whole suite down. Which crash a
+  command meets depends on its import order (`cli.py` importing `baselines`
+  before `extractor` spares `rep-based-score` its), so don't rely on it. The
+  dynamic linker reads `DYLD_LIBRARY_PATH` only as a process starts, so
+  [openmp.py](src/cotorra/openmp.py) re-execs the process with torch's `lib`
+  first on it: `cotorra.openmp:main` is the console script, re-running before it
+  imports `cotorra.cli` (whose `main` stays, unguarded, for `python -m`), and
+  `tests/conftest.py`'s `pytest_configure` re-runs pytest, having stopped
+  pytest's capture, whose files the new process would otherwise write to. Neither
+  re-runs under `COTORRA_OPENMP_RERUN` (which the re-run sets, so that an
+  interpreter macOS protects, dropping `DYLD_*`, can't loop it; a user may set it
+  too), under a debugger (`pydevd`) or in a Jupyter kernel; there
+  `conftest.boosters_usable` still skips the boosters' fits, though not torch's
+  crash after their import. Keep `openmp.py` to the standard library, as it runs
+  before anything that loads a booster. CI never runs macOS, so there only
+  `test_openmp.py`'s fakes exercise it; its one real re-run skips off macOS.
 - **`--resume-from-checkpoint` is safe to pass unconditionally**: `Trainer.train`
   falls back to training from scratch if no checkpoint is found.
 - **`processed` is a symlink** (`-> ../cocoa/processed`) and `output/`, `wandb/`,
@@ -517,9 +562,10 @@ blocks are pasted `COLUMNS=75 cotorra <command> --help` output, to repaste when 
 flag changes; `docs/api/` renders docstrings via mkdocstrings. The end-to-end dev
 workflow (cocoa → tune → score) is in
 [docs/recipes/development-workflow.md](docs/recipes/development-workflow.md).
-[docs/recipes/mimic-iv-demo.md](docs/recipes/mimic-iv-demo.md) runs train → tune
-→ extract → rep-based-score on the public MIMIC-IV demo, with the shipped configs
-and a few overrides, and quotes what they make of it (parameter count, losses,
-Optuna's trials, AUC intervals, timings, warnings), so rerun it after changing a
-shipped config, a loss, the tuner, or the scorers, without a Hugging Face token,
-as the public would.
+[docs/recipes/mimic-iv-demo.md](docs/recipes/mimic-iv-demo.md) re-cuts cocoa's
+public MIMIC-IV demo at 6 hours and runs train → extract → rep-based-score →
+baseline-score on it (tune is left to its next steps, for slower laptops), with
+the shipped configs and a few overrides, and quotes what they make of it
+(parameter count, losses, AUC intervals, timings, warnings), so rerun it after
+changing a shipped config, a loss, the scorers or the baselines, or cocoa's demo
+(whose timelines it counts), without a Hugging Face token, as the public would.

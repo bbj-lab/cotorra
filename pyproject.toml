@@ -20,10 +20,12 @@
         "polars>=1.36.1",
         "rich>=13.8",
         "scikit-learn>=1.8",
+        "scipy>=1.14",
         "torch>=2.6",
         "torch>=2.8; sys_platform == 'darwin'",
         "tqdm>=4.66.3",
         "transformers>=5.5.4",
+        "tsfresh>=0.21.1",
         "typer>=0.26",
         "xgboost>=1.7",
         "wandb>=0.17.2",
@@ -42,7 +44,7 @@
     version = "26.11.0"
 
     [project.scripts]
-        cotorra = "cotorra.cli:main"
+        cotorra = "cotorra.openmp:main"
 
     [project.urls]
         Documentation = "https://cotorra.readthedocs.io"
@@ -50,7 +52,8 @@
         Repository    = "https://github.com/bbj-lab/cotorra"
 
     [project.optional-dependencies]
-        all = [ "cotorra[dev,docs,test]" ]
+        all = [ "cotorra[dev,docs,test,demo]" ]
+        demo = [ "cocoa-tokenizer[demo]>=26.11" ]
         dev = [ "pip>=23.1", "ruff>=0.15" ]
         docs = [
             "mkdocs>=1.6,<2",

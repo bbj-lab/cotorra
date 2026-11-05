@@ -75,6 +75,13 @@ These tables are expected to include at least:
 
 The `cocoa winnow` command provides these.
 
+The tsfresh baseline (`cotorra baseline-score --baseline tsfresh`) reads one more
+table, the `meds.parquet` cocoa's collator writes, with a row for each event:
+`subject_id`, `time`, `code`, `numeric_value` and `text_value`. It takes each
+timeline's rows up to its threshold as the inference tables place it, so these
+need `subject_id` too, and the `times` of each timeline's tokens, both of which
+`cocoa winnow` writes.
+
 <!-- prettier-ignore-start -->
 > [!TIP]
 > For getting your data to this point, check out our configurable

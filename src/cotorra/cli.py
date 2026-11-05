@@ -13,6 +13,12 @@ import typer
 from rich import print
 from rich.console import Console
 
+from cotorra.baselines import (
+    BagOfTokensScorer,
+    Baseline,
+    BaselineEstimator,
+    TsfreshScorer,
+)
 from cotorra.extractor import Extractor
 from cotorra.scorer_rep_based import EstimatorType, RepBasedScorer
 from cotorra.trainer import Trainer
@@ -372,6 +378,106 @@ def rep_based_score(
         scorer.save_all(verbose=verbose)
         t1 = time.perf_counter()
         print(f"\n[green]✓[/green] Rep-based scoring completed in {t1 - t0:.2f}s.")
+        print(f"  Scores: [cyan]{scorer.output_home}[/cyan]")
+
+
+@app.command()
+def baseline_score(
+    scoring_config: Annotated[
+        Optional[pathlib.Path],
+        typer.Option(
+            "--scoring-config",
+            "-s",
+            help="Scoring configuration file (overrides default)",
+            show_default=False,
+        ),
+    ] = None,
+    processed_data_home: Annotated[
+        str,
+        typer.Option("--processed-data-home", "-p", help="Processed data directory"),
+    ] = ...,
+    output_home: Annotated[
+        Optional[str],
+        typer.Option(
+            "--output-home",
+            "-o",
+            help="Output directory for scores, defaults to processed-data-home",
+            show_default=False,
+        ),
+    ] = None,
+    training_home: Annotated[
+        Optional[str],
+        typer.Option(
+            "--training-home",
+            "-t",
+            help="Fit the estimator on the train and tuning splits here (transfer)",
+            show_default=False,
+        ),
+    ] = None,
+    baseline: Annotated[
+        Baseline,
+        typer.Option(
+            "--baseline",
+            "-b",
+            help="Features to fit on: counts or one-hot indicators of each "
+            "timeline's tokens before the threshold, or tsfresh's minimal features "
+            "of its meds.parquet rows before it",
+        ),
+    ] = Baseline.counts,
+    estimator_type: Annotated[
+        BaselineEstimator,
+        typer.Option("--estimator", "-e", help="Estimator to fit on the features"),
+    ] = BaselineEstimator.lightgbm,
+    n_jobs: Annotated[
+        Optional[int],
+        typer.Option(
+            "--n-jobs",
+            "-j",
+            help="Processes tsfresh extracts features in (0 for none but this "
+            "one), half the CPUs by default",
+            show_default=False,
+        ),
+    ] = None,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Verbose logging")
+    ] = False,
+    overrides: Overrides = None,
+) -> None:
+    """
+    Generate baseline scores for the token-based outcomes of interest, from
+    features of each timeline's past that need no trained model.
+    """
+    if n_jobs is not None and baseline is not Baseline.tsfresh:
+        raise typer.BadParameter(
+            "only the tsfresh baseline extracts in processes", param_hint="'--n-jobs'"
+        )
+
+    with console.status("[bold green]Baseline scoring on held-out data..."):
+        t0 = time.perf_counter()
+        dirs = dict(
+            scoring_cfg=scoring_config,
+            processed_data_home=processed_data_home,
+            output_home=output_home,
+            training_home=training_home,
+        )
+        scorer = (
+            TsfreshScorer(
+                **dirs,
+                estimator_type=estimator_type.value,
+                n_jobs=n_jobs,
+                overrides=overrides,
+            )
+            if baseline is Baseline.tsfresh
+            else BagOfTokensScorer(
+                **dirs,
+                featurization=baseline.value,
+                estimator_type=estimator_type.value,
+                overrides=overrides,
+            )
+        )
+        scorer.save_all(verbose=verbose)
+        t1 = time.perf_counter()
+        print(f"\n[green]✓[/green] Baseline scoring completed in {t1 - t0:.2f}s.")
         print(f"  Scores: [cyan]{scorer.output_home}[/cyan]")
 
 

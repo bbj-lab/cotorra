@@ -43,6 +43,17 @@ This installs the `cotorra` command. To see it run end to end on public data,
 follow the
 [MIMIC-IV demo](https://cotorra.readthedocs.io/latest/recipes/mimic-iv-demo/).
 
+On a Mac, LightGBM and XGBoost look for Homebrew's OpenMP runtime, while PyTorch
+brings its own: without Homebrew's, importing cotorra fails, and with it, a
+process holding both runtimes can crash. The `cotorra` command sees to this
+itself, starting again with PyTorch's runtime first on `DYLD_LIBRARY_PATH`. To
+import cotorra in Python of your own, such as a notebook, set that before Python
+starts:
+
+```sh
+export DYLD_LIBRARY_PATH="$(python -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib"
+```
+
 <!-- --8<-- [end:install] -->
 
 ## Usage
@@ -52,6 +63,8 @@ Each stage of the pipeline is a `cotorra` command, driven by a YAML config:
 ```
 train / tune  →  extract  →  rep-based-score
                ↘  generative-score
+
+baseline-score (transformer-free)
 ```
 
 The [documentation](https://cotorra.readthedocs.io/latest/) covers:
@@ -71,7 +84,8 @@ The [documentation](https://cotorra.readthedocs.io/latest/) covers:
 - [Scoring](https://cotorra.readthedocs.io/latest/guide/scoring/): outcome scores
   for held-out data, from an estimator fit on extracted features
   (`cotorra rep-based-score`), from sampled trajectories
-  (`cotorra generative-score`), or from a supervised head.
+  (`cotorra generative-score`), or from a supervised head; and baselines that
+  need no model (`cotorra baseline-score`).
 - [Configuration](https://cotorra.readthedocs.io/latest/guide/configuration/):
   the YAML config each command reads, and how to change its keys on the command
   line.

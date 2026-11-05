@@ -37,6 +37,7 @@ from rich.logging import RichHandler
 from cocoa.collator import Collator
 from cocoa.tokenizer import Tokenizer
 from cocoa.winnower import Winnower
+from cotorra import openmp
 
 if typing.TYPE_CHECKING:
     from cotorra.trainer import Trainer
@@ -44,8 +45,23 @@ if typing.TYPE_CHECKING:
 N_PATIENTS = 100
 
 
-# keyed by `EstimatorType` value; both boosting libraries ship their own
-# `libomp.dylib` and hit the clash described in `helpers.LIBOMP_HINT`
+def pytest_configure(config: pytest.Config) -> None:
+    """
+    on macOS, run the session again with torch's libomp the only one loaded, as
+    `cotorra.openmp` explains: collecting the test modules imports LightGBM and
+    XGBoost, and the first model trained afterwards would segfault. pytest has by
+    now pointed stdout and stderr at its capture files, which the new process
+    would write to, so its capture is stopped first, writing out what it holds
+    """
+    if (env := openmp.rerun_env()) is not None:
+        capture = config.pluginmanager.getplugin("capturemanager")
+        if capture is not None:
+            capture.stop_global_capturing()
+        openmp.rerun(env)
+
+
+# keyed by `EstimatorType` value; both boosting libraries load Homebrew's
+# `libomp.dylib` on macOS and hit the clash described in `helpers.LIBOMP_HINT`
 _BOOSTER_PROBES = {
     "lightGBM": """
 import numpy as np, torch, lightgbm as lgb
@@ -65,7 +81,9 @@ def boosters_usable() -> dict[str, bool]:
     """
     whether torch and each boosting library can be fit in one process here;
     tests that drive one skip with `helpers.LIBOMP_HINT` when it cannot, since
-    the failure mode is a segfault that would end the whole session. Probe
+    the failure mode is a segfault that would end the whole session. On macOS
+    they can once `pytest_configure` has re-run the session, so this is for the
+    sessions it doesn't (a debugger's, or one under `openmp.RERUN_FLAG`). Probe
     both: guarding only LightGBM left `--estimator XGBoost` to take the suite
     down as soon as its arm stopped raising before reaching `fit`.
     """

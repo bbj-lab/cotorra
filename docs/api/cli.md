@@ -15,13 +15,14 @@ Tokenized inputs are produced upstream by the
 | `cotorra extract`          | Extract hidden-state representations from a trained model.            |
 | `cotorra generative-score` | Score held-out timelines by autoregressive generation.                |
 | `cotorra rep-based-score`  | Score held-out timelines with a classifier fit on extracted features. |
+| `cotorra baseline-score`   | Score held-out timelines with a baseline needing no trained model.    |
 
 Every command accepts `--processed-data-home` / `-p` (the directory of tokenized
 inputs and intermediate artifacts) and an optional config file that overrides the
 packaged default for that stage (`-t` for training, `-e` for extraction, `-s` for
 scoring). Most also take `--output-home` / `-o` and `--verbose` / `-v`; the
 extraction and scoring commands additionally require `--model-home` / `-m`, the
-trained model to run.
+trained model to run (all but `baseline-score`, which needs none).
 
 To change individual config keys for one run, list them after the command's
 options, as in
@@ -62,6 +63,18 @@ fitting a classifier on extracted representations:
 cotorra generative-score \
     --processed-data-home ./processed/mimic \
     --model-home ./models/mdl-<run_name>
+```
+
+To set those scores against baselines that need no trained model, score the same
+outcomes from a bag of each timeline's tokens before the threshold (`counts` or
+`one-hot`), or from tsfresh's minimal features of its `meds.parquet` rows before
+it (`tsfresh`):
+
+```sh
+cotorra baseline-score \
+    --processed-data-home ./processed/mimic \
+    --baseline counts \
+    --estimator logistic
 ```
 
 ## Command reference
@@ -232,6 +245,58 @@ Each command's `--help`:
 │                                stic|logistic-z|log  for rep-based       │
 │                                istic-CV|logistic-C  scoring             │
 │                                V-z|XGBoost>         [default: lightGBM] │
+│    --verbose           -v                           Verbose logging     │
+│    --help              -h                           Show this message   │
+│                                                     and exit.           │
+╰─────────────────────────────────────────────────────────────────────────╯
+```
+
+### `cotorra baseline-score`
+
+```
+ Usage: cotorra baseline-score [OPTIONS] [overrides]...
+
+ Generate baseline scores for the token-based outcomes of interest, from
+ features of each timeline's past that need no trained model.
+
+╭─ Arguments ─────────────────────────────────────────────────────────────╮
+│   overrides      <str>  Config overrides: key=value sets a key, adding  │
+│                         it if need be, and ~key deletes one             │
+╰─────────────────────────────────────────────────────────────────────────╯
+╭─ Options ───────────────────────────────────────────────────────────────╮
+│    --scoring-config    -s      <path>               Scoring             │
+│                                                     configuration file  │
+│                                                     (overrides default) │
+│ *  --processed-data-…  -p      <str>                Processed data      │
+│                                                     directory           │
+│                                                     [required]          │
+│    --output-home       -o      <str>                Output directory    │
+│                                                     for scores,         │
+│                                                     defaults to         │
+│                                                     processed-data-home │
+│    --training-home     -t      <str>                Fit the estimator   │
+│                                                     on the train and    │
+│                                                     tuning splits here  │
+│                                                     (transfer)          │
+│    --baseline          -b      <counts|one-hot|tsf  Features to fit on: │
+│                                resh>                counts or one-hot   │
+│                                                     indicators of each  │
+│                                                     timeline's tokens   │
+│                                                     before the          │
+│                                                     threshold, or       │
+│                                                     tsfresh's minimal   │
+│                                                     features of its     │
+│                                                     meds.parquet rows   │
+│                                                     before it           │
+│                                                     [default: counts]   │
+│    --estimator         -e      <lightGBM|logistic|  Estimator to fit on │
+│                                XGBoost>             the features        │
+│                                                     [default: lightGBM] │
+│    --n-jobs            -j      <int>                Processes tsfresh   │
+│                                                     extracts features   │
+│                                                     in (0 for none but  │
+│                                                     this one), half the │
+│                                                     CPUs by default     │
 │    --verbose           -v                           Verbose logging     │
 │    --help              -h                           Show this message   │
 │                                                     and exit.           │
