@@ -18,9 +18,8 @@ import scipy.sparse as sp
 import sklearn as skl
 import tqdm
 import xgboost as xgb
-from omegaconf import OmegaConf
 
-from cotorra.configurable import Configurable
+from cotorra.configurable import Configurable, load_yaml
 
 
 class Featurization(str, enum.Enum):
@@ -213,7 +212,7 @@ class BaselineScorer(Configurable):
             if output_home is not None
             else self.processed_data_home
         ) / f"scores-{name}-{self.estimator_type.value}.parquet"
-        self.tkzr_cfg = OmegaConf.load(self.processed_data_home / "tokenizer.yaml")
+        self.tkzr_cfg = load_yaml(self.processed_data_home / "tokenizer.yaml")
         self.features = {}  # the baseline's own, a matrix for each split
         self.labels = {
             s: pl.scan_parquet(self.home(s) / f"{s}_for_inference.parquet")
@@ -353,7 +352,7 @@ class BagOfTokensScorer(BaselineScorer):
         # a column stands for a token id, which another vocabulary gives another
         # token, so an estimator fit on one vocabulary's bags misreads another's
         if self.training_home != self.processed_data_home and (
-            OmegaConf.load(self.training_home / "tokenizer.yaml").lookup
+            load_yaml(self.training_home / "tokenizer.yaml").lookup
             != self.tkzr_cfg.lookup
         ):
             raise ValueError(

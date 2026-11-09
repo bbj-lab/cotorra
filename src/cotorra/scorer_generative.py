@@ -13,7 +13,7 @@ import pathlib
 import numpy as np
 import polars as pl
 import tqdm
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from quick_sco_re import (
     GeneratedTrajectory,
     GenerationConfig,
@@ -25,7 +25,7 @@ from quick_sco_re import (
     score_trajectory,
 )
 
-from cotorra.configurable import Configurable
+from cotorra.configurable import Configurable, load_yaml
 
 
 def build_generation_config(
@@ -161,7 +161,7 @@ class GenerativeScorer(Configurable):
             else self.processed_data_home
         ) / f"scores-generative-{self.model_home.name}.parquet"
 
-        self.tkzr_cfg = OmegaConf.load(self.processed_data_home / "tokenizer.yaml")
+        self.tkzr_cfg = load_yaml(self.processed_data_home / "tokenizer.yaml")
         self.vocab: dict[str, int] = {
             str(name): int(tid) for name, tid in self.tkzr_cfg.lookup.items()
         }

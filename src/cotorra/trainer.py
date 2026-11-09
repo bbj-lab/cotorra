@@ -27,7 +27,7 @@ from transformers.trainer_pt_utils import find_batch_size, nested_gather
 from transformers.trainer_utils import EvalLoopOutput, TrainOutput, seed_worker
 from transformers.utils.generic import is_flash_attention_requested
 
-from cotorra.configurable import Configurable
+from cotorra.configurable import Configurable, load_yaml
 from cotorra.loader import Loader
 from cotorra.loss import Loss
 from cotorra.model import HEADS, CotorraConfig, head_options
@@ -417,7 +417,7 @@ class Trainer(Configurable):
             [processed_data_home, output_home],
         )
 
-        self.tkzr_cfg = OmegaConf.load(self.processed_data_home / "tokenizer.yaml")
+        self.tkzr_cfg = load_yaml(self.processed_data_home / "tokenizer.yaml")
         # one `<name>_objective` block per secondary head, in any combination
         self.head_options = head_options(self.cfg, self.tkzr_cfg.lookup)
         self.loss = (

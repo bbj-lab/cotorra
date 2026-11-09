@@ -10,9 +10,9 @@ import pathlib
 import datasets as ds
 import numpy as np
 import polars as pl
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
-from cotorra.configurable import Configurable
+from cotorra.configurable import Configurable, load_yaml
 from cotorra.model import HEADS, DispositionHead, TteHead, head_options
 from cotorra.util import batched_iter, best_fit_packed_iter, record_chunks_iter
 
@@ -94,9 +94,7 @@ class Loader(Configurable):
         super().__init__(training_cfg)
         self.rng = np.random.default_rng(42)
         self.processed_data_home = processed_data_home
-        self.tokenizer_info = OmegaConf.load(
-            self.processed_data_home / "tokenizer.yaml"
-        )
+        self.tokenizer_info = load_yaml(self.processed_data_home / "tokenizer.yaml")
         self.splits: tuple = ("train", "tuning", "held_out")
         self.heads = head_options(self.cfg, self.tokenizer_info.lookup)
 

@@ -289,7 +289,12 @@ trailing `# breakpoint()`. Leave them; they're for interactive debugging.
     - `subject_splits.parquet` — `subject_id` → `split` ∈ {`train`, `tuning`,
       `held_out`}.
     - `tokenizer.yaml` — must contain a `lookup:` map (token label → int id),
-      incl. `BOS`, `EOS`; `quantile_token_loss` also reads `cfg.n_bins`.
+      incl. `BOS`, `EOS`; `quantile_token_loss` also reads `cfg.n_bins`. Read it
+      with `load_yaml` from [configurable.py](src/cotorra/configurable.py), never
+      a bare `OmegaConf.load`: from omegaconf 2.4, that refuses a document of
+      more than 10,000 nodes unless told otherwise, and each word takes four (in
+      `lookup` and `counts`), so any real vocabulary breaks it; `load_yaml` lifts
+      the limit where the installed omegaconf has one.
     - `{train,tuning,held_out}_for_inference.parquet` — for extract/score;
       include `tokens_past`, optional `subject_id` and `s_elapsed_past`, and
       `<TOKEN>_past` / `<TOKEN>_future` label columns. `Loader` (`Trainer`'s too,

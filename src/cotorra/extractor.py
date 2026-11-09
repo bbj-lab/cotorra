@@ -10,12 +10,11 @@ import pathlib
 
 import numpy as np
 import torch as t
-from omegaconf import OmegaConf
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModelForCausalLM
 
 import cotorra.model  # noqa: F401 -- registers `cotorra` with the auto classes
-from cotorra.configurable import Configurable
+from cotorra.configurable import Configurable, load_yaml
 from cotorra.loader import Loader
 from cotorra.model import CotorraForCausalLM
 
@@ -104,7 +103,7 @@ class Extractor(Configurable):
             if output_home is not None
             else self.processed_data_home
         )
-        self.tkzr_cfg = OmegaConf.load(self.processed_data_home / "tokenizer.yaml")
+        self.tkzr_cfg = load_yaml(self.processed_data_home / "tokenizer.yaml")
         self.loader = Loader(self.cfg, self.processed_data_home)
         self.device = (
             "cuda"
