@@ -135,11 +135,13 @@ There's a pytest suite in [tests/](tests/) — run it with `pytest` (config in
 ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs it on every
 push and pull request, and weekly, on Python 3.11 through 3.14, and once more on
 3.11 with each dependency at the lowest version [pyproject.toml](pyproject.toml)
-allows. It doesn't run ruff at all, neither `ruff check` nor `ruff format`, so a
-style slip never fails it; that's left to the ruff run before committing. It
-installs torch's CPU wheels from PyTorch's own index, so it never runs CUDA or
-MPS code, nor the `[gen]` extra. The 3.11–3.14 jobs also install `pytest-cov`
-(CI-only, not in the `test` extra) and upload coverage to
+allows. A push or pull request touching only `joss-submission/` (the JOSS paper)
+skips it, and [draft-pdf.yml](.github/workflows/draft-pdf.yml) compiles the paper
+to a PDF artifact instead. It doesn't run ruff at all, neither `ruff check` nor
+`ruff format`, so a style slip never fails it; that's left to the ruff run before
+committing. It installs torch's CPU wheels from PyTorch's own index, so it never
+runs CUDA or MPS code, nor the `[gen]` extra. The 3.11–3.14 jobs also install
+`pytest-cov` (CI-only, not in the `test` extra) and upload coverage to
 [Codecov](https://app.codecov.io/gh/bbj-lab/cotorra) by OIDC, as cocoa's do, so
 no token secret is needed (fork PRs upload tokenless; Codecov refuses a tokenless
 upload from any other branch). Coverage is informational only: the upload step

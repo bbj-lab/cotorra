@@ -2,7 +2,9 @@ name: tests
 
 on:
   push:
+    paths-ignore: [joss-submission/**]
   pull_request:
+    paths-ignore: [joss-submission/**]
   workflow_dispatch:
   schedule:
     # weekly, to catch breakage from new releases of unpinned dependencies
