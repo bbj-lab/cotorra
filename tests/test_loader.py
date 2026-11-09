@@ -11,7 +11,7 @@ import numpy as np
 import polars as pl
 import pytest
 import torch as t
-from helpers import base_training_cfg, write_cfg
+from helpers import base_training_cfg, pad_vocabulary, write_cfg
 from omegaconf import OmegaConf
 
 from cotorra.loader import SCORED, Loader, disposition_targets, record_weights
@@ -88,6 +88,15 @@ def test_derived_split_caches_are_regenerated_when_tokens_are_newer(
 
     Loader(training_cfg=cfg_path, processed_data_home=home)
     assert cache.stat().st_mtime > before
+
+
+def test_reads_a_vocabulary_past_omegaconfs_yaml_node_limit(processed, tmp_path):
+    home = tmp_path / "processed"
+    shutil.copytree(processed, home)
+    pad_vocabulary(home / "tokenizer.yaml")
+    cfg_path = write_cfg(tmp_path / "training.yaml", base_training_cfg())
+    loader = Loader(training_cfg=cfg_path, processed_data_home=home)
+    assert "PAD//4999" in loader.tokenizer_info.lookup
 
 
 def test_dataset_has_input_ids_and_s_elapsed_when_time_based_rope_configured(loader):

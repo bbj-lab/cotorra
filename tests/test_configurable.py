@@ -2,10 +2,13 @@
 
 """tests for cotorra.configurable.Configurable"""
 
+import shutil
+
 import pytest
+from helpers import pad_vocabulary
 from omegaconf import OmegaConf
 
-from cotorra.configurable import Configurable
+from cotorra.configurable import Configurable, load_yaml
 from cotorra.logger import Logger
 
 
@@ -176,3 +179,19 @@ def test_a_loaded_config_is_taken_as_is_and_left_untouched():
     assert again.cfg.max_seq_len == 16
     assert again.cfg.n_epochs == loaded.n_epochs
     assert loaded.max_seq_len == 8
+
+
+def test_load_yaml_reads_a_tokenizer_yaml_as_omegaconf_load_does(processed):
+    path = processed / "tokenizer.yaml"
+    assert load_yaml(path) == OmegaConf.load(path)
+
+
+def test_load_yaml_reads_a_vocabulary_past_omegaconfs_yaml_node_limit(
+    processed, tmp_path
+):
+    path = tmp_path / "tokenizer.yaml"
+    shutil.copy(processed / "tokenizer.yaml", path)
+    n = len(OmegaConf.load(path).lookup)
+    lookup = load_yaml(pad_vocabulary(path)).lookup
+    assert len(lookup) == n + 5_000
+    assert lookup["PAD//4999"] == max(lookup.values())
