@@ -44,8 +44,9 @@ follow the
 [MIMIC-IV demo](https://cotorra.readthedocs.io/latest/recipes/mimic-iv-demo/).
 
 `cotorra generative-score` also needs SGLang, which the `gen` extra installs
-(`pip install "cotorra[gen]"`) on Linux with Python 3.11 to 3.13 and an NVIDIA
-GPU; see the MIMIC-IV demo's
+(`pip install "cotorra[gen]>=26.11.1"`) on Linux with an NVIDIA GPU and Python
+3.11 or 3.12, or 3.13 once a Rust compiler and a few build tools are in place;
+see the MIMIC-IV demo's
 [generative step](https://cotorra.readthedocs.io/latest/recipes/mimic-iv-demo/#6-predict-outcomes-generatively-linux-with-an-nvidia-gpu).
 
 On a Mac, LightGBM and XGBoost look for Homebrew's OpenMP runtime, while PyTorch

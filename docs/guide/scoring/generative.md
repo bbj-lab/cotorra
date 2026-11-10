@@ -9,8 +9,9 @@ trajectories directly from the model. It:
 
 It samples with the [quick-sco-re](https://pypi.org/project/quick-sco-re/)
 package, which comes with cotorra, through SGLang, which cotorra's `gen` extra
-installs (`pip install 'cotorra[gen]'`), on Linux with an NVIDIA GPU; see the
-MIMIC-IV demo's
+installs (`pip install 'cotorra[gen]>=26.11.1'`) on Linux with an NVIDIA GPU and
+Python 3.11 or 3.12, or 3.13 once a Rust compiler and a few build tools are in
+place; see the MIMIC-IV demo's
 [generative step](../../recipes/mimic-iv-demo.md#6-predict-outcomes-generatively-linux-with-an-nvidia-gpu).
 
 SGLang can't load a model trained with [secondary heads](../secondary-heads.md),

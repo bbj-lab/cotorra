@@ -97,7 +97,8 @@ pip install -e '.[all]' \
     --extra-index-url https://pypi.org/simple
 # ...without an NVIDIA GPU, use https://download.pytorch.org/whl/cpu as the index;
 # '.[all,gen]' adds the sglang generative-score samples with (Linux, an NVIDIA
-# GPU, and Python <= 3.13)
+# GPU, Python 3.11 or 3.12; on 3.13 pip builds outlines-core from source, which
+# takes rust, gcc, g++, libssl-dev and pkg-config)
 
 # Train, then extract and score (every command reads -p <processed-data-home>)
 cotorra train -p <processed-data-home> -o <output-home> [--verbose]
@@ -551,6 +552,14 @@ trailing `# breakpoint()`. Leave them; they're for interactive debugging.
   install would run no command at all. `create_engine` refuses a model with
   heads, which SGLang can't load; `quick_sco_re.export_backbone` writes its
   backbone, a stock checkpoint, which `test_model.py` holds to the same logits.
+  sglang ships wheels only for Linux with glibc 2.34 or later and Python 3.11 to
+  3.13, and pins outlines 0.1.11, whose outlines-core 0.1.26 has wheels only to
+  3.12, so on 3.13 pip compiles it, which takes Rust, gcc, g++, and OpenSSL's
+  headers with pkg-config (the MIMIC-IV demo's generative step says how).
+  Wherever sglang has no wheel (macOS, Python 3.14, older glibc), pip resolves
+  `cotorra[gen]` to 26.11.0, the last release without a `gen` extra, with only a
+  warning, so the docs' install commands carry `>=26.11.1`, which makes that an
+  error instead; keep the floor.
 - **`sec_per_pos_id` isn't saved with the model.** `extract` has to be told the
   `time_based_rope` spacing the model was trained with; it's in
   `mdl-<run_name>-training.yaml`.

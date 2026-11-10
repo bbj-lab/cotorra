@@ -227,8 +227,19 @@ sample.[^2] The step needs Linux with glibc 2.34 or later (Ubuntu 22.04 or RHEL
 later, with a driver from the 580 series or later: SGLang ships only for those,
 and brings its own PyTorch, for CUDA 13.0. cotorra's `gen` extra installs it, for
 the [quick-sco-re](https://pypi.org/project/quick-sco-re/) package that cotorra
-samples with. With `processed/demo` and `output/demo/mdl-demo` copied over if you
-trained elsewhere, run:
+samples with. On Python 3.13, pip also builds one of SGLang's dependencies,
+outlines-core, from its Rust source, there being no wheel of it for 3.13, so
+first install a Rust compiler, gcc and g++, and OpenSSL's headers and pkg-config;
+on Debian or Ubuntu:
+
+```sh
+sudo apt install curl gcc g++ libssl-dev pkg-config
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+```
+
+With `processed/demo` and `output/demo/mdl-demo` copied over if you trained
+elsewhere, run:
 
 ```sh
 pip install 'cotorra[gen]>=26.11.1'
