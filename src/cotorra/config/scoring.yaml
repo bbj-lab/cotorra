@@ -20,7 +20,7 @@ score:
 
 # generative-score only: Monte Carlo trajectory generation settings (used by
 # GenerativeScorer; ignored by rep-based-score). Modeled on the pipeline_config.yaml
-# used by github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.
+# used by quick-sco-re (pypi.org/project/quick-sco-re).
 generation:
   temperature: !!float 1.0 # sampling temperature (1.0 for proper MC estimation)
   score_inline: true # track all score.target_tokens' SCOPE/REACH in one generation pass

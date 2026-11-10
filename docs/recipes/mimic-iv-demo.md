@@ -225,14 +225,24 @@ and REACH (`reach`), 1 − ∏(1 − p), the chance that it comes at least once 
 sample.[^2] The step needs Linux with glibc 2.34 or later (Ubuntu 22.04 or RHEL
 9, say), Python 3.11 to 3.13, and an NVIDIA GPU from the Turing generation or
 later, with a driver from the 580 series or later: SGLang ships only for those,
-and brings its own PyTorch, for CUDA 13.0. cotorra's `gen` extra installs SGLang
-and quick-sco-re, which comes from GitHub, and since a package on PyPI can't
-depend on one from GitHub, cotorra's package there leaves the extra out. Install
-cotorra from GitHub too, and with `processed/demo` and `output/demo/mdl-demo`
-copied over if you trained elsewhere, run:
+and brings its own PyTorch, for CUDA 13.0. cotorra's `gen` extra installs it, for
+the [quick-sco-re](https://pypi.org/project/quick-sco-re/) package that cotorra
+samples with. On Python 3.13, pip also builds one of SGLang's dependencies,
+outlines-core, from its Rust source, there being no wheel of it for 3.13, so
+first install a Rust compiler, gcc and g++, and OpenSSL's headers and pkg-config;
+on Debian or Ubuntu:
 
 ```sh
-pip install 'cotorra[gen] @ git+https://github.com/bbj-lab/cotorra.git@v26.11.1'
+sudo apt install curl gcc g++ libssl-dev pkg-config
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+. "$HOME/.cargo/env"
+```
+
+With `processed/demo` and `output/demo/mdl-demo` copied over if you trained
+elsewhere, run:
+
+```sh
+pip install 'cotorra[gen]>=26.11.1'
 cotorra generative-score -p processed/demo -m output/demo/mdl-demo \
     score.max_len=1024 --verbose
 ```

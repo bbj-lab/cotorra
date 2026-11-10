@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 
 """
-tests for cotorra.scorer_generative.GenerativeScorer. The module imports
-`quick_sco_re` (the `[gen]` extra, installed from git, which imports sglang) at
-load, so the `scorer_generative` fixture imports it against `fake_quick_sco_re`
-wherever that extra is missing, and every test here fakes sglang's part, the
-engine and the generation, either way
+tests for cotorra.scorer_generative.GenerativeScorer, run against quick-sco-re
+itself, which imports without sglang (the `gen` extra's); every test here fakes
+sglang's part, the engine and the generation
 """
 
 import dataclasses
-import inspect
 import math
 import re
 import shutil
@@ -22,8 +19,15 @@ import polars as pl
 import pytest
 from helpers import base_scoring_cfg, write_cfg
 from omegaconf import OmegaConf
+from quick_sco_re import (
+    GeneratedTrajectory,
+    GenerationConfig,
+    ScoredTrajectory,
+    TrajectoryType,
+)
 
 import cotorra.logger
+from cotorra import scorer_generative
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -42,21 +46,21 @@ TRACKED = ["DSCG//expired", "RESP//imv"]
 SCORES = ("mc", "scope", "reach")
 
 
-def test_cli_does_not_import_the_generative_scorer_or_quick_sco_re():
+def test_neither_the_cli_nor_the_scorer_imports_sglang():
     """
-    `GenerativeScorer` pulls in the optional (heavy, git-installed) `[gen]`
-    deps at module load, so `cli.py` imports it inside the command body; a
-    base install must be able to run every other command without them
+    quick-sco-re, which every install has, imports sglang only once
+    `create_engine` starts an engine, so the CLI imports `GenerativeScorer` as it
+    does every stage; sglang, which only the `gen` extra installs (Linux, an
+    NVIDIA GPU), has to stay out of both, or a base install runs no command
     """
     probe = textwrap.dedent("""
         import sys
         from typer.testing import CliRunner
         from cotorra.cli import app
+        import cotorra.scorer_generative
 
         assert CliRunner().invoke(app, ["--help"]).exit_code == 0
-        leaked = [m for m in ("cotorra.scorer_generative", "quick_sco_re", "sglang")
-                  if m in sys.modules]
-        assert not leaked, leaked
+        assert "sglang" not in sys.modules
     """)
     result = subprocess.run(
         [sys.executable, "-c", probe], capture_output=True, text=True
@@ -64,69 +68,27 @@ def test_cli_does_not_import_the_generative_scorer_or_quick_sco_re():
     assert result.returncode == 0, result.stderr
 
 
-def test_the_stand_in_mirrors_quick_sco_re():
-    """
-    without the `[gen]` extra, the scorer is imported against
-    `fake_quick_sco_re`, so the tests here pass only for as long as it has the
-    real package's dataclasses and signatures; held to them wherever the extra
-    is installed
-    """
-    real = pytest.importorskip("quick_sco_re", reason="requires the [gen] extra")
-    import fake_quick_sco_re as fake
-
-    def fields(cls) -> list[tuple]:
-        return [(f.name, f.default, f.default_factory) for f in dataclasses.fields(cls)]
-
-    def parameters(fn) -> list[tuple]:
-        signature = inspect.signature(fn)
-        return [(p.name, p.kind, p.default) for p in signature.parameters.values()]
-
-    for name in (
-        "GenerationConfig",
-        "GeneratedTrajectory",
-        "ScoredTrajectory",
-        "PatientResults",
-    ):
-        assert fields(getattr(fake, name)) == fields(getattr(real, name)), name
-    assert [(m.name, m.value) for m in fake.TrajectoryType] == [
-        (m.name, m.value) for m in real.TrajectoryType
-    ]
-    for name in (
-        "create_engine",
-        "generate_trajectories",
-        "generate_m2_from_m1_trajectory",
-        "score_trajectory",
-    ):
-        stand_in, original = getattr(fake, name), getattr(real, name)
-        assert parameters(stand_in) == parameters(original), name
-        assert inspect.iscoroutinefunction(stand_in) == (
-            inspect.iscoroutinefunction(original)
-        ), name
-
-
 # ---------------------------------------------- the generation's configuration
 
 
-def build_from(scorer_generative, cfg: dict):
+def build_from(cfg: dict):
     """the `GenerationConfig` `cfg` gives, tracking `TRACKED` over `VOCAB`"""
     return scorer_generative.build_generation_config(
         OmegaConf.create(cfg), VOCAB, TRACKED, [VOCAB[name] for name in TRACKED]
     )
 
 
-def build(scorer_generative, **overrides):
-    return build_from(scorer_generative, base_scoring_cfg(**overrides))
+def build(**overrides):
+    return build_from(base_scoring_cfg(**overrides))
 
 
-def test_end_tokens_resolve_to_ids(scorer_generative):
-    gen_cfg = build(scorer_generative)
+def test_end_tokens_resolve_to_ids():
+    gen_cfg = build()
     assert gen_cfg.end_token_ids == {VOCAB["EOS"]}
 
 
-def test_end_token_prefixes_expand_over_the_vocabulary(scorer_generative):
-    gen_cfg = build(
-        scorer_generative, generation={"end_tokens": {"prefixes": ["DSCG"]}}
-    )
+def test_end_token_prefixes_expand_over_the_vocabulary():
+    gen_cfg = build(generation={"end_tokens": {"prefixes": ["DSCG"]}})
     assert gen_cfg.end_token_ids == {
         VOCAB["EOS"],
         VOCAB["DSCG//expired"],
@@ -134,46 +96,42 @@ def test_end_token_prefixes_expand_over_the_vocabulary(scorer_generative):
     }
 
 
-def test_unknown_token_names_are_ignored_rather_than_crashing(scorer_generative):
+def test_unknown_token_names_are_ignored_rather_than_crashing():
     gen_cfg = build(
-        scorer_generative,
-        score={"end_tokens": ["EOS", "NOT//A//TOKEN"], "suppressed_tokens": ["PAD"]},
+        score={"end_tokens": ["EOS", "NOT//A//TOKEN"], "suppressed_tokens": ["PAD"]}
     )
     assert gen_cfg.end_token_ids == {VOCAB["EOS"]}
     assert gen_cfg.suppressed_ids == [VOCAB["PAD"]]
 
 
-def test_the_score_block_sizes_each_generation(scorer_generative):
+def test_the_score_block_sizes_each_generation():
     """`score.max_len` caps a prompt and its continuation together, and
     `score.n_samp` counts the trajectories sampled per patient; the first
     tracked outcome is the generation's own target"""
-    gen_cfg = build(scorer_generative, score={"max_len": 48, "n_samp": 7})
+    gen_cfg = build(score={"max_len": 48, "n_samp": 7})
     assert (gen_cfg.max_len, gen_cfg.n_samp) == (48, 7)
     assert gen_cfg.tracked_names == TRACKED
     assert gen_cfg.tracked_ids == [VOCAB[name] for name in TRACKED]
     assert gen_cfg.target_event_id == VOCAB[TRACKED[0]]
 
 
-def test_the_temperature_is_the_generation_blocks_and_one_without_it(scorer_generative):
+def test_the_temperature_is_the_generation_blocks_and_one_without_it():
     """1.0 being what Monte Carlo estimation needs"""
-    assert build(scorer_generative, generation={"temperature": 0.7}).temperature == (
-        0.7
-    )
+    assert build(generation={"temperature": 0.7}).temperature == 0.7
     cfg = base_scoring_cfg()
     del cfg["generation"]["temperature"]
-    assert build_from(scorer_generative, cfg).temperature == 1.0
+    assert build_from(cfg).temperature == 1.0
 
 
-def test_time_stopping_is_off_by_default(scorer_generative):
-    gen_cfg = build(scorer_generative)
+def test_time_stopping_is_off_by_default():
+    gen_cfg = build()
     assert gen_cfg.trunc_id is None
     assert gen_cfg.max_time is None
     assert gen_cfg.token_id_to_minutes == {}
 
 
-def test_time_stopping_maps_token_bounds_to_their_geometric_mean(scorer_generative):
+def test_time_stopping_maps_token_bounds_to_their_geometric_mean():
     gen_cfg = build(
-        scorer_generative,
         generation={
             "time_stopping": {
                 "enabled": True,
@@ -181,7 +139,7 @@ def test_time_stopping_maps_token_bounds_to_their_geometric_mean(scorer_generati
                 "max_time_minutes": 1440,
                 "time_token_bounds": {"TIME//1h-2h": [60, 120]},
             }
-        },
+        }
     )
     assert gen_cfg.trunc_id == VOCAB["TRUNC"]
     assert gen_cfg.max_time == 1440
@@ -190,10 +148,9 @@ def test_time_stopping_maps_token_bounds_to_their_geometric_mean(scorer_generati
     )
 
 
-def test_time_token_bounds_skip_tokens_the_vocabulary_lacks(scorer_generative):
+def test_time_token_bounds_skip_tokens_the_vocabulary_lacks():
     """as `score.end_tokens` skips them, rather than failing on the lookup"""
     gen_cfg = build(
-        scorer_generative,
         generation={
             "time_stopping": {
                 "enabled": True,
@@ -203,43 +160,38 @@ def test_time_token_bounds_skip_tokens_the_vocabulary_lacks(scorer_generative):
                     "TIME//2h-4h": [120, 240],
                 },
             }
-        },
+        }
     )
     assert gen_cfg.token_id_to_minutes == pytest.approx(
         {VOCAB["TIME//1h-2h"]: math.sqrt(60 * 120)}
     )
 
 
-def test_time_stopping_checks_the_clock_as_often_as_it_is_told(scorer_generative):
+def test_time_stopping_checks_the_clock_as_often_as_it_is_told():
     """every `time_check_interval` generated tokens, 100 without it"""
     stopping = {"enabled": True, "trunc_token": "TRUNC", "max_time_minutes": 60}
     every_25 = build(
-        scorer_generative,
-        generation={"time_stopping": stopping | {"time_check_interval": 25}},
+        generation={"time_stopping": stopping | {"time_check_interval": 25}}
     )
     assert every_25.time_check_interval == 25
     cfg = base_scoring_cfg(generation={"time_stopping": stopping})
     del cfg["generation"]["time_stopping"]["time_check_interval"]
-    assert build_from(scorer_generative, cfg).time_check_interval == 100
+    assert build_from(cfg).time_check_interval == 100
 
 
-def test_time_stopping_truncates_with_trunc_unless_told_otherwise(scorer_generative):
+def test_time_stopping_truncates_with_trunc_unless_told_otherwise():
     stopping = {"enabled": True, "max_time_minutes": 60, "trunc_token": "PAD"}
-    assert (
-        build(scorer_generative, generation={"time_stopping": stopping}).trunc_id
-        == (VOCAB["PAD"])
-    )
+    assert build(generation={"time_stopping": stopping}).trunc_id == VOCAB["PAD"]
     cfg = base_scoring_cfg(generation={"time_stopping": stopping})
     del cfg["generation"]["time_stopping"]["trunc_token"]
-    assert build_from(scorer_generative, cfg).trunc_id == VOCAB["TRUNC"]
+    assert build_from(cfg).trunc_id == VOCAB["TRUNC"]
 
 
-def test_time_stopping_disabled_reads_none_of_its_settings(scorer_generative):
+def test_time_stopping_disabled_reads_none_of_its_settings():
     """not even a trunc token the vocabulary lacks, which enabled time stopping
     refuses; and a suppressed TRUNC stays suppressed, there being no time
     horizon for it to mark"""
     gen_cfg = build(
-        scorer_generative,
         score={"suppressed_tokens": ["TRUNC"]},
         generation={
             "time_stopping": {
@@ -255,22 +207,18 @@ def test_time_stopping_disabled_reads_none_of_its_settings(scorer_generative):
     assert gen_cfg.suppressed_ids == [VOCAB["TRUNC"]]
 
 
-def test_time_stopping_rejects_a_trunc_token_absent_from_the_vocabulary(
-    scorer_generative,
-):
+def test_time_stopping_rejects_a_trunc_token_absent_from_the_vocabulary():
     with pytest.raises(ValueError, match="not found in vocabulary"):
         build(
-            scorer_generative,
             generation={
                 "time_stopping": {"enabled": True, "trunc_token": "NOT//A//TOKEN"}
-            },
+            }
         )
 
 
-def test_time_stopping_unsuppresses_the_trunc_token(scorer_generative):
+def test_time_stopping_unsuppresses_the_trunc_token():
     """a suppressed TRUNC could never be forced, defeating the time horizon"""
     gen_cfg = build(
-        scorer_generative,
         score={"suppressed_tokens": ["PAD", "TRUNC"]},
         generation={
             "time_stopping": {
@@ -297,7 +245,7 @@ def test_time_stopping_unsuppresses_the_trunc_token(scorer_generative):
     ],
     ids="/".join,
 )
-def test_a_block_or_list_left_empty_reads_as_if_absent(scorer_generative, path):
+def test_a_block_or_list_left_empty_reads_as_if_absent(path):
     """an entry left empty in the yaml parses to None, which `.get(key, default)`
     returns in place of its default, so each of these used to fail on `None.get`
     or on iterating None; time stopping is on, so that its bounds are read"""
@@ -320,13 +268,11 @@ def test_a_block_or_list_left_empty_reads_as_if_absent(scorer_generative, path):
             parent[leaf] = None
         else:
             del parent[leaf]
-        built[how] = build_from(scorer_generative, cfg)
+        built[how] = build_from(cfg)
     assert built["empty"] == built["absent"]
 
 
-def test_aggregation_reads_each_trajectorys_estimates_for_its_outcome(
-    scorer_generative,
-):
+def test_aggregation_reads_each_trajectorys_estimates_for_its_outcome():
     """
     an M1 trajectory gives a patient an M0 sample -- its occurrence flag for
     the outcome, else whether its timeline ended on it -- and an M1 sample, its
@@ -334,14 +280,13 @@ def test_aggregation_reads_each_trajectorys_estimates_for_its_outcome(
     estimate, else 0. One that tracks no outcome inline, or not this one, gives
     nothing
     """
-    module = scorer_generative
-    config = module.GenerationConfig(
+    config = GenerationConfig(
         max_len=16, n_samp=1, target_event_id=8, end_token_ids={2}
     )
-    M1, M2 = module.TrajectoryType.M1, module.TrajectoryType.M2
+    M1, M2 = TrajectoryType.M1, TrajectoryType.M2
 
     def trajectory(patient, kind, **fields):
-        return module.GeneratedTrajectory(
+        return GeneratedTrajectory(
             patient_idx=patient,
             sample_idx=0,
             traj_type=kind,
@@ -350,7 +295,7 @@ def test_aggregation_reads_each_trajectorys_estimates_for_its_outcome(
             **{"timeline_terminating_id": None} | fields,
         )
 
-    results = module.aggregate_inline_results(
+    results = scorer_generative.aggregate_inline_results(
         [
             trajectory(
                 0,
@@ -416,10 +361,8 @@ class FakeSGLang:
     prompt, before it's handed back
     """
 
-    def __init__(self, scorer_generative, tweak=None):
-        self.scorer, self.tweak = scorer_generative, tweak
-        # whichever quick_sco_re the scorer was imported against, for its dataclasses
-        self.qsr = sys.modules[scorer_generative.GeneratedTrajectory.__module__]
+    def __init__(self, tweak=None):
+        self.tweak = tweak
         self.started = None
         self.passes = []  # the prompts of each M1 pass, and how it was asked for
         self.regenerated = []  # (outcome id, prompt, sample) per M2 regeneration
@@ -431,7 +374,7 @@ class FakeSGLang:
             "generate_m2_from_m1_trajectory",
             "score_trajectory",
         ):
-            monkeypatch.setattr(self.scorer, name, getattr(self, name))
+            monkeypatch.setattr(scorer_generative, name, getattr(self, name))
         return self
 
     def create_engine(self, **kwargs) -> "FakeSGLang":
@@ -454,10 +397,10 @@ class FakeSGLang:
             for s in range(config.n_samp):
                 ks = range(len(config.tracked_ids))
                 occurred = [occurs(prompt, k, s) for k in ks]
-                trajectory = self.qsr.GeneratedTrajectory(
+                trajectory = GeneratedTrajectory(
                     patient_idx=i,
                     sample_idx=s,
-                    traj_type=self.qsr.TrajectoryType.M1,
+                    traj_type=TrajectoryType.M1,
                     prompt_len=len(prompt),
                     output_ids=[
                         t for t, hit in zip(config.tracked_ids, occurred) if hit
@@ -478,23 +421,21 @@ class FakeSGLang:
         self.regenerated.append(
             (config.target_event_id, list(prompt), m1_traj.sample_idx)
         )
-        return dataclasses.replace(
-            m1_traj, traj_type=self.qsr.TrajectoryType.M2, n_new_tokens=5
-        )
+        return dataclasses.replace(m1_traj, traj_type=TrajectoryType.M2, n_new_tokens=5)
 
     async def score_trajectory(
         self, engine, config, traj, prompt, truncate_again=False
     ):
-        assert engine is self and traj.traj_type == self.qsr.TrajectoryType.M2
+        assert engine is self and traj.traj_type == TrajectoryType.M2
         k = config.tracked_ids.index(config.target_event_id)
         score = rescored(prompt, k, traj.sample_idx)
-        return self.qsr.ScoredTrajectory(trajectory=traj, score=score)
+        return ScoredTrajectory(trajectory=traj, score=score)
 
 
-def scorer_with(scorer_generative, scoring_cfg: dict, home, tmp_path, monkeypatch):
+def scorer_with(scoring_cfg: dict, home, tmp_path, monkeypatch):
     """a `GenerativeScorer` built on `home` under `scoring_cfg`, writing to
     `tmp_path`, with sglang's part faked, and the fake"""
-    fake = FakeSGLang(scorer_generative).install(monkeypatch)
+    fake = FakeSGLang().install(monkeypatch)
     scorer = scorer_generative.GenerativeScorer(
         scoring_cfg=write_cfg(tmp_path / "scoring.yaml", scoring_cfg),
         processed_data_home=home,
@@ -600,13 +541,13 @@ def written_scores(scorer, held_out, expected) -> pl.DataFrame:
 
 
 def test_each_patients_scores_are_the_means_over_its_samples(
-    scorer_generative, processed, held_out, outcomes, tmp_path, monkeypatch
+    processed, held_out, outcomes, tmp_path, monkeypatch
 ):
     """mc, scope and reach for every outcome `score.target_tokens` names, over
     the `score.n_samp` trajectories of each patient, the prompts cut to their
     last `score.max_len` tokens -- NaN where the patient has had the outcome"""
     cfg = base_scoring_cfg(score={"target_tokens": outcomes, "n_samp": 3})
-    scorer, fake = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, fake = scorer_with(cfg, processed, tmp_path, monkeypatch)
     expected = expected_scores(held_out, outcomes, max_len=16, n_samp=3)
     table = written_scores(scorer, held_out, expected)
     # both kinds of reach sample came up, regenerated and inline
@@ -622,13 +563,7 @@ def test_each_patients_scores_are_the_means_over_its_samples(
 
 
 def test_an_outcome_is_regenerated_from_its_patients_prompt_where_it_occurred(
-    scorer_generative,
-    processed,
-    held_out,
-    outcomes,
-    tokenizer_cfg,
-    tmp_path,
-    monkeypatch,
+    processed, held_out, outcomes, tokenizer_cfg, tmp_path, monkeypatch
 ):
     """
     under M2, each trajectory in which an outcome was generated is regenerated
@@ -637,7 +572,7 @@ def test_an_outcome_is_regenerated_from_its_patients_prompt_where_it_occurred(
     too
     """
     cfg = base_scoring_cfg(score={"target_tokens": outcomes, "n_samp": 3})
-    scorer, fake = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, fake = scorer_with(cfg, processed, tmp_path, monkeypatch)
     scorer.save_all()
     lookup = tokenizer_cfg.lookup
     expected, skipped = [], 0
@@ -654,12 +589,12 @@ def test_an_outcome_is_regenerated_from_its_patients_prompt_where_it_occurred(
 
 
 def test_with_m1_alone_nothing_is_regenerated_and_reach_goes_unscored(
-    scorer_generative, processed, held_out, outcomes, tmp_path, monkeypatch
+    processed, held_out, outcomes, tmp_path, monkeypatch
 ):
     cfg = base_scoring_cfg(
         score={"target_tokens": outcomes, "n_samp": 3}, generation={"methods": ["M1"]}
     )
-    scorer, fake = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, fake = scorer_with(cfg, processed, tmp_path, monkeypatch)
     expected = expected_scores(held_out, outcomes, 16, 3, methods=("M1",))
     table = written_scores(scorer, held_out, expected)
     assert fake.regenerated == []
@@ -671,14 +606,7 @@ def test_with_m1_alone_nothing_is_regenerated_and_reach_goes_unscored(
 @pytest.mark.parametrize("methods", [["M1"], ["M1", "M2"]], ids="+".join)
 @pytest.mark.parametrize("chunk", [5, 64])
 def test_patients_are_generated_a_chunk_at_a_time_each_scored_on_its_own_row(
-    chunk,
-    methods,
-    scorer_generative,
-    processed,
-    held_out,
-    outcomes,
-    tmp_path,
-    monkeypatch,
+    chunk, methods, processed, held_out, outcomes, tmp_path, monkeypatch
 ):
     """
     `engine.patient_chunk_size` patients to an M1 pass, in order, each pass
@@ -691,7 +619,7 @@ def test_patients_are_generated_a_chunk_at_a_time_each_scored_on_its_own_row(
         generation={"methods": methods},
         engine={"patient_chunk_size": chunk},
     )
-    scorer, fake = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, fake = scorer_with(cfg, processed, tmp_path, monkeypatch)
     expected = expected_scores(held_out, outcomes, 16, 2, methods=methods)
     written_scores(scorer, held_out, expected)
     n = held_out.height
@@ -706,7 +634,7 @@ def test_patients_are_generated_a_chunk_at_a_time_each_scored_on_its_own_row(
 
 
 def test_a_trajectory_lacking_an_estimate_adds_no_sample_for_it(
-    scorer_generative, processed, held_out, outcomes, tmp_path, monkeypatch
+    processed, held_out, outcomes, tmp_path, monkeypatch
 ):
     """
     a trajectory without REACH estimates adds no reach sample for any outcome,
@@ -737,7 +665,7 @@ def test_a_trajectory_lacking_an_estimate_adds_no_sample_for_it(
         (1, "reach"): [2],
     }
     cfg = base_scoring_cfg(score={"target_tokens": outcomes, "n_samp": 3})
-    scorer, fake = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, fake = scorer_with(cfg, processed, tmp_path, monkeypatch)
     fake.tweak = tweak
     expected = expected_scores(
         held_out, outcomes, 16, 3, samples=lambda k, kind: counted[k, kind]
@@ -750,7 +678,7 @@ def test_a_trajectory_lacking_an_estimate_adds_no_sample_for_it(
 
 
 def test_without_occurrence_flags_the_generated_tokens_say_what_occurred(
-    scorer_generative, processed, held_out, outcomes, tmp_path, monkeypatch
+    processed, held_out, outcomes, tmp_path, monkeypatch
 ):
     """
     a trajectory carrying no occurrence flags gives an M0 sample for the
@@ -768,7 +696,7 @@ def test_without_occurrence_flags_the_generated_tokens_say_what_occurred(
         return occurs(prompt, k, s) and not any(occurs(prompt, j, s) for j in range(k))
 
     cfg = base_scoring_cfg(score={"target_tokens": outcomes, "n_samp": 4})
-    scorer, fake = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, fake = scorer_with(cfg, processed, tmp_path, monkeypatch)
     fake.tweak = tweak
     expected = expected_scores(held_out, outcomes, 16, 4, ended=ended)
     written_scores(scorer, held_out, expected)
@@ -781,7 +709,7 @@ def test_without_occurrence_flags_the_generated_tokens_say_what_occurred(
 
 
 def test_where_no_outcome_was_generated_reach_is_the_inline_estimate(
-    scorer_generative, processed, held_out, outcomes, tmp_path, monkeypatch
+    processed, held_out, outcomes, tmp_path, monkeypatch
 ):
     """nothing to regenerate under M2, so every reach sample is the trajectory's
     own inline REACH estimate, and mc is 0 wherever the patient goes scored"""
@@ -794,7 +722,7 @@ def test_where_no_outcome_was_generated_reach_is_the_inline_estimate(
         )
 
     cfg = base_scoring_cfg(score={"target_tokens": outcomes, "n_samp": 3})
-    scorer, fake = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, fake = scorer_with(cfg, processed, tmp_path, monkeypatch)
     fake.tweak = tweak
     never = lambda prompt, k, s: False
     expected = expected_scores(held_out, outcomes, 16, 3, occurred=never, ended=never)
@@ -821,14 +749,7 @@ def logged(monkeypatch) -> list[str]:
     "overflow", ["drop", "truncate_left", None], ids=["drop", "truncate", "absent"]
 )
 def test_a_prompt_past_max_len_is_dropped_or_cut_to_its_last_tokens(
-    overflow,
-    scorer_generative,
-    processed,
-    held_out,
-    outcomes,
-    logged,
-    tmp_path,
-    monkeypatch,
+    overflow, processed, held_out, outcomes, logged, tmp_path, monkeypatch
 ):
     """
     `prompt_overflow`, `truncate_left` without it: a prompt longer than
@@ -847,7 +768,7 @@ def test_a_prompt_past_max_len_is_dropped_or_cut_to_its_last_tokens(
         del cfg["prompt_overflow"]
     else:
         cfg["prompt_overflow"] = overflow
-    scorer, fake = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, fake = scorer_with(cfg, processed, tmp_path, monkeypatch)
     expected = expected_scores(
         held_out, outcomes, max_len, 2, overflow=overflow or "truncate_left"
     )
@@ -891,7 +812,7 @@ def test_a_prompt_past_max_len_is_dropped_or_cut_to_its_last_tokens(
     ids=["packaged", "mem-fraction", "empty-engine", "no-horizon", "time-horizon"],
 )
 def test_the_engine_is_started_as_the_score_engine_and_time_stopping_blocks_ask(
-    blocks, started, scorer_generative, processed, outcomes, tmp_path, monkeypatch
+    blocks, started, processed, outcomes, tmp_path, monkeypatch
 ):
     """
     on the model at `model_home`, with a context of `score.max_len`, reserving
@@ -902,7 +823,7 @@ def test_the_engine_is_started_as_the_score_engine_and_time_stopping_blocks_ask(
     cfg = base_scoring_cfg(score={"target_tokens": outcomes, "max_len": 48})
     for key, block in blocks.items():
         cfg[key] = None if block is None else cfg[key] | block
-    scorer, fake = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, fake = scorer_with(cfg, processed, tmp_path, monkeypatch)
     assert fake.started == {
         "model_path": str((tmp_path / "mdl-stub").resolve()),
         "max_len": 48,
@@ -914,14 +835,14 @@ def test_the_engine_is_started_as_the_score_engine_and_time_stopping_blocks_ask(
 
 
 def test_target_tokens_resolve_against_the_vocabulary_in_its_order(
-    scorer_generative, processed, tokenizer_cfg, tmp_path, monkeypatch
+    processed, tokenizer_cfg, tmp_path, monkeypatch
 ):
     """fnmatch patterns, every match tracked in the one pass and in vocabulary
     order, whatever order the patterns came in, the first the generation's own
     target"""
     lookup = tokenizer_cfg.lookup
     cfg = base_scoring_cfg(score={"target_tokens": ["XFR-IN//icu", "DSCG//exp*"]})
-    scorer, _ = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, _ = scorer_with(cfg, processed, tmp_path, monkeypatch)
     names = ["DSCG//expired", "XFR-IN//icu"]
     assert lookup[names[0]] < lookup[names[1]]
     assert scorer.grokked_outcome_tokens == scorer.gen_config.tracked_names == names
@@ -930,16 +851,16 @@ def test_target_tokens_resolve_against_the_vocabulary_in_its_order(
 
 
 def test_target_tokens_matching_no_token_are_refused_naming_them(
-    scorer_generative, processed, tmp_path, monkeypatch
+    processed, tmp_path, monkeypatch
 ):
     cfg = base_scoring_cfg(score={"target_tokens": ["NOPE//*", "NONE//*"]})
     message = "No vocabulary tokens matched score.target_tokens=['NOPE//*', 'NONE//*']"
     with pytest.raises(ValueError, match=re.escape(message)):
-        scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+        scorer_with(cfg, processed, tmp_path, monkeypatch)
 
 
 def test_an_outcome_the_inference_tables_dont_label_is_scored_for_every_patient(
-    scorer_generative, processed, held_out, tmp_path, monkeypatch
+    processed, held_out, tmp_path, monkeypatch
 ):
     """
     a target token with no `_past` column -- `DSCG//home`, which the winnower
@@ -948,18 +869,18 @@ def test_an_outcome_the_inference_tables_dont_label_is_scored_for_every_patient(
     """
     assert "DSCG//home_past" not in held_out.columns
     cfg = base_scoring_cfg(score={"target_tokens": ["DSCG//home"], "n_samp": 2})
-    scorer, _ = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, _ = scorer_with(cfg, processed, tmp_path, monkeypatch)
     expected = expected_scores(held_out, ["DSCG//home"], 16, 2)
     table = written_scores(scorer, held_out, expected)
     assert not table["DSCG//home_scope_score"].is_nan().any()
 
 
 def test_the_scores_are_written_beside_the_inference_tables_unless_told_otherwise(
-    scorer_generative, processed, outcomes, tmp_path, monkeypatch
+    processed, outcomes, tmp_path, monkeypatch
 ):
     home = tmp_path / "processed"
     shutil.copytree(processed, home)
-    FakeSGLang(scorer_generative).install(monkeypatch)
+    FakeSGLang().install(monkeypatch)
     cfg = base_scoring_cfg(score={"target_tokens": outcomes, "n_samp": 1})
     stage = dict(
         scoring_cfg=write_cfg(tmp_path / "scoring.yaml", cfg),
@@ -979,7 +900,7 @@ def test_the_scores_are_written_beside_the_inference_tables_unless_told_otherwis
 
 
 def test_verbose_save_all_summarizes_the_scores_it_writes(
-    scorer_generative, processed, target_token, tmp_path, monkeypatch
+    processed, target_token, tmp_path, monkeypatch
 ):
     """
     `save_all` assembles its table as a `pl.DataFrame`, but
@@ -1018,20 +939,18 @@ def test_verbose_save_all_summarizes_the_scores_it_writes(
     ids=["empty-blocks", "empty-methods", "no-methods"],
 )
 def test_empty_generation_and_engine_blocks_take_their_defaults(
-    blocks, methods, scorer_generative, processed, target_token, tmp_path, monkeypatch
+    blocks, methods, processed, target_token, tmp_path, monkeypatch
 ):
     """as in `build_generation_config`, the scorer read `generation` and `engine`
     with `.get(key, {})`, which returns a block left empty as None, and an empty
     `methods:` likewise, which `"M2" in self.methods` then failed on"""
     cfg = base_scoring_cfg(score={"target_tokens": [target_token]}, **blocks)
-    scorer, _ = scorer_with(scorer_generative, cfg, processed, tmp_path, monkeypatch)
+    scorer, _ = scorer_with(cfg, processed, tmp_path, monkeypatch)
     assert scorer.methods == methods
     assert scorer.chunk_size == 64
 
 
-def test_a_generative_scorer_without_its_directories_is_refused_by_name(
-    scorer_generative, tmp_path
-):
+def test_a_generative_scorer_without_its_directories_is_refused_by_name(tmp_path):
     """both default to None, a holdover from when the config named them, and
     leaving one out used to fail inside `pathlib` without saying which"""
     GenerativeScorer = scorer_generative.GenerativeScorer

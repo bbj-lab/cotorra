@@ -43,6 +43,12 @@ This installs the `cotorra` command. To see it run end to end on public data,
 follow the
 [MIMIC-IV demo](https://cotorra.readthedocs.io/latest/recipes/mimic-iv-demo/).
 
+`cotorra generative-score` also needs SGLang, which the `gen` extra installs
+(`pip install "cotorra[gen]>=26.11.1"`) on Linux with an NVIDIA GPU and Python
+3.11 or 3.12, or 3.13 once a Rust compiler and a few build tools are in place;
+see the MIMIC-IV demo's
+[generative step](https://cotorra.readthedocs.io/latest/recipes/mimic-iv-demo/#6-predict-outcomes-generatively-linux-with-an-nvidia-gpu).
+
 On a Mac, LightGBM and XGBoost look for Homebrew's OpenMP runtime, while PyTorch
 brings its own: without Homebrew's, importing cotorra fails, and with it, a
 process holding both runtimes can crash. The `cotorra` command sees to this
@@ -211,8 +217,7 @@ zensical serve --dev-addr 127.0.0.1:8002
 ```
 
 Make tag and send to pypi and testpypi (pushing a `v*` tag runs
-`.github/workflows/publish.yml`, which drops the `gen` extra, builds, and
-uploads to both):
+`.github/workflows/publish.yml`, which builds and uploads to both):
 ```
 git tag -s v26.11.0 -m "optimized optuna"
 git push origin v26.11.0

@@ -173,8 +173,7 @@ regularization selected via cross-validation), XGBoost, LightGBM, and k-NN.
 ## Generative inference
 
 The `generative-score` command wraps L. Solo's
-[`quick-sco-re`](https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git)
-library.
+[`quick-sco-re`](https://pypi.org/project/quick-sco-re/) library.
 
 ## Inference via supervised finetuning
 

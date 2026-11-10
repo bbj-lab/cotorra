@@ -18,6 +18,7 @@
         "omegaconf>=2.2.1",
         "optuna>=3.1",
         "polars>=1.36.1",
+        "quick-sco-re>=0.3.0",
         "rich>=13.8",
         "scikit-learn>=1.8",
         "scipy>=1.14",
@@ -62,10 +63,9 @@
             "mkdocstrings>=1.0.7",
             "mkdocstrings-python>=2",
         ]
-        gen = [
-            "quick-sco-re @ git+https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git",
-            "sglang>=0.5.11",
-        ]
+        # quick-sco-re's engine needs sglang, which pins an exact torch and ships for
+        # linux alone, so it's left to gen; quick-sco-re itself imports without it
+        gen  = [ "quick-sco-re[sglang]>=0.3.0", "sglang>=0.5.11" ]
         test = [ "pytest>=7.3.2" ]
 
 [build-system]

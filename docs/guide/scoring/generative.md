@@ -7,11 +7,23 @@ trajectories directly from the model. It:
 2. Samples future trajectories for each target token.
 3. Computes MC, SCOPE, and REACH scores [^1] per target token.
 
-Note this depends on the
-[quick-sco-re](https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git)
-package and on SGLang, which cotorra's `gen` extra installs, on Linux with an
-NVIDIA GPU; see the MIMIC-IV demo's
+It samples with the [quick-sco-re](https://pypi.org/project/quick-sco-re/)
+package, which comes with cotorra, through SGLang, which cotorra's `gen` extra
+installs (`pip install 'cotorra[gen]>=26.11.1'`) on Linux with an NVIDIA GPU and
+Python 3.11 or 3.12, or 3.13 once a Rust compiler and a few build tools are in
+place; see the MIMIC-IV demo's
 [generative step](../../recipes/mimic-iv-demo.md#6-predict-outcomes-generatively-linux-with-an-nvidia-gpu).
+
+SGLang can't load a model trained with [secondary heads](../secondary-heads.md),
+which cotorra saves as a `cotorra` model, so quick-sco-re refuses one. Score its
+backbone instead, which has the same next-token distribution: quick-sco-re's
+`export_backbone` writes it on its own, as a model trained without heads is
+saved:
+
+```sh
+python -c 'from quick_sco_re import export_backbone; export_backbone("<model-home>", "<model-home>-backbone")'
+cotorra generative-score -p <processed-data-home> -m <model-home>-backbone
+```
 
 ## Configuration
 
@@ -29,7 +41,7 @@ generative scoring reads the rest of `scoring.yaml`:
       (e.g. `PAD`).
     - **batch_size**: Batch size for inference.
 - **generation** _(modeled on the `pipeline_config.yaml` used by
-  [quick-sco-re](https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git))_:
+  [quick-sco-re](https://pypi.org/project/quick-sco-re/))_:
     - **temperature**: Sampling temperature (1.0 for proper Monte Carlo
       estimation).
     - **score_inline**: If true, tracks every `score.target_tokens` outcome's
