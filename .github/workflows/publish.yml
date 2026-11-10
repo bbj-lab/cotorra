@@ -51,7 +51,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - run: pip install build packaging tomlkit
+      - run: pip install build packaging
       - name: check the tag matches pyproject.toml's version
         shell: python
         run: |
@@ -63,27 +63,21 @@ jobs:
           if tag != f"v{version}":
               raise SystemExit(f"tag {tag} doesn't match version {version}")
       # pypi refuses a distribution with any requirement that's a direct url
-      # reference (`name @ git+...`), even one inside an extra, so drop each extra
-      # with one (gen, for quick-sco-re, which isn't on pypi); a source install
-      # keeps them
-      - name: drop the extras pypi can't host
+      # reference (`name @ git+...`), even one inside an extra, so refuse one here,
+      # before anything is built or attested, rather than at the upload
+      - name: check pypi can host every requirement
         shell: python
         run: |
-          import pathlib
+          import tomllib
 
-          import tomlkit
           from packaging.requirements import Requirement
 
-          path = pathlib.Path("pyproject.toml")
-          doc = tomlkit.parse(path.read_text())
-          direct = lambda reqs: [r for r in reqs if Requirement(r).url]
-          if bad := direct(doc["project"]["dependencies"]):
-              raise SystemExit(f"pypi can't host a direct reference: {bad}")
-          extras = doc["project"].get("optional-dependencies", {})
-          for name in [name for name, reqs in extras.items() if direct(reqs)]:
-              print(f"dropping extra {name}: {direct(extras[name])}")
-              del extras[name]
-          path.write_text(tomlkit.dumps(doc))
+          with open("pyproject.toml", "rb") as f:
+              project = tomllib.load(f)["project"]
+          extras = project.get("optional-dependencies", {}).values()
+          reqs = project["dependencies"] + [r for reqs in extras for r in reqs]
+          if direct := [r for r in reqs if Requirement(r).url]:
+              raise SystemExit(f"pypi can't host a direct reference: {direct}")
       - run: python -m build
       # sigstore-signed slsa build provenance for each file, which github keeps and
       # gh attestation verify <file> --repo bbj-lab/cotorra checks

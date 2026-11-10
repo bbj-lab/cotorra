@@ -96,7 +96,7 @@ pip install -e '.[all]' \
     --index-url https://download.pytorch.org/whl/cu128 \
     --extra-index-url https://pypi.org/simple
 # ...without an NVIDIA GPU, use https://download.pytorch.org/whl/cpu as the index;
-# '.[all,gen]' adds generative-score's quick-sco-re and sglang (Linux, an NVIDIA
+# '.[all,gen]' adds the sglang generative-score samples with (Linux, an NVIDIA
 # GPU, and Python <= 3.13)
 
 # Train, then extract and score (every command reads -p <processed-data-home>)
@@ -165,14 +165,10 @@ writes CLIF-like raw tables the fixtures in
 [tests/conftest.py](tests/conftest.py) push through the real cocoa collate →
 tokenize → winnow pipeline, and the model under test is a tiny
 randomly-initialized `LlamaForCausalLM`; the config builders that fixtures and
-tests share live in [tests/helpers.py](tests/helpers.py). Without the `[gen]`
-extra, the `scorer_generative` fixture imports `cotorra.scorer_generative`
-against [tests/fake_quick_sco_re.py](tests/fake_quick_sco_re.py), a copy of
-`quick_sco_re`'s dataclasses whose engine and generation are placeholders the
-tests swap for fakes (sglang's part, faked either way), so the generative scorer
-is tested in CI too; a guard test holds the copy to the real package wherever the
-extra is installed, and is the one test that skips without it. When you change
-behavior, add or update a pytest case first.
+tests share live in [tests/helpers.py](tests/helpers.py). The generative scorer's
+tests run against quick-sco-re itself, which every install has, with its engine
+and generation (sglang's part) swapped for fakes, so they run in CI too, without
+the `[gen]` extra. When you change behavior, add or update a pytest case first.
 
 `if __name__ == "__main__":` blocks are dev scratch harnesses, not tests or entry
 points, and coverage skips them (see `[tool.coverage]` in
@@ -493,11 +489,10 @@ trailing `# breakpoint()`. Leave them; they're for interactive debugging.
   action's PEP 740 attestations, uploaded beside it to each index
   (`pypi-attestations verify pypi --repository https://github.com/bbj-lab/cotorra pypi:<file>`).
   PyPI no longer takes PGP signatures, so Sigstore is the only signing it shows.
-  PyPI refuses any requirement that's a direct URL reference, even in an extra,
-  so before building it drops every extra holding one: `gen`, whose
-  `quick-sco-re` comes from git. Don't build and upload by hand: a plain
-  `python -m build` keeps `gen`, and PyPI rejects the upload. Once `quick-sco-re`
-  is on PyPI, pin it by version and `gen` ships with no change to the workflow.
+  PyPI refuses any requirement that's a direct URL reference (`name @ git+…`),
+  even in an extra, so the build job refuses one before building anything; it
+  builds `pyproject.toml` as it stands, `gen` included, so keep every
+  requirement, the extras' too, to a package on PyPI.
 - Keep the user guide in [docs/guide/](docs/guide/) (a page per stage, plus
   packing, secondary heads, and configuration; scoring is a section of its own,
   [docs/guide/scoring/](docs/guide/scoring/): an overview holding the shared
@@ -545,13 +540,17 @@ trailing `# breakpoint()`. Leave them; they're for interactive debugging.
 - **Install requires the PyTorch CUDA index.** Use the two-index `pip install`
   from the README (or the dev install under Commands); a plain
   `pip install cotorra` will fail to resolve torch correctly.
-- **`generative-score` needs the `[gen]` extra** (`quick-sco-re`, `sglang`). It's
-  declared in [pyproject.toml](pyproject.toml)'s `optional-dependencies`, but
-  `quick-sco-re` comes from git, so only a source install gets it (the release
-  workflow drops the extra from what it publishes; see Versioning under
-  Conventions). `GenerativeScorer` imports `quick_sco_re` at module load, so
-  [cli.py](src/cotorra/cli.py) imports it _lazily_ inside the command. Preserve
-  that laziness so the base install works without these heavy/optional deps.
+- **`generative-score` needs the `[gen]` extra's sglang** to start its engine.
+  [quick-sco-re](https://pypi.org/project/quick-sco-re/), which does the
+  sampling, is a base dependency: from 0.3.0 it imports sglang only in
+  `create_engine`, so [cli.py](src/cotorra/cli.py) imports `GenerativeScorer`
+  with the other stages, and `gen` holds just sglang (which pins an exact torch
+  and ships for Linux alone), as `quick-sco-re[sglang]` plus cotorra's own floor.
+  `test_neither_the_cli_nor_the_scorer_imports_sglang` holds the CLI and the
+  scorer to importing without it; were either to import it at load, a base
+  install would run no command at all. `create_engine` refuses a model with
+  heads, which SGLang can't load; `quick_sco_re.export_backbone` writes its
+  backbone, a stock checkpoint, which `test_model.py` holds to the same logits.
 - **`sec_per_pos_id` isn't saved with the model.** `extract` has to be told the
   `time_based_rope` spacing the model was trained with; it's in
   `mdl-<run_name>-training.yaml`.

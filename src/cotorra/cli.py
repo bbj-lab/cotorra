@@ -23,6 +23,7 @@ from cotorra.baselines import (
     TsfreshScorer,
 )
 from cotorra.extractor import Extractor
+from cotorra.scorer_generative import GenerativeScorer
 from cotorra.scorer_rep_based import EstimatorType, RepBasedScorer
 from cotorra.trainer import Trainer
 from cotorra.tuner import Tuner
@@ -350,8 +351,6 @@ def generative_score(
     """
     Generate SCORE/REACH metrics from a trained model and save them to parquet.
     """
-    from cotorra.scorer_generative import GenerativeScorer  # only loads if called
-
     with console.status("[bold green]Generative scoring on held-out data..."):
         t0 = time.perf_counter()
         scorer = GenerativeScorer(

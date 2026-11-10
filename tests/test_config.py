@@ -51,6 +51,7 @@ def packaged_text(name: str) -> str:
         ("cotorra.loader.Loader", "training"),
         ("cotorra.extractor.Extractor", "extraction"),
         ("cotorra.scorer_rep_based.RepBasedScorer", "scoring"),
+        ("cotorra.scorer_generative.GenerativeScorer", "scoring"),
     ],
     ids=lambda x: x.rpartition(".")[2],
 )
@@ -58,12 +59,6 @@ def test_each_stage_defaults_to_its_packaged_config(stage, name):
     """what a stage reads when no config file is passed, as the docs say"""
     module, _, cls = stage.rpartition(".")
     assert getattr(importlib.import_module(module), cls).default_file == f"{name}.yaml"
-
-
-def test_the_generative_scorer_defaults_to_the_packaged_scoring_config(
-    scorer_generative,
-):
-    assert scorer_generative.GenerativeScorer.default_file == "scoring.yaml"
 
 
 @pytest.mark.parametrize("stage", ["loader", "extractor"])

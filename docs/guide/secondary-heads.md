@@ -186,5 +186,6 @@ To train one or more:
 Of the other stages, `cotorra extract` can add the heads' predictions to the
 feature tables it writes (see [Extraction](extraction.md)), which is how
 [supervised finetuning](scoring/supervised-finetuning.md) scores outcomes;
-`rep-based-score` fits on the features alone, and `generative-score` hasn't been
-tested with a `cotorra` model.
+`rep-based-score` fits on the features alone, and `generative-score`, whose
+SGLang can't load a `cotorra` model, samples from its backbone, exported as
+[Generative scoring](scoring/generative.md) describes.

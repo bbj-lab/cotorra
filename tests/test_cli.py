@@ -17,9 +17,11 @@ import polars as pl
 import pytest
 from helpers import base_scoring_cfg, base_training_cfg, write_cfg
 from omegaconf import OmegaConf
+from quick_sco_re import GeneratedTrajectory, TrajectoryType
 from typer.testing import CliRunner
 
 import cotorra.cli
+from cotorra import scorer_generative
 from cotorra.cli import app
 from cotorra.model import HEADS
 from cotorra.scorer_rep_based import EstimatorType
@@ -68,10 +70,8 @@ def test_each_command_takes_config_overrides(command):
 
 
 @pytest.mark.parametrize("command", COMMANDS)
-def test_each_command_hands_its_overrides_to_its_config(command, tmp_path, request):
+def test_each_command_hands_its_overrides_to_its_config(command, tmp_path):
     """an unreadable override fails as the config loads, before any data is read"""
-    if command == "generative-score":  # importable without the [gen] extra
-        request.getfixturevalue("scorer_generative")
     # the baselines need no model, so take a second directory to write to
     second = "-o" if command in ("train", "tune", "baseline-score") else "-m"
     result = runner.invoke(
@@ -515,22 +515,19 @@ class Recording:
 
 
 @pytest.fixture
-def recorded(monkeypatch, request) -> list[Recording]:
-    """every stage a command builds swapped for a `Recording` named for it, the
-    generative scorer's on the module `scorer_generative` gives, from which the
-    command imports it once it runs"""
+def recorded(monkeypatch) -> list[Recording]:
+    """every stage a command builds swapped for a `Recording` named for it"""
     built = []
     monkeypatch.setattr(Recording, "built", built)
     for stage in (
         "Trainer",
         "Tuner",
+        "GenerativeScorer",
         "RepBasedScorer",
         "BagOfTokensScorer",
         "TsfreshScorer",
     ):
         monkeypatch.setattr(cotorra.cli, stage, type(stage, (Recording,), {}))
-    scorer_generative = request.getfixturevalue("scorer_generative")
-    monkeypatch.setattr(scorer_generative, "GenerativeScorer", Recording)
     return built
 
 
@@ -735,7 +732,7 @@ def test_main_runs_the_app(monkeypatch, capsys):
 
 
 def test_generative_score_writes_its_scores_and_reports_where(
-    scorer_generative, processed, target_token, tmp_path, monkeypatch
+    processed, target_token, tmp_path, monkeypatch
 ):
     """
     end to end on the synthetic data, sglang faked: every M1 trajectory gives
@@ -743,15 +740,14 @@ def test_generative_score_writes_its_scores_and_reports_where(
     outcome is ever generated, so each patient's mc, scope and reach are 0,
     0.25 and 0.5, written under `--output-home` and reported there
     """
-    qsr = sys.modules[scorer_generative.GeneratedTrajectory.__module__]
 
     async def generate(engine, config, prompts, methods, stop_at_tracked_events=True):
         n = len(config.tracked_ids)
         return [
-            qsr.GeneratedTrajectory(
+            GeneratedTrajectory(
                 patient_idx=i,
                 sample_idx=s,
-                traj_type=qsr.TrajectoryType.M1,
+                traj_type=TrajectoryType.M1,
                 prompt_len=len(prompt),
                 output_ids=[],
                 timeline_terminating_id=None,

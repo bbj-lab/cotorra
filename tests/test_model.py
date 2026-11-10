@@ -3,9 +3,11 @@
 """tests for cotorra.model: the secondary heads, CotorraConfig and CotorraForCausalLM"""
 
 import itertools
+import json
 import math
 
 import pytest
+import quick_sco_re
 import torch as t
 from helpers import TINY_MODEL_ARGS, base_training_cfg, write_cfg
 from omegaconf import OmegaConf
@@ -316,6 +318,33 @@ def test_state_dict_matches_the_stock_class_once_the_heads_are_dropped(mixture):
     assert t.equal(mdl(input_ids=x).logits, stock(input_ids=x).logits)
 
 
+@pytest.mark.parametrize("tied", [False, True], ids=["untied", "tied"])
+def test_quick_sco_re_serves_a_saved_model_with_heads_through_its_backbone(
+    tied, tmp_path
+):
+    """
+    quick-sco-re's `create_engine`, which `generative-score` starts sglang with,
+    refuses a `cotorra` checkpoint, pointing to its `export_backbone`: that
+    writes the backbone alone, as the stock class, a checkpoint sglang can load
+    with the same next-token distribution
+    """
+    mdl = build(*HEADS, mixture=True, tie_word_embeddings=tied)
+    mdl.save_pretrained(home := tmp_path / "mdl")
+    with pytest.raises(ValueError, match="export_backbone"):
+        quick_sco_re.create_engine(model_path=str(home), max_len=8)
+
+    quick_sco_re.export_backbone(home, backbone := tmp_path / "backbone")
+    quick_sco_re.require_servable(backbone)
+    config = json.loads((backbone / "config.json").read_text())
+    assert config["architectures"] == ["LlamaForCausalLM"]
+    stock = AutoModelForCausalLM.from_pretrained(backbone)
+    assert stock.config.tie_word_embeddings == tied
+    x = ids(1, 5)
+    mdl.eval()
+    stock.eval()
+    assert t.equal(mdl(input_ids=x).logits, stock(input_ids=x).logits)
+
+
 def test_word_embeddings_are_tied_when_the_backbone_asks_for_it():
     mdl = build("tte", tie_word_embeddings=True)
     assert mdl.all_tied_weights_keys == {"lm_head.weight": "model.embed_tokens.weight"}
@@ -349,10 +378,10 @@ def test_tying_follows_a_backbone_that_names_its_embedding_differently():
 
 def test_a_saved_model_reloads_through_the_auto_class(model, tmp_path):
     """
-    `Extractor` and `GenerativeScorer` only ever see `mdl-<run_name>/`, which
-    they open with `AutoModelForCausalLM.from_pretrained`; importing
-    `cotorra.model` is what registers the pair that makes that resolve, and the
-    heads come back as they were saved, disposition classes included
+    `Extractor` only ever sees `mdl-<run_name>/`, which it opens with
+    `AutoModelForCausalLM.from_pretrained`; importing `cotorra.model` is what
+    registers the pair that makes that resolve, and the heads come back as they
+    were saved, disposition classes included
     """
     model.save_pretrained(tmp_path)
     reloaded = AutoModelForCausalLM.from_pretrained(tmp_path)
