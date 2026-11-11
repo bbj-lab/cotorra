@@ -219,9 +219,9 @@ zensical serve --dev-addr 127.0.0.1:8002
 Make tag and send to pypi and testpypi (pushing a `v*` tag runs
 `.github/workflows/publish.yml`, which builds and uploads to both):
 ```
-git tag -s v26.11.0 -m "optimized optuna"
-git push origin v26.11.0
-git push upstream v26.11.0
+git tag -s v26.11.1 -m "baselines and quick-sco-re"
+git push origin v26.11.1
+git push upstream v26.11.1
 ```
 
 -->
