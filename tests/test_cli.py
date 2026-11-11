@@ -741,7 +741,15 @@ def test_generative_score_writes_its_scores_and_reports_where(
     0.25 and 0.5, written under `--output-home` and reported there
     """
 
-    async def generate(engine, config, prompts, methods, stop_at_tracked_events=True):
+    async def generate(
+        engine,
+        config,
+        prompts,
+        methods,
+        stop_at_tracked_events=True,
+        first_token_biases=None,
+    ):
+        assert first_token_biases is None  # the shipped config restricts none
         n = len(config.tracked_ids)
         return [
             GeneratedTrajectory(
