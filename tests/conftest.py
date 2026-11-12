@@ -26,6 +26,7 @@ from helpers import (
     base_extraction_cfg,
     base_scoring_cfg,
     base_training_cfg,
+    default_cfg,
     tiny_model_dir,
     write_cfg,
 )
@@ -162,6 +163,43 @@ def processed_with_end_times(processed, tmp_path_factory) -> pathlib.Path:
     shutil.copytree(processed, home)
     Tokenizer(processed_data_home=home, include_hours_to_end_time=True).save_all()
     Winnower(processed_data_home=home).save_all()
+    return home
+
+
+@pytest.fixture(scope="session")
+def processed_with_spacers(processed, tmp_path_factory) -> pathlib.Path:
+    """
+    `processed` re-tokenized with cocoa's `insert_spacers`, a time spacer before
+    each instant some while after the one before, and re-winnowed at cocoa's
+    default threshold, a `duration_s` after each timeline's first token -- the
+    data `generation.silence_restriction` restricts the first token with
+    """
+    import shutil
+
+    home = tmp_path_factory.mktemp("processed-spacers") / "processed"
+    shutil.copytree(processed, home)
+    Tokenizer(processed_data_home=home, insert_spacers=True).save_all()
+    Winnower(processed_data_home=home).save_all()
+    return home
+
+
+@pytest.fixture(scope="session")
+def processed_with_spacers_after_start(
+    processed_with_spacers, tmp_path_factory
+) -> pathlib.Path:
+    """`processed_with_spacers` re-winnowed a day after each subject's start_time
+    (cocoa's `after_start_time_s`) instead"""
+    import copy
+    import shutil
+
+    home = tmp_path_factory.mktemp("processed-spacers-after-start") / "processed"
+    shutil.copytree(processed_with_spacers, home)
+    cfg = copy.deepcopy(default_cfg("cocoa", "winnowing"))  # the cached one stays
+    cfg["threshold"] = {"after_start_time_s": 86_400}
+    Winnower(
+        winnowing_cfg=write_cfg(home.parent / "winnowing.yaml", cfg),
+        processed_data_home=home,
+    ).save_all()
     return home
 
 

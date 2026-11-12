@@ -58,6 +58,29 @@ generative scoring reads the rest of `scoring.yaml`:
         - **time_token_bounds**: Map of time-bin token name to `[lo, hi]` minute
           bounds (e.g. `"TIME//1h-2h": [60, 120]`), used to estimate elapsed time
           from generated tokens.
+    - **silence_restriction** _(optional; the block's presence turns it on, and
+      `~generation.silence_restriction` turns it off)_: A timeline cut at a time
+      ends at its last event before the cut, not at the cut, so a model
+      continuing it samples as if that event had just happened, though the next
+      one comes at least as long after it as the cut does. With this block, the
+      first token of every trajectory is a time spacer whose bin covers that
+      silence, as quick-sco-re's first-token restriction samples it, in a request
+      of its own; the outcomes can't be sampled on that step, which their SCOPE
+      and REACH estimates count as such. It needs a vocabulary with time spacers
+      (cocoa's `insert_spacers`), whose bins it reads from `tokenizer.yaml`, and
+      none of them among the outcomes. A patient silent for less than the
+      shortest spacer's gap goes unrestricted. Under `time_stopping`, the first
+      spacer counts towards the elapsed time, which still runs from the last
+      event.
+        - **duration_s** or **after_start_time_s**: The cut, in seconds after a
+          timeline's first token or after its subject's `start_time`, as the
+          winnowing config's `threshold` set it. `generative-score` refuses one
+          that doesn't fall between a timeline's past and its future. A
+          `first_occurrence` threshold cuts at an event, leaving no silence.
+        - **mode**: `hard` (the default) samples the first spacer from those
+          whose bin reaches the silence, in the proportions the model gives them;
+          `prop` also scales down the spacer whose bin the silence falls in, by
+          the share of its whole minutes that reach it.
 - **engine**:
     - **mem_fraction**: Fraction of GPU memory reserved for the inference engine.
     - **patient_chunk_size**: Number of patients generated per batch.

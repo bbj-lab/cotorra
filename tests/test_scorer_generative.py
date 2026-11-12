@@ -7,6 +7,7 @@ sglang's part, the engine and the generation
 """
 
 import dataclasses
+import datetime as dt
 import math
 import re
 import shutil
@@ -24,6 +25,7 @@ from quick_sco_re import (
     GenerationConfig,
     ScoredTrajectory,
     TrajectoryType,
+    silence_restriction_bias,
 )
 
 import cotorra.logger
@@ -382,7 +384,13 @@ class FakeSGLang:
         return self
 
     async def generate_trajectories(
-        self, engine, config, patient_tokens, methods, stop_at_tracked_events=True
+        self,
+        engine,
+        config,
+        patient_tokens,
+        methods,
+        stop_at_tracked_events=True,
+        first_token_biases=None,
     ):
         assert engine is self
         self.passes.append(
@@ -390,6 +398,7 @@ class FakeSGLang:
                 "prompts": [list(prompt) for prompt in patient_tokens],
                 "methods": list(methods),
                 "stop_at_tracked_events": stop_at_tracked_events,
+                "first_token_biases": first_token_biases,
             }
         )
         trajectories = []
@@ -961,3 +970,294 @@ def test_a_generative_scorer_without_its_directories_is_refused_by_name(tmp_path
         match=r"^GenerativeScorer needs `processed_data_home` and `model_home`$",
     ):
         GenerativeScorer()
+
+
+# ------------------------------------ the first token, after the cut's silence
+
+FORBID = -10_000.0  # quick-sco-re's bias for a token it rules out
+HOUR = dt.timedelta(hours=1)
+
+
+def test_spacer_bins_are_cocoas_right_closed_bins_between_its_boundaries():
+    """the last running on without end, and none without spacers configured"""
+    tkzr = OmegaConf.create(
+        {"cfg": {"spacers": {"5m-15m": 5, "15m-1h": 15, "1h-2h": 60}}}
+    )
+    assert scorer_generative.spacer_bins(tkzr) == {
+        "TIME//5m-15m": (5.0, 15.0),
+        "TIME//15m-1h": (15.0, 60.0),
+        "TIME//1h-2h": (60.0, math.inf),
+    }
+    for cfg in ({}, {"cfg": {}}, {"cfg": {"spacers": None}}):
+        assert scorer_generative.spacer_bins(OmegaConf.create(cfg)) == {}
+
+
+def test_each_spacer_cocoa_inserted_stands_for_a_gap_its_bin_holds(
+    processed_with_spacers,
+):
+    """read off the timelines cocoa tokenized: the gap, in whole minutes, from
+    the instant before each spacer to the spacer's own, which it opens; cocoa
+    gives the smallest boundary itself the first spacer"""
+    tkzr = OmegaConf.load(processed_with_spacers / "tokenizer.yaml")
+    bins = scorer_generative.spacer_bins(tkzr)
+    names = {tid: name for name, tid in tkzr.lookup.items()}
+    smallest = min(lo for lo, _ in bins.values())
+    seen = set()
+    timelines = pl.read_parquet(processed_with_spacers / "tokens_times.parquet")
+    for tokens, times in timelines.select("tokens", "times").iter_rows():
+        for i, token in enumerate(tokens):
+            if (name := names[token]) in bins:
+                gap = (times[i] - times[i - 1]).total_seconds() // 60
+                lo, hi = bins[name]
+                assert lo < gap <= hi or gap == lo == smallest, (name, gap)
+                seen.add(name)
+    assert seen  # spacers enough to check
+
+
+def cut_frame() -> pl.DataFrame:
+    """three timelines cut four hours in, two of them counting from their first
+    token or their subject's start_time alike, the other's start_time an hour
+    before its first token"""
+    t0 = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    return pl.DataFrame(
+        {
+            "times": [
+                [t0, t0 + HOUR / 6, t0 + 5 * HOUR],
+                [t0 + HOUR, t0 + 2 * HOUR, t0 + 2 * HOUR, t0 + 6 * HOUR],
+                [t0, t0 + 4 * HOUR],
+            ],
+            "tokens_past": [[1, 5], [1, 5, 6], [1]],
+            "start_time": [t0, t0, t0],
+        },
+        schema={
+            "times": pl.List(pl.Datetime("ms", "UTC")),
+            "tokens_past": pl.List(pl.Int64),
+            "start_time": pl.Datetime("ms", "UTC"),
+        },
+    )
+
+
+def test_silences_run_from_the_last_past_token_to_either_cut():
+    """the last past token on the cut's eve, the next one on the cut itself"""
+    silences = scorer_generative.silences
+    np.testing.assert_allclose(
+        silences(cut_frame(), "duration_s", 4 * 3600), [230, 180, 240]
+    )
+    np.testing.assert_allclose(
+        silences(cut_frame(), "after_start_time_s", 4 * 3600), [230, 120, 240]
+    )
+
+
+@pytest.mark.parametrize("hours", [1, 5])
+def test_a_cut_the_timelines_werent_cut_at_is_refused(hours):
+    """an hour in, the second timeline's past runs past the cut; five hours in,
+    the third's future starts before it"""
+    with pytest.raises(ValueError, match=r"of only 2 of 3 timelines; set it as"):
+        scorer_generative.silences(cut_frame(), "duration_s", hours * 3600)
+    with pytest.raises(ValueError, match=r"needs a start_time column"):
+        scorer_generative.silences(
+            cut_frame().drop("start_time"), "after_start_time_s", 4 * 3600
+        )
+
+
+def restricted_cfg(outcomes: list[str], **restriction) -> dict:
+    """the default scoring config tracking `outcomes`, each trajectory's first
+    token restricted after its timeline's silence at `restriction`'s cut"""
+    return base_scoring_cfg(
+        score={"target_tokens": outcomes, "n_samp": 2},
+        generation={"silence_restriction": restriction},
+    )
+
+
+def silences_by_hand(home, origin: str, seconds: int) -> np.ndarray:
+    """each held-out timeline's silence in minutes, from its last past token to
+    `seconds` after its first token (`origin` "times") or its start_time"""
+    held_out = pl.read_parquet(home / "held_out_for_inference.parquet")
+    return np.array(
+        [
+            (
+                (row["times"][0] if origin == "times" else row["start_time"])
+                + dt.timedelta(seconds=seconds)
+                - row["times"][len(row["tokens_past"]) - 1]
+            ).total_seconds()
+            / 60
+            for row in held_out.iter_rows(named=True)
+        ]
+    )
+
+
+def possible(bias: dict | None, vocab: dict[str, int]) -> set[int]:
+    """the token ids a first-token bias leaves possible"""
+    return {t for t in vocab.values() if (bias or {}).get(t, 0.0) > FORBID / 2}
+
+
+@pytest.mark.parametrize("mode", ["hard", "prop"])
+def test_every_first_token_is_a_spacer_long_enough_for_its_timelines_silence(
+    mode, processed_with_spacers, outcomes, tmp_path, monkeypatch
+):
+    """each patient's bias, passed with its prompt, is quick-sco-re's for its
+    silence at the cut cocoa's default threshold made, a day after each
+    timeline's first token, and leaves possible only the spacers whose bins
+    reach that far"""
+    cfg = restricted_cfg(outcomes, duration_s=86_400, mode=mode)
+    scorer, fake = scorer_with(cfg, processed_with_spacers, tmp_path, monkeypatch)
+    scorer.save_all()
+    vocab = scorer.vocab
+    bins = {
+        vocab[name]: bounds
+        for name, bounds in scorer_generative.spacer_bins(scorer.tkzr_cfg).items()
+        if name in vocab
+    }
+    minutes = silences_by_hand(processed_with_spacers, "times", 86_400)
+    biases = [b for p in fake.passes for b in p["first_token_biases"]]
+    assert biases == [
+        silence_restriction_bias(m, bins, vocab.values(), mode=mode, min_minutes=5)
+        for m in minutes
+    ]
+    for bias, m in zip(biases, minutes):
+        assert possible(bias, vocab) == {t for t, (_, hi) in bins.items() if hi >= m}
+        assert possible(bias, vocab)  # and some spacer reaches it
+
+
+def test_each_patient_keeps_its_own_first_token_bias_chunk_after_chunk(
+    processed_with_spacers, outcomes, tmp_path, monkeypatch
+):
+    """five patients a pass, each with a silence of its own, so that a bias
+    handed to another patient would show"""
+    cfg = restricted_cfg(outcomes, duration_s=86_400)
+    cfg["engine"]["patient_chunk_size"] = 5
+    scorer, fake = scorer_with(cfg, processed_with_spacers, tmp_path, monkeypatch)
+    scorer.silence_minutes = 1.0 + 30 * np.arange(len(scorer.final_tokens))
+    scorer.save_all()
+    assert len(fake.passes) > 1
+    assert [len(p["first_token_biases"]) for p in fake.passes] == [
+        len(p["prompts"]) for p in fake.passes
+    ]
+    assert [b for p in fake.passes for b in p["first_token_biases"]] == [
+        silence_restriction_bias(
+            m, scorer.spacer_bounds, scorer.vocab.values(), min_minutes=5
+        )
+        for m in scorer.silence_minutes
+    ]
+    assert fake.passes[0]["first_token_biases"][0] is None  # silent a minute
+
+
+@pytest.mark.parametrize("overflow", ["drop", "truncate_left"])
+def test_the_silences_are_the_kept_patients(
+    overflow, processed_with_spacers, outcomes, tmp_path, monkeypatch
+):
+    """a prompt cut to its last tokens keeps its last token's time; one dropped
+    takes its silence with it. `max_len` is the median prompt's, so that only
+    some are"""
+    held_out = pl.read_parquet(
+        processed_with_spacers / "held_out_for_inference.parquet"
+    )
+    lengths = held_out["tokens_past"].list.len()
+    cfg = restricted_cfg(outcomes, duration_s=86_400)
+    cfg["score"]["max_len"] = int(lengths.median())
+    cfg["prompt_overflow"] = overflow
+    scorer, _ = scorer_with(cfg, processed_with_spacers, tmp_path, monkeypatch)
+    kept = np.array(scorer.keep_mask)
+    assert (lengths > cfg["score"]["max_len"]).any()
+    assert kept.all() if overflow == "truncate_left" else 0 < kept.sum() < kept.size
+    np.testing.assert_allclose(
+        scorer.silence_minutes,
+        silences_by_hand(processed_with_spacers, "times", 86_400)[kept],
+    )
+
+
+def test_a_cut_after_each_subjects_start_counts_from_its_start_time(
+    processed_with_spacers_after_start, outcomes, tmp_path, monkeypatch
+):
+    """as cocoa's after_start_time_s cuts, its silences unrestricted past the
+    longest spacer the vocabulary has"""
+    home = processed_with_spacers_after_start
+    cfg = restricted_cfg(outcomes, after_start_time_s=86_400)
+    scorer, _ = scorer_with(cfg, home, tmp_path, monkeypatch)
+    expected = silences_by_hand(home, "start_time", 86_400)
+    reach = max(hi for _, hi in scorer.spacer_bounds.values())
+    expected[np.floor(expected + 1e-9) > reach] = np.nan
+    np.testing.assert_allclose(scorer.silence_minutes, expected)
+
+
+def test_a_silence_past_every_spacer_goes_unrestricted_with_a_warning(
+    processed_with_spacers, outcomes, tmp_path, monkeypatch
+):
+    """the bias would rule out every token there is, spacers included"""
+    warned = []
+    monkeypatch.setattr(
+        cotorra.logger.Logger, "warning", lambda self, msg, *a, **k: warned.append(msg)
+    )
+    real = scorer_generative.silences
+    monkeypatch.setattr(
+        scorer_generative,
+        "silences",
+        lambda *args: np.where(np.arange(len(real(*args))) % 2, 10_000.0, 240.0),
+    )
+    cfg = restricted_cfg(outcomes, duration_s=86_400)
+    scorer, fake = scorer_with(cfg, processed_with_spacers, tmp_path, monkeypatch)
+    scorer.save_all()
+    biases = [b for p in fake.passes for b in p["first_token_biases"]]
+    assert [b is None for b in biases] == [bool(i % 2) for i in range(len(biases))]
+    (message,) = warned
+    assert message.startswith(f"{len(biases) // 2} patients were silent for longer")
+
+
+@pytest.mark.parametrize(
+    "restriction, error",
+    [
+        (None, "needs one cut"),
+        ({"mode": "hard"}, "needs one cut"),
+        ({"duration_s": 86_400, "after_start_time_s": 86_400}, "needs one cut"),
+        ({"duration_s": 86_400, "mode": "soft"}, "is hard or prop, not 'soft'"),
+        ({"duration_s": 3_600}, "of only"),
+    ],
+    ids=["empty", "no-cut", "two-cuts", "unknown-mode", "another-cut"],
+)
+def test_a_silence_restriction_it_cant_honor_is_refused_before_the_engine_starts(
+    restriction, error, processed_with_spacers, outcomes, tmp_path, monkeypatch
+):
+    """the block's presence turns it on, even left empty"""
+    cfg = base_scoring_cfg(
+        score={"target_tokens": outcomes},
+        generation={"silence_restriction": restriction},
+    )
+    fake = FakeSGLang().install(monkeypatch)
+    with pytest.raises(ValueError, match=re.escape(error)):
+        scorer_generative.GenerativeScorer(
+            scoring_cfg=write_cfg(tmp_path / "scoring.yaml", cfg),
+            processed_data_home=processed_with_spacers,
+            model_home=tmp_path / "mdl-stub",
+        )
+    assert fake.started is None
+
+
+@pytest.mark.parametrize(
+    "fixture, targets, error",
+    [
+        ("processed", [], "cocoa's tokenizer inserts with insert_spacers"),
+        ("processed_with_spacers", ["TIME//*"], "can't track the time spacers"),
+    ],
+    ids=["no-spacers", "spacers-tracked"],
+)
+def test_a_vocabulary_the_restriction_cant_restrict_is_refused(
+    fixture, targets, error, outcomes, tmp_path, monkeypatch, request
+):
+    """without a spacer to restrict to, or with one an outcome, which quick-sco-re
+    refuses to let a first token be"""
+    cfg = restricted_cfg(targets + outcomes, duration_s=86_400)
+    with pytest.raises(ValueError, match=re.escape(error)):
+        scorer_with(cfg, request.getfixturevalue(fixture), tmp_path, monkeypatch)
+
+
+def test_without_a_silence_restriction_no_first_token_is_biased(
+    processed, outcomes, tmp_path, monkeypatch
+):
+    """the block absent, as from the shipped config and from every config before
+    it, each pass is asked for as it was"""
+    cfg = base_scoring_cfg(score={"target_tokens": outcomes, "n_samp": 2})
+    assert "silence_restriction" not in cfg["generation"]
+    scorer, fake = scorer_with(cfg, processed, tmp_path, monkeypatch)
+    scorer.save_all()
+    assert scorer.silence_minutes is None
+    assert fake.passes and all(p["first_token_biases"] is None for p in fake.passes)

@@ -33,6 +33,11 @@ generation:
     max_time_minutes: null
     time_check_interval: !!int 100 # tokens generated between time-horizon checks
     time_token_bounds: {} # token name -> [lo, hi] minutes, e.g. "TIME//1h-2h": [60, 120]
+  # uncommented, silence_restriction makes each trajectory's first token a time spacer (cocoa's
+  # insert_spacers) long enough to cover its timeline's silence from its last past event to the cut
+  # silence_restriction:
+  #   duration_s: !!int 86400 # the cut, as the winnowing threshold sets it, or after_start_time_s
+  #   mode: hard # or prop, which also scales the spacer the silence falls in by its share past it
 
 engine:
   mem_fraction: !!float 0.85
