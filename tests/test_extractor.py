@@ -842,8 +842,9 @@ def test_the_end_times_reach_neither_the_model_nor_the_tables(
     """
     inference tables winnowed with end times carry the outcome itself, as
     `hours_to_end_time_past`; the model is still handed nothing but the tokens,
-    their position ids and a mask of ones, and no feature table is written with
-    the column
+    their position ids and a mask of ones (beside what it's to return: its
+    hidden states, and the last position's logits), and no feature table is
+    written with the column
     """
     extractor = extract_from(
         model_with_heads("tte"),
@@ -872,6 +873,7 @@ def test_the_end_times_reach_neither_the_model_nor_the_tables(
         assert kwargs == [
             "attention_mask",
             "input_ids",
+            "logits_to_keep",
             "output_hidden_states",
             "position_ids",
         ]
@@ -1151,6 +1153,35 @@ def test_the_nlls_come_last_and_each_rows_its_own(
         alone = {k: v[i : i + 1] for k, v in ending_batch.items()}
         [by_itself] = extractor.extract_final(alone, token_nll=True)["token_nll_bits"]
         np.testing.assert_allclose(row, by_itself, rtol=1e-4)
+
+
+@pytest.mark.parametrize("names", [(), ALL_HEADS], ids=["stock", "every-head"])
+def test_only_token_nll_has_the_forward_make_every_positions_logits(
+    names, extract_from, model_with_heads, ending_batch, monkeypatch
+):
+    """the logits are read only for `token_nll`, so without it the forward makes
+    the last position's alone, not a vocabulary's worth at every position of
+    the batch, whatever the heads or `all_times`; the features and the heads'
+    columns are the same either way, as the test above checks"""
+    extractor = extract_from(model_with_heads(*names, mixture=bool(names)))
+    forward, made = extractor.model.forward, []
+
+    def recording(*args, **kwargs):
+        outputs = forward(*args, **kwargs)
+        made.append(outputs.logits.shape[1])  # the positions given logits
+        return outputs
+
+    monkeypatch.setattr(extractor.model, "forward", recording)
+    n = extractor.collate_fn(dict(ending_batch))["input_ids"].shape[-1]
+    for all_times in (False, True):
+        for token_nll in (False, True):
+            extractor.extract_final(
+                dict(ending_batch),
+                all_times=all_times,
+                heads=names,
+                token_nll=token_nll,
+            )
+    assert made == [1, n, 1, n]
 
 
 def test_every_shards_nlls_line_up_with_its_input_ids(

@@ -1,5 +1,18 @@
 # Inputs
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cocoa pipeline`
+>
+> Every `cotorra` command reads the files below from a processed data directory,
+> `-p`, which [cocoa](https://cocoa-tokenizer.readthedocs.io/latest/)'s pipeline
+> writes (see its
+> [CLI reference](https://cocoa-tokenizer.readthedocs.io/latest/api/cli/#cocoa-pipeline)):
+>
+> ```sh
+> cocoa pipeline -r data-raw/ -p processed/
+> ```
+<!-- prettier-ignore-end -->
+
 Suppose you have a dataset of tokenized timelines `tokens_times.parquet` as a
 parquet table with columns:
 
@@ -7,6 +20,10 @@ parquet table with columns:
 - `tokens` — the integer token sequence for the subject's timeline.
 - `times` — a parallel list of timestamps, one per token, indicating when each
   event occurred.
+- `hours_to_end_time` (optional) — a parallel list of the hours from each token
+  to the end of its record, which only the time-to-event head reads (see
+  [Training secondary heads](secondary-heads.md)); cocoa writes it with its
+  tokenization config's `include_hours_to_end_time`.
 
 The table will look something like this:
 
@@ -39,9 +56,9 @@ lookup:
 ```
 
 Finally, we need `subject_splits.parquet` which is a table listing out all
-subject_id's and their corresponding split assignment (with splits: `train`,
+subject ids and their corresponding split assignment (with splits: `train`,
 `tuning`, and `held_out`). This table may include additional demographic
-information provided as pass-through-columns to
+information provided as pass-through columns to
 [cocoa-tokenizer](https://pypi.org/project/cocoa-tokenizer/).
 
 ```

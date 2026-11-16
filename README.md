@@ -1,13 +1,13 @@
 <!-- --8<-- [start:intro] -->
 
 <p align="center">
-<img src="https://raw.githubusercontent.com/burkh4rt/cotorra/master/img/cotorra.png" alt="friendly parrot" width="400" class="off-glb" />
+<img src="https://raw.githubusercontent.com/bbj-lab/cotorra/main/img/cotorra.png" alt="friendly parrot" width="400" class="off-glb" />
 </p>
 
 # Cotorra: a configurable trainer
 
 [![PyPI Version](https://img.shields.io/pypi/v/cotorra)](https://pypi.org/project/cotorra/)
-[![DOI](https://raw.githubusercontent.com/burkh4rt/cotorra/master/img/1193885071.svg)](https://doi.org/10.5281/zenodo.20414127)
+[![DOI](https://raw.githubusercontent.com/bbj-lab/cotorra/main/img/1193885071.svg)](https://doi.org/10.5281/zenodo.20414127)
 [![SWH](https://archive.softwareheritage.org/badge/origin/https://github.com/bbj-lab/cotorra/)](https://archive.softwareheritage.org/browse/origin/?origin_url=https://github.com/bbj-lab/cotorra)
 [![tests](https://github.com/bbj-lab/cotorra/actions/workflows/tests.yml/badge.svg)](https://github.com/bbj-lab/cotorra/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/bbj-lab/cotorra/graph/badge.svg?token=93WBN0HCUV)](https://codecov.io/gh/bbj-lab/cotorra)
@@ -49,17 +49,6 @@ follow the
 see the MIMIC-IV demo's
 [generative step](https://cotorra.readthedocs.io/latest/recipes/mimic-iv-demo/#6-predict-outcomes-generatively-linux-with-an-nvidia-gpu).
 
-On a Mac, LightGBM and XGBoost look for Homebrew's OpenMP runtime, while PyTorch
-brings its own: without Homebrew's, importing cotorra fails, and with it, a
-process holding both runtimes can crash. The `cotorra` command sees to this
-itself, starting again with PyTorch's runtime first on `DYLD_LIBRARY_PATH`. To
-import cotorra in Python of your own, such as a notebook, set that before Python
-starts:
-
-```sh
-export DYLD_LIBRARY_PATH="$(python -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib"
-```
-
 <!-- --8<-- [end:install] -->
 
 ## Usage
@@ -78,20 +67,22 @@ The [documentation](https://cotorra.readthedocs.io/latest/) covers:
 - [Inputs](https://cotorra.readthedocs.io/latest/guide/inputs/): the tokenized
   timelines and tables the commands read, as
   [cocoa](https://pypi.org/project/cocoa-tokenizer/) writes them.
-- [Training](https://cotorra.readthedocs.io/latest/guide/training/): fitting a
-  model with `cotorra train` or `cotorra tune`, including how records are
+- [`cotorra train` / `cotorra tune`](https://cotorra.readthedocs.io/latest/guide/training/):
+  fits a model. How records are
   [packed into rows](https://cotorra.readthedocs.io/latest/guide/packing/) and
   the
-  [secondary heads](https://cotorra.readthedocs.io/latest/guide/secondary-heads/)
-  it can train alongside next-token prediction.
-- [Extraction](https://cotorra.readthedocs.io/latest/guide/extraction/):
-  hidden-state representations and head predictions from a trained model, with
-  `cotorra extract`.
-- [Scoring](https://cotorra.readthedocs.io/latest/guide/scoring/): outcome scores
-  for held-out data, from an estimator fit on extracted features
-  (`cotorra rep-based-score`), from sampled trajectories
-  (`cotorra generative-score`), or from a supervised head; and baselines that
-  need no model (`cotorra baseline-score`).
+  [secondary heads](https://cotorra.readthedocs.io/latest/guide/secondary-heads/),
+  if any, trained alongside next-token prediction are customizable.
+- [`cotorra extract`](https://cotorra.readthedocs.io/latest/guide/extraction/):
+  extracts hidden-state representations and head predictions from a trained
+  model.
+- [`cotorra rep-based-score` / `cotorra generative-score`](https://cotorra.readthedocs.io/latest/guide/scoring/):
+  scores outcomes on held-out data, from an estimator fit on extracted features
+  or from sampled trajectories. A
+  [supervised head](https://cotorra.readthedocs.io/latest/guide/scoring/supervised-finetuning/)
+  can score them too, and
+  [`cotorra baseline-score`](https://cotorra.readthedocs.io/latest/guide/scoring/baselines/)
+  scores them with baselines that need no model, for comparison.
 - [Configuration](https://cotorra.readthedocs.io/latest/guide/configuration/):
   the YAML config each command reads, and how to change its keys on the command
   line.

@@ -1,5 +1,19 @@
 # Baseline scoring
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra baseline-score`
+>
+> Reads the inference tables in the processed data directory `-p` (and, for
+> `--baseline tsfresh`, its `meds.parquet`) and writes the scores there, or to
+> `-o` if given; it needs no model (see the
+> [CLI reference](../../api/cli.md#cotorra-baseline-score) for every option):
+>
+> ```sh
+> cotorra baseline-score -p processed/
+> cotorra baseline-score -p processed/ --baseline tsfresh
+> ```
+<!-- prettier-ignore-end -->
+
 **Baseline scoring** (`cotorra baseline-score`) scores the same outcomes with no
 trained model, for a model's scores to be set against. It fits an estimator on
 features of each timeline's past alone, over the train split's timelines whose

@@ -1,5 +1,20 @@
 # Training secondary heads
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra train`, then `cotorra extract`
+>
+> Train heads by adding their blocks to the training config, here empty, for
+> their defaults, and add their predictions to the extracted features with the
+> matching flags of `cotorra extract` (see the CLI reference for
+> [`train`](../api/cli.md#cotorra-train) and
+> [`extract`](../api/cli.md#cotorra-extract)):
+>
+> ```sh
+> cotorra train -p processed/ -o output/ tnt_objective= disposition_objective=
+> cotorra extract -p processed/ -m output/mdl-<run_name> -n -d
+> ```
+<!-- prettier-ignore-end -->
+
 Every model learns to predict the next token. Alongside that, it can train any
 combination of three secondary heads, each with its own config block:
 
@@ -82,7 +97,7 @@ To train one or more:
 
 1. **Configure training.** A config passed with `--training-config` replaces the
    shipped default rather than merging into it, so start from a full copy of
-   [training.yaml](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/training.yaml)
+   [training.yaml](https://github.com/bbj-lab/cotorra/blob/main/src/cotorra/config/training.yaml)
    and add (or uncomment) the blocks for the heads you want:
 
     ```yaml
@@ -107,16 +122,18 @@ To train one or more:
     v26.10.1, training multiplied those weights by both.)
 
 2. **Tokenize with end times (TTE head only).** The TTE head trains on an
-   `hours_to_end_time` column, which cocoa writes only when asked. Copy cocoa's
-   [default tokenization config](https://github.com/bbj-lab/cocoa/blob/master/src/cocoa/config/tokenization.yaml),
-   set `include_hours_to_end_time: !!bool true`, and rerun tokenization and
-   winnowing. Winnowing carries the column into the `*_for_inference.parquet`
-   tables as `hours_to_end_time_past`, which cotorra never reads: it is the
-   outcome itself, so it reaches neither the model nor the feature tables, and
+   `hours_to_end_time` column, which cocoa writes only when asked: rerun
+   tokenization with `include_hours_to_end_time=true`, which changes that one key
+   of cocoa's
+   [default tokenization config](https://github.com/bbj-lab/cocoa/blob/master/src/cocoa/config/tokenization.yaml)
+   on the command line (or of your own, given with `-c`), and then winnowing.
+   Winnowing carries the column into the `*_for_inference.parquet` tables as
+   `hours_to_end_time_past`, which cotorra never reads: it is the outcome itself,
+   so it reaches neither the model nor the feature tables, and
    `extract --time-to-event` needs no end times.
 
     ```sh
-    cocoa tokenize -c tokenization.yaml -p processed/
+    cocoa tokenize -p processed/ include_hours_to_end_time=true
     cocoa winnow -p processed/
     ```
 

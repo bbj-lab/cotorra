@@ -40,7 +40,7 @@ same for a head's predictions.
 
 Representation-based, generative, and baseline scoring are all driven by a YAML
 config (the package ships a default; see
-[`./src/cotorra/config/scoring.yaml`](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/scoring.yaml)),
+[`./src/cotorra/config/scoring.yaml`](https://github.com/bbj-lab/cotorra/blob/main/src/cotorra/config/scoring.yaml)),
 passed with `--scoring-config`; supervised finetuning reads none. For all three,
 it specifies:
 

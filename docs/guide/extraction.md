@@ -1,5 +1,18 @@
 # Extraction
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra extract`
+>
+> Runs the model in `-m` over each split's `<split>_for_inference.parquet` in the
+> processed data directory `-p`, and writes a
+> `features-<split>-<model_name>.parquet` for each there, or to `-o` if given
+> (see the [CLI reference](../api/cli.md#cotorra-extract) for every option):
+>
+> ```sh
+> cotorra extract -p processed/ -m output/mdl-<run_name>
+> ```
+<!-- prettier-ignore-end -->
+
 The extractor loads a trained model and computes hidden-state representations of
 each subject's context, suitable for representation-based scoring or downstream
 tasks. It:
@@ -19,7 +32,7 @@ tasks. It:
 6. Writes one feature table per split (optionally sharded).
 
 Extraction is driven by a YAML config (the package ships a default; see
-[`./src/cotorra/config/extraction.yaml`](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/extraction.yaml))
+[`./src/cotorra/config/extraction.yaml`](https://github.com/bbj-lab/cotorra/blob/main/src/cotorra/config/extraction.yaml))
 that specifies:
 
 - **max_seq_len**: Maximum sequence length.
@@ -82,4 +95,8 @@ that specifies:
     surprisal in bits, and the mean of its entries after the first is log₂ of the
     model's perplexity on it. The probabilities are the model's as trained: a
     model trained with the deprecated `label_weighted_loss` overpredicts its
-    tokens of interest, so it scores them as less surprising than they are.
+    tokens of interest, so it scores them as less surprising than they are. It
+    also takes the model's logits at every position of each batch, a vocabulary's
+    worth per token, where extraction otherwise makes only the last position's,
+    so with a large vocabulary or long contexts, `--token-nll` may want a smaller
+    `extract.batch_size`.

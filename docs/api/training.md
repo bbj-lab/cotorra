@@ -11,6 +11,18 @@ completion the model weights and the exact configuration used are written to
 
 ## `Trainer`
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra train`
+>
+> Runs the trainer from the command line, reading the tokenized timelines in the
+> processed data directory `-p` and writing the model, `mdl-<run_name>/`, to `-o`
+> (see the [CLI reference](cli.md#cotorra-train) for every option):
+>
+> ```sh
+> cotorra train -p processed/ -o output/
+> ```
+<!-- prettier-ignore-end -->
+
 The workhorse. `Trainer` builds a model _from scratch_ from a HuggingFace
 architecture preset (its vocabulary, `BOS`, and `EOS` come from
 `tokenizer.yaml`), packs the training and tuning splits into fixed-length
@@ -22,6 +34,18 @@ in Weights & Biases, and `train()` can resume from the latest checkpoint.
 ::: cotorra.trainer.Trainer
 
 ## `Tuner`
+
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra tune`
+>
+> Runs the tuner from the command line, with the options of `cotorra train`
+> except `--resume-from-checkpoint` (see the [CLI reference](cli.md#cotorra-tune)
+> for every option):
+>
+> ```sh
+> cotorra tune -p processed/ -o output/
+> ```
+<!-- prettier-ignore-end -->
 
 `Tuner` extends [`Trainer`](#trainer) to run an [Optuna](https://optuna.org)
 hyperparameter search (over the `training_args` fields `tuning_args.hp_space`

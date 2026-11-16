@@ -1,5 +1,17 @@
 # Packing records
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra train`
+>
+> The training config's `packing` key, which `cotorra train` and `cotorra tune`
+> read, picks the packing; to give each record a row of its own, for example (see
+> the [CLI reference](../api/cli.md#cotorra-train) for every option):
+>
+> ```sh
+> cotorra train -p processed/ -o output/ packing=pad
+> ```
+<!-- prettier-ignore-end -->
+
 Training packs the subjects' timelines into rows of up to `max_seq_len` tokens,
 in one of three ways:
 

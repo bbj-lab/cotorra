@@ -15,7 +15,37 @@ need no trained model: classifiers fit on features of the timelines alone, from
 the same configuration. The [scoring guide](../guide/scoring/index.md) sets the
 four side by side.
 
+<!-- prettier-ignore-start -->
+> [!WARNING] On a Mac
+>
+> LightGBM and XGBoost, the boosters that [`RepBasedScorer`](#repbasedscorer)
+> and the [baselines](#baselinescorer) fit, look for Homebrew's OpenMP runtime,
+> `libomp`, while PyTorch brings its own: without Homebrew's, importing
+> `cotorra.scorer_rep_based` or `cotorra.baselines` fails, and with it, a process
+> holding both runtimes can crash. The `cotorra` command sees to this itself,
+> starting again with PyTorch's runtime first on `DYLD_LIBRARY_PATH`. To import
+> either module in Python of your own, such as a notebook, set that before Python
+> starts:
+>
+> ```sh
+> export DYLD_LIBRARY_PATH="$(python -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib"
+> ```
+<!-- prettier-ignore-end -->
+
 ## `RepBasedScorer`
+
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra rep-based-score`
+>
+> Runs the scorer from the command line, on the features that `cotorra extract`
+> wrote to the processed data directory `-p` for the model `-m`, and writes the
+> scores there, or to `-o` if given (see the
+> [CLI reference](cli.md#cotorra-rep-based-score) for every option):
+>
+> ```sh
+> cotorra rep-based-score -p processed/ -m output/mdl-<run_name>
+> ```
+<!-- prettier-ignore-end -->
 
 `RepBasedScorer` predicts outcomes from the representations dumped by the
 [`Extractor`](extraction.md#extractor). It loads the extracted feature vectors
@@ -39,6 +69,19 @@ plain string on the CLI or in configuration.
 
 ## `GenerativeScorer`
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra generative-score`
+>
+> Runs the scorer from the command line, sampling from the model `-m` for each
+> held-out timeline in the processed data directory `-p` and writing the scores
+> there, or to `-o` if given; it needs the `gen` extra (see the
+> [CLI reference](cli.md#cotorra-generative-score) for every option):
+>
+> ```sh
+> cotorra generative-score -p processed/ -m output/mdl-<run_name>
+> ```
+<!-- prettier-ignore-end -->
+
 `GenerativeScorer` predicts outcomes by _generating_ them. Using the
 [`quick_sco_re`](https://pypi.org/project/quick-sco-re/) implementation of the
 SCORE and REACH algorithms, it autoregressively samples many possible
@@ -51,6 +94,22 @@ asynchronously in batches and the scores are written to a parquet file.
 ::: cotorra.scorer_generative.GenerativeScorer
 
 ## `BaselineScorer`
+
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra baseline-score`
+>
+> Runs a baseline from the command line, a
+> [`BagOfTokensScorer`](#bagoftokensscorer) for `--baseline counts` (the default)
+> or `one-hot`, or a [`TsfreshScorer`](#tsfreshscorer) for `--baseline tsfresh`,
+> on the processed data directory `-p`, and writes the scores there, or to `-o`
+> if given (see the [CLI reference](cli.md#cotorra-baseline-score) for every
+> option):
+>
+> ```sh
+> cotorra baseline-score -p processed/
+> cotorra baseline-score -p processed/ --baseline tsfresh
+> ```
+<!-- prettier-ignore-end -->
 
 `BaselineScorer` holds what the baselines share, with each other and with
 [`RepBasedScorer`](#repbasedscorer): the outcomes `target_tokens` names, the
