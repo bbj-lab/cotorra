@@ -8,6 +8,19 @@ representation-based counterpart to autoregressive
 
 ## `Extractor`
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra extract`
+>
+> Runs the extractor from the command line, reading each split's
+> `<split>_for_inference.parquet` in the processed data directory `-p` and the
+> model in `-m`, and writing the features there, or to `-o` if given (see the
+> [CLI reference](cli.md#cotorra-extract) for every option):
+>
+> ```sh
+> cotorra extract -p processed/ -m output/mdl-<run_name>
+> ```
+<!-- prettier-ignore-end -->
+
 `Extractor` loads a saved model, moves it to the best available device (CUDA,
 MPS, or CPU), and runs it in inference mode over the timelines in each split's
 inference table (`train`, `tuning`, `held_out`). For each timeline it reads out

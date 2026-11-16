@@ -17,6 +17,19 @@ four side by side.
 
 ## `RepBasedScorer`
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra rep-based-score`
+>
+> Runs the scorer from the command line, on the features that `cotorra extract`
+> wrote to the processed data directory `-p` for the model `-m`, and writes the
+> scores there, or to `-o` if given (see the
+> [CLI reference](cli.md#cotorra-rep-based-score) for every option):
+>
+> ```sh
+> cotorra rep-based-score -p processed/ -m output/mdl-<run_name>
+> ```
+<!-- prettier-ignore-end -->
+
 `RepBasedScorer` predicts outcomes from the representations dumped by the
 [`Extractor`](extraction.md#extractor). It loads the extracted feature vectors
 for the train, tuning, and held-out splits, fits a supervised classifier per
@@ -39,6 +52,19 @@ plain string on the CLI or in configuration.
 
 ## `GenerativeScorer`
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra generative-score`
+>
+> Runs the scorer from the command line, sampling from the model `-m` for each
+> held-out timeline in the processed data directory `-p` and writing the scores
+> there, or to `-o` if given; it needs the `gen` extra (see the
+> [CLI reference](cli.md#cotorra-generative-score) for every option):
+>
+> ```sh
+> cotorra generative-score -p processed/ -m output/mdl-<run_name>
+> ```
+<!-- prettier-ignore-end -->
+
 `GenerativeScorer` predicts outcomes by _generating_ them. Using the
 [`quick_sco_re`](https://pypi.org/project/quick-sco-re/) implementation of the
 SCORE and REACH algorithms, it autoregressively samples many possible
@@ -51,6 +77,22 @@ asynchronously in batches and the scores are written to a parquet file.
 ::: cotorra.scorer_generative.GenerativeScorer
 
 ## `BaselineScorer`
+
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra baseline-score`
+>
+> Runs a baseline from the command line, a
+> [`BagOfTokensScorer`](#bagoftokensscorer) for `--baseline counts` (the default)
+> or `one-hot`, or a [`TsfreshScorer`](#tsfreshscorer) for `--baseline tsfresh`,
+> on the processed data directory `-p`, and writes the scores there, or to `-o`
+> if given (see the [CLI reference](cli.md#cotorra-baseline-score) for every
+> option):
+>
+> ```sh
+> cotorra baseline-score -p processed/
+> cotorra baseline-score -p processed/ --baseline tsfresh
+> ```
+<!-- prettier-ignore-end -->
 
 `BaselineScorer` holds what the baselines share, with each other and with
 [`RepBasedScorer`](#repbasedscorer): the outcomes `target_tokens` names, the

@@ -1,5 +1,20 @@
 # Training secondary heads
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra train`, then `cotorra extract`
+>
+> Train heads by adding their blocks to the training config, here empty, for
+> their defaults, and add their predictions to the extracted features with the
+> matching flags of `cotorra extract` (see the CLI reference for
+> [`train`](../api/cli.md#cotorra-train) and
+> [`extract`](../api/cli.md#cotorra-extract)):
+>
+> ```sh
+> cotorra train -p processed/ -o output/ tnt_objective= disposition_objective=
+> cotorra extract -p processed/ -m output/mdl-<run_name> -n -d
+> ```
+<!-- prettier-ignore-end -->
+
 Every model learns to predict the next token. Alongside that, it can train any
 combination of three secondary heads, each with its own config block:
 

@@ -1,5 +1,23 @@
 # Training
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra train`
+>
+> Reads the tokenized timelines in the processed data directory `-p` and writes
+> the model, `mdl-<run_name>/`, to `-o` (see the
+> [CLI reference](../api/cli.md#cotorra-train) for every option):
+>
+> ```sh
+> cotorra train -p processed/ -o output/
+> ```
+>
+> [`cotorra tune`](../api/cli.md#cotorra-tune) runs the same way, searching for
+> hyperparameters first. The shipped config is written for a GPU and needs
+> Hugging Face and Weights & Biases logins; the
+> [MIMIC-IV demo](../recipes/mimic-iv-demo.md#2-train-a-small-model) fits it to a
+> laptop.
+<!-- prettier-ignore-end -->
+
 The trainer consumes the tokenized timelines and fits a causal language model to
 predict the next token in each subject's timeline. It:
 

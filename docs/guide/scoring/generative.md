@@ -1,5 +1,19 @@
 # Generative scoring
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra generative-score`
+>
+> Samples from the model `-m` for each held-out timeline in the processed data
+> directory `-p`, and writes `scores-generative-<model_name>.parquet` there, or
+> to `-o` if given; it needs the `gen` extra, on Linux with an NVIDIA GPU (see
+> the [CLI reference](../../api/cli.md#cotorra-generative-score) for every
+> option):
+>
+> ```sh
+> cotorra generative-score -p processed/ -m output/mdl-<run_name>
+> ```
+<!-- prettier-ignore-end -->
+
 **Generative scoring** (`cotorra generative-score`) Monte Carlo samples future
 trajectories directly from the model. It:
 

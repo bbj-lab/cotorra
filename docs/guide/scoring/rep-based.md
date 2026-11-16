@@ -1,5 +1,19 @@
 # Representation-based scoring
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra rep-based-score`
+>
+> Reads the features that [`cotorra extract`](../extraction.md) wrote to the
+> processed data directory `-p` for the model `-m`, and writes
+> `scores-rep-based-<model_name>.parquet` there, or to `-o` if given (see the
+> [CLI reference](../../api/cli.md#cotorra-rep-based-score) for every option):
+>
+> ```sh
+> cotorra extract -p processed/ -m output/mdl-<run_name>
+> cotorra rep-based-score -p processed/ -m output/mdl-<run_name>
+> ```
+<!-- prettier-ignore-end -->
+
 **Representation-based scoring** (`cotorra rep-based-score`) fits a lightweight
 estimator on extracted features (run [`cotorra extract`](../extraction.md)
 first). It:

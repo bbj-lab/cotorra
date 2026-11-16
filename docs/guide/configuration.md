@@ -1,5 +1,17 @@
 # Configuration
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `-t`, `-e`, `-s`, and overrides
+>
+> Give a command a config file of your own, in place of the shipped default, with
+> `-t` for `train` and `tune`, `-e` for `extract`, or `-s` for the scorers, and
+> change single keys by listing them after its options:
+>
+> ```sh
+> cotorra train -p processed/ -o output/ -t my-training.yaml n_epochs=2
+> ```
+<!-- prettier-ignore-end -->
+
 Each command is driven by a YAML config. The package ships a default for each
 command under `src/cotorra/config/`, which you can override by passing a config
 file via the appropriate CLI flag, and whose individual keys you can change on

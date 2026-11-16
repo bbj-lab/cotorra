@@ -1,5 +1,19 @@
 # Scoring via supervised finetuning
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra train`, then `cotorra extract`
+>
+> Train with a supervised head, here the disposition head, with its defaults, and
+> extract its predictions (see the CLI reference for
+> [`train`](../../api/cli.md#cotorra-train) and
+> [`extract`](../../api/cli.md#cotorra-extract)):
+>
+> ```sh
+> cotorra train -p processed/ -o output/ disposition_objective=
+> cotorra extract -p processed/ -m output/mdl-<run_name> -d
+> ```
+<!-- prettier-ignore-end -->
+
 **Scoring via supervised finetuning** (`cotorra train`, then `cotorra extract`)
 trains the model to predict an outcome directly, through a head beside its
 language-modelling head, and reads the scores off that head: no estimator is fit

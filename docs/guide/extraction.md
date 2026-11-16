@@ -1,5 +1,18 @@
 # Extraction
 
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra extract`
+>
+> Runs the model in `-m` over each split's `<split>_for_inference.parquet` in the
+> processed data directory `-p`, and writes a
+> `features-<split>-<model_name>.parquet` for each there, or to `-o` if given
+> (see the [CLI reference](../api/cli.md#cotorra-extract) for every option):
+>
+> ```sh
+> cotorra extract -p processed/ -m output/mdl-<run_name>
+> ```
+<!-- prettier-ignore-end -->
+
 The extractor loads a trained model and computes hidden-state representations of
 each subject's context, suitable for representation-based scoring or downstream
 tasks. It:
