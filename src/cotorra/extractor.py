@@ -189,7 +189,15 @@ class Extractor(Configurable):
         )
         columns = dict()
         with t.inference_mode():
-            outputs = self.model(**collated, output_hidden_states=True)
+            outputs = self.model(
+                **collated,
+                output_hidden_states=True,
+                # the logits are read only for `token_nll`, and a vocabulary's
+                # worth at every position of a batch runs to gigabytes (64 rows
+                # padded to 3,000 tokens, over 17,781 of them, to 14 GB in
+                # float32), so otherwise only the last position's are made
+                logits_to_keep=0 if token_nll else 1,
+            )
             features = outputs.hidden_states[-1]  # last hidden layer
             nll = (
                 token_nll_bits(outputs.logits, collated["input_ids"], n_tokens)

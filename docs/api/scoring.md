@@ -15,6 +15,23 @@ need no trained model: classifiers fit on features of the timelines alone, from
 the same configuration. The [scoring guide](../guide/scoring/index.md) sets the
 four side by side.
 
+<!-- prettier-ignore-start -->
+> [!WARNING] On a Mac
+>
+> LightGBM and XGBoost, the boosters that [`RepBasedScorer`](#repbasedscorer)
+> and the [baselines](#baselinescorer) fit, look for Homebrew's OpenMP runtime,
+> `libomp`, while PyTorch brings its own: without Homebrew's, importing
+> `cotorra.scorer_rep_based` or `cotorra.baselines` fails, and with it, a process
+> holding both runtimes can crash. The `cotorra` command sees to this itself,
+> starting again with PyTorch's runtime first on `DYLD_LIBRARY_PATH`. To import
+> either module in Python of your own, such as a notebook, set that before Python
+> starts:
+>
+> ```sh
+> export DYLD_LIBRARY_PATH="$(python -c 'import os, torch; print(os.path.dirname(torch.__file__))')/lib"
+> ```
+<!-- prettier-ignore-end -->
+
 ## `RepBasedScorer`
 
 <!-- prettier-ignore-start -->

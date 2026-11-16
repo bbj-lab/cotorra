@@ -36,7 +36,7 @@ predict the next token in each subject's timeline. It:
    and saves it.
 
 Training is driven by a YAML config (the package ships a default; see
-[`./src/cotorra/config/training.yaml`](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/training.yaml))
+[`./src/cotorra/config/training.yaml`](https://github.com/bbj-lab/cotorra/blob/main/src/cotorra/config/training.yaml))
 that specifies:
 
 - **model**:
@@ -72,8 +72,8 @@ that specifies:
 - **wandb**:
     - **project**: Weights & Biases project name for experiment tracking.
     - **run_name**: Name for the current run.
-- **custom_loss**: Boolean flag to enable custom loss functions (default:
-  `false`).
+- **custom_loss**: Boolean flag to enable custom loss functions, the two terms
+  below (default: `false`; the bundled config uses `true`).
 - **quantile_token_loss** _(optional)_: Teaches the model that a code's quantile
   bins are ordered. Cross-entropy alone counts predicting `Q9` for a true `Q3` as
   no worse than predicting `Q4`. For each quantile token, this adds the squared
@@ -192,7 +192,7 @@ individual `model_args` entries as needed.
 > saved under `--output-home`. If no checkpoint is found (or resumption fails),
 > it automatically falls back to training from scratch — so the flag is safe to
 > pass unconditionally in scripts. Use `save_steps` in `training_args` in the
-> [training.yaml](https://github.com/burkh4rt/cotorra/blob/master/src/cotorra/config/training.yaml) file to control the frequency
+> [training.yaml](https://github.com/bbj-lab/cotorra/blob/main/src/cotorra/config/training.yaml) file to control the frequency
 > of checkpointing.
 <!-- prettier-ignore-end -->
 
