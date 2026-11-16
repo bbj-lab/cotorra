@@ -89,7 +89,7 @@ novel sequences typically proceeds in one of the following ways (see Figure
 
 3. _Supervised finetuning_ modifies the training objective to prioritize specific
    downstream outcomes of interest. Oftentimes, a model's architecture will be
-   slightly modified to incorporate a time-to-event or classifier head. During
+   slightly augmented to incorporate a time-to-event or classifier head. During
    inference, these heads can be used to directly predict outcome(s) of interest.
    In some cases, the models may be "pretrained" with the supervised objective
    prior to additional epoch(s) of specialized training. See @Ste24, @Fal25,
@@ -111,24 +111,25 @@ promising performance and resilience to distribution shift. In healthcare, they
 holistically encode a patient’s hospital admission and could be used to overcome
 some of the challenges associated with fragmented model deployment [@Ram26].
 Outside of medicine, they have found applications in recommender systems [@Zha24;
-@Li26] and finance [@Dou26]. However, they have yet to be widely adopted or
-deployed in real-world scenarios [@Wor23b; @Guo26]. These models require data
-preprocessing and training to achieve their promised benefits. Configurable, open
-source tools to prepare data, train models, and perform inference lower the
-barrier to entry and empower potential practitioners.
+@Khr26; @Li26], finance [@Dou26; @Rus26], economics [@Vaf24], and sports modeling
+[@Men24]. However, they have yet to be widely adopted or deployed in real-world
+scenarios [@Wor23b; @Guo26]. These models require data preprocessing and training
+to achieve their promised benefits. Configurable, open source tools to prepare
+data, train models, and perform inference lower the barrier to entry and empower
+potential practitioners.
 
 # State of the field
 
 As research products of an actively developing field, much of the currently
 available code is designed to reproduce the results of a specific paper. Some
 repositories and tools have received sustained development and are worth
-consideration from a potential practitioner. The MEDS ecosystem [@McD26] offers
-tools both for converting data into the MEDS format and for training models. The
-Vector Institute's [odyssey](https://github.com/VectorInstitute/odyssey) library
-grew out of EHRMamba [@Fal25]; it takes MEDS event streams as input. The Shah
-lab's [femr](https://github.com/som-shahlab/femr) library grew out of work on the
-MOTOR [@Ste24] paper. However, at the time of writing, the most recent commit to
-main occurred over a year ago.
+consideration. The MEDS ecosystem [@McD26] offers tools both for converting data
+into the MEDS format and for training models. The Vector Institute's
+[odyssey](https://github.com/VectorInstitute/odyssey) library grew out of
+EHRMamba [@Fal25]; it takes MEDS event streams as input. The Shah lab's
+[femr](https://github.com/som-shahlab/femr) library grew out of work on the MOTOR
+[@Ste24] paper. However, at the time of writing, the most recent commit to main
+occurred over a year ago.
 
 # Software design
 
@@ -139,7 +140,7 @@ depend on PyTorch were placed into a separate library,
 Each of the library's main commands---`train`, `tune`, `extract`,
 `rep-based-score`, and `generative-score`---is configurable via yaml files to
 allow for substantial customization without requiring a working knowledge of
-python. Configuration overrides can also be passed as command-line arguments, to
+Python. Configuration overrides can also be passed as command-line arguments, to
 prevent the need to maintain multiple similar configurations.
 
 ## Training / tuning
@@ -150,7 +151,7 @@ Face's `transformers` library [@Wol20]. It provides pre-configured Llama 3.2
 regimes (~8M & ~75M parameters) for ease of use. It also offers:
 
 - customized loss functions (including a quantile token loss inspired by @Zau25),
-- time-to-event, time-to-next-token, and classification-style heads,
+- time-to-event, time-to-next-token, and classification heads,
 - time-based RoPE [@Wei26],
 - best-fit sequence packing [@Din24],
 
@@ -202,8 +203,8 @@ hand.
 # Acknowledgements
 
 Compute resources used to develop and test this library were provided in part by
-the Center for Research Informatics (CRI) at the University of Chicago and funded
-by the Biological Sciences Division and the Institute for Translational
+the Center for Research Informatics (CRI) at the University of Chicago, funded by
+the Biological Sciences Division and the Institute for Translational
 Medicine/CTSA (NIH UL1TR002389).
 
 # References
