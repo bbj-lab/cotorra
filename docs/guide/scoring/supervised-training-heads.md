@@ -1,4 +1,4 @@
-# Scoring via supervised finetuning
+# Scoring via supervised training heads
 
 <!-- prettier-ignore-start -->
 > [!EXAMPLE] `cotorra train`, then `cotorra extract`
@@ -14,11 +14,11 @@
 > ```
 <!-- prettier-ignore-end -->
 
-**Scoring via supervised finetuning** (`cotorra train`, then `cotorra extract`)
-trains the model to predict an outcome directly, through a head beside its
-language-modelling head, and reads the scores off that head: no estimator is fit
-afterward, and no trajectories are sampled. It needs no scoring command, nor
-`scoring.yaml`:
+**Scoring via supervised training heads** (`cotorra train`, then
+`cotorra extract`) trains the model to predict an outcome directly, through a
+head beside its language-modelling head, and reads the scores off that head: no
+estimator is fit afterward, and no trajectories are sampled. It needs no scoring
+command, nor `scoring.yaml`:
 
 1. **Train with a supervised head.** Add a `disposition_objective` block to the
    training config to predict how each record ends (e.g. the chance of

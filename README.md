@@ -19,11 +19,11 @@
 This repo provides a configurable trainer for generative event models on
 tokenized timelines. It also supports three types of downstream inference on
 held-out data: (i) representation-based, (ii) generative, and (iii) inference via
-supervised finetuning. _Cotorra_ is a Spanish term for a small-to-medium sized
-parrot, particularly the Monk parakeet. Monk parakeets were introduced to the
-south side of Chicago, where they have flourished. [^1] The library benefits from
-previous experience training foundation models on tokenized electronic health
-records. [^2] [^3] [^4] [^5] [^6]
+supervised training heads. _Cotorra_ is a Spanish term for a small-to-medium
+sized parrot, particularly the Monk parakeet. Monk parakeets were introduced to
+the south side of Chicago, where they have flourished. [^1] The library benefits
+from previous experience training foundation models on tokenized electronic
+health records. [^2] [^3] [^4] [^5] [^6]
 
 <!-- --8<-- [end:intro] -->
 
@@ -79,7 +79,7 @@ The [documentation](https://cotorra.readthedocs.io/latest/) covers:
 - [`cotorra rep-based-score` / `cotorra generative-score`](https://cotorra.readthedocs.io/latest/guide/scoring/):
   scores outcomes on held-out data, from an estimator fit on extracted features
   or from sampled trajectories. A
-  [supervised head](https://cotorra.readthedocs.io/latest/guide/scoring/supervised-finetuning/)
+  [supervised head](https://cotorra.readthedocs.io/latest/guide/scoring/supervised-training-heads/)
   can score them too, and
   [`cotorra baseline-score`](https://cotorra.readthedocs.io/latest/guide/scoring/baselines/)
   scores them with baselines that need no model, for comparison.

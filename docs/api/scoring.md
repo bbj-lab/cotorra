@@ -6,8 +6,8 @@ held-out split. Two approaches have scorers of their own, both driven by a
 classifier on extracted features, and generation-based scoring, which lets the
 model simulate the future directly. In each case the `target_tokens` glob
 patterns in the configuration select which vocabulary tokens count as outcomes of
-interest. A third, supervised finetuning, has none: a head trained beside the
-language-modelling head predicts the outcome, and the
+interest. A third, scoring via supervised training heads, has none: a head
+trained beside the language-modelling head predicts the outcome, and the
 [`Extractor`](extraction.md#extractor) reads its predictions off.
 
 Against those predictions, Cotorra also scores [baselines](#baselinescorer) that

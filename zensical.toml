@@ -20,7 +20,7 @@
                 { "Overview" = "guide/scoring/index.md" },
                 { "Representation-Based" = "guide/scoring/rep-based.md" },
                 { "Generative" = "guide/scoring/generative.md" },
-                { "Supervised Finetuning" = "guide/scoring/supervised-finetuning.md" },
+                { "Supervised Training Heads" = "guide/scoring/supervised-training-heads.md" },
                 { "Baselines" = "guide/scoring/baselines.md" },
             ] },
             { "Configuration" = "guide/configuration.md" },

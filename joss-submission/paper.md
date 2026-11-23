@@ -87,13 +87,13 @@ novel sequences typically proceeds in one of the following ways (see Figure
    outcome of interest. @McD23, @Kra24, @Ren24, @Ren25, @Wax25, and @Sol26
    provide notable examples.
 
-3. _Supervised finetuning_ modifies the training objective to prioritize specific
-   downstream outcomes of interest. Oftentimes, a model's architecture will be
-   slightly augmented to incorporate a time-to-event or classifier head. During
-   inference, these heads can be used to directly predict outcome(s) of interest.
-   In some cases, the models may be "pretrained" with the supervised objective
-   prior to additional epoch(s) of specialized training. See @Ste24, @Fal25,
-   @Bur25, and @Cha26 for examples.
+3. _Supervised training heads_ modify the training objective to prioritize
+   specific downstream outcomes of interest. Oftentimes, a model's architecture
+   will be slightly augmented to incorporate a time-to-event or classifier head.
+   During inference, these heads can be used to directly predict outcome(s) of
+   interest. In some cases, the models may be "pretrained" with the
+   self-supervised objective prior to additional epoch(s) of specialized
+   training. See @Ste24, @Fal25, @Bur25, and @Cha26 for examples.
 
 Cotorra supports all three types of inference, along with training and
 hyperparameter tuning, and does so via a configurable command-line interface. The
@@ -176,12 +176,13 @@ regularization selected via cross-validation), XGBoost, LightGBM, and k-NN.
 The `generative-score` command wraps L. Solo's
 [`quick-sco-re`](https://pypi.org/project/quick-sco-re/) library.
 
-## Inference via supervised finetuning
+## Inference via supervised training heads
 
-Supervised finetuning can be performed by configuring `tte_objective` (for
-time-to-event modeling) or `disposition_objective` (for sequence-level
-classification) prior to training, and then running the `extract` command on
-held-out sequences of interest.
+Supervised training heads can be learned in tandem with next-token prediction by
+configuring `tte_objective` (for time-to-event modeling) or
+`disposition_objective` (for sequence-level classification) prior to training.
+The `extract` command can then be used to apply the supervised heads on held-out
+sequences of interest.
 
 # Research impact statement
 
