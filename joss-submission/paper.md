@@ -7,6 +7,7 @@ tags:
     - generative event models
     - healthcare
     - machine learning
+    - precision medicine
     - transformers
 authors:
     - surname: Burkhart
@@ -46,10 +47,10 @@ authors:
       orcid: 0000-0002-6700-1468
       affiliation: 1
 affiliations:
-    - name: University of Chicago, Chicago, IL, U.S.A. # JOSS typically drops dept names
+    - name: University of Chicago, Chicago, U.S.A. # JOSS typically drops dept names
       index: 1
       ror: 024mw5h28
-    - name: Rush University, Chicago, IL, U.S.A.
+    - name: Rush University, Chicago, U.S.A.
       index: 2
       ror: 01k9xac83
 date: 25 November 2026
@@ -197,7 +198,11 @@ $$
 and the REACH estimator:
 
 $$
-\mathcal{R} = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ \textstyle \sum_{t=1}^{T_E(\hat X^{(i)})} P(X_t = O | \hat X^{(i)}_{1:t-1}) \tfrac{ P(\hat X^{(i)}_{1:t-1}) }{ \hat P( \hat X^{(i)}_{1:t-1})} \right]
+\begin{aligned}
+\mathcal{R}
+& = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ \textstyle \sum_{t=1}^{T_E(\hat X^{(i)})} P(X_t = O | \hat X^{(i)}_{1:t-1}) \tfrac{ P(\hat X^{(i)}_{1:t-1}) }{ \hat P( \hat X^{(i)}_{1:t-1})} \right] \\
+& = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ 1 - \prod_{t=1}^{T_E(\hat X^{(i)})} \big( 1- P(X_t = O | \hat X^{(i)}_{1:t-1}) \big) \right]
+\end{aligned}
 $$
 
 where $\hat P$ is the law of an outcome-avoiding distribution, i.e.
@@ -206,7 +211,7 @@ $$
 \hat{P}(X_t | X_{1:t-1}=x_{1:t-1}) \propto \mathbb{1}_{\{X_t \ne O\}} \cdot P(X_t | X_{1:t-1}=x_{1:t-1})
 $$
 
-for all sequences $x_{1:t-1}$ and
+for all token sequences $x_{1:t-1}$, and
 $\hat{X}^{(1)}, \hat{X}^{(2)}, \dotsc, \hat{X}^{(n)} \sim^\text{i.i.d.}\hat{P}$.
 Note that SCOPE and REACH are both unbiased,
 $\mathbb{E}[\mathcal{S}] = \mathbb{E}[\mathcal{R}] = \mathbb{P}(T_O < T_E)$, and
