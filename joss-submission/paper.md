@@ -52,7 +52,7 @@ affiliations:
     - name: Rush University, Chicago, IL, U.S.A.
       index: 2
       ror: 01k9xac83
-date: 23 October 2026
+date: 25 November 2026
 bibliography: paper.bib
 ---
 
@@ -84,8 +84,8 @@ novel sequences typically proceeds in one of the following ways (see Figure
    capabilities of the trained model directly to a novel sequence to sample
    potential completions of the sequence. These generated sequences are then used
    to form a Monte Carlo-style estimate of the probability for a token-related
-   outcome of interest. @McD23, @Kra24, @Ren24, @Ren25, @Wax25, and @Sol26
-   provide notable examples.
+   outcome of interest. @McD23, @Kra24, @Ren24, @Ren25, @Wax25, @Sol26, and
+   @Lyu26 provide notable examples.
 
 3. _Supervised training heads_ modify the training objective to prioritize
    specific downstream outcomes of interest. Oftentimes, a model's architecture
@@ -109,14 +109,14 @@ Generative event models, or foundation models on tokenized event sequences, have
 generated a great deal of excitement in the research community for their
 promising performance and resilience to distribution shift. In healthcare, they
 holistically encode a patient’s hospital admission and could be used to overcome
-some of the challenges associated with fragmented model deployment [@Ram26].
-Outside of medicine, they have found applications in recommender systems [@Zha24;
-@Khr26; @Li26], finance [@Dou26; @Rus26], economics [@Vaf24], and sports modeling
+some of the challenges associated with fragmented model deployment. Outside of
+medicine, they have found applications in recommender systems [@Zha24; @Khr26;
+@Li26], finance [@Dou26; @Rus26], economics [@Vaf24], and sports modeling
 [@Men24]. However, they have yet to be widely adopted or deployed in real-world
-scenarios [@Wor23b; @Guo26]. These models require data preprocessing and training
-to achieve their promised benefits. Configurable, open source tools to prepare
-data, train models, and perform inference lower the barrier to entry and empower
-potential practitioners.
+healthcare scenarios [@Wor23b; @Guo26]. These models require data preprocessing
+and training to achieve their promised benefits. Configurable, open source tools
+to prepare data, train models, and perform inference lower the barrier to entry
+and empower potential practitioners.
 
 # State of the field
 
@@ -146,8 +146,8 @@ prevent the need to maintain multiple similar configurations.
 ## Training / tuning
 
 The `train` command supports any model architecture compatible with Hugging
-Face's `transformers` library [@Wol20]. It provides pre-configured Llama 3.2
-[@Gra24], Gemma 3 [@Kam25], and Qwen 3 [@Yan25] architectures in two sizing
+Face's causal language model backbones [@Wol20]. It provides pre-configured Llama
+3.2 [@Gra24], Gemma 3 [@Kam25], and Qwen 3 [@Yan25] architectures in two sizing
 regimes (~8M & ~75M parameters) for ease of use. It also offers:
 
 - customized loss functions (including a quantile token loss inspired by @Zau25),
@@ -174,7 +174,44 @@ regularization selected via cross-validation), XGBoost, LightGBM, and k-NN.
 ## Generative inference
 
 The `generative-score` command wraps L. Solo's
-[`quick-sco-re`](https://pypi.org/project/quick-sco-re/) library.
+[`quick-sco-re`](https://pypi.org/project/quick-sco-re/) library. In addition to
+the standard Monte Carlo estimator, we also support the SCOPE and REACH
+estimators [@Sol26], introduced as follows. Given a model or distribution $P$ on
+on sequences of tokens, let $T_O$ be a random variable denoting the first index
+at which some designated output token $O$ appears ($\infty$ otherwise) and $T_E$
+denote the first index corresponding to the end of the outcome window (where
+$T_E < \infty$ almost surely and $T_E \ne T_O$). Given sampled sequences
+$X^{(1)}, X^{(2)}, \dotsc, X^{(n)} \sim^\text{i.i.d.}P$, the Monte Carlo
+estimator for $\mathbb{P}(T_O < T_E)$ can be formed:
+
+$$
+M_0 = \textstyle \frac{1}{n} \sum_{i=1}^n \mathbb{1}_{\{T_O(X^{(i)})< T_E(X^{(i)})\}}
+$$
+
+In this setting, we have the SCOPE estimator:
+
+$$
+\mathcal{S} =  \tfrac{1}{n} \textstyle \sum_{i=1}^n \big[ \textstyle \sum_{t=1}^{\min\{T_E(X^{(i)}), T_O(X^{(i)})\}} P(X_t = O | X^{(i)}_{1:t-1}) \big]
+$$
+
+and the REACH estimator:
+
+$$
+\mathcal{R} = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ \textstyle \sum_{t=1}^{T_E(\hat X^{(i)})} P(X_t = O | \hat X^{(i)}_{1:t-1}) \tfrac{ P(\hat X^{(i)}_{1:t-1}) }{ \hat P( \hat X^{(i)}_{1:t-1})} \right]
+$$
+
+where $\hat P$ is the law of an outcome-avoiding distribution, i.e.
+
+$$
+\hat{P}(X_t | X_{1:t-1}=x_{1:t-1}) \propto \mathbb{1}_{\{X_t \ne O\}} \cdot P(X_t | X_{1:t-1}=x_{1:t-1})
+$$
+
+for all sequences $x_{1:t-1}$ and
+$\hat{X}^{(1)}, \hat{X}^{(2)}, \dotsc, \hat{X}^{(n)} \sim^\text{i.i.d.}\hat{P}$.
+Note that SCOPE and REACH are both unbiased,
+$\mathbb{E}[\mathcal{S}] = \mathbb{E}[\mathcal{R}] = \mathbb{P}(T_O < T_E)$, and
+that $\mathbb{V}[\mathcal{R}] \leq \mathbb{V}[M_0]$ as REACH is a
+Rao--Blackwellization of $M_0$. See @Sol26 for further details.
 
 ## Inference via supervised training heads
 
