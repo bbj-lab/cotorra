@@ -353,6 +353,20 @@ def test_dropping_time_based_rope_changes_the_extracted_features(
     assert not np.allclose(with_rope, without_rope)
 
 
+def test_time_based_features_are_the_same_whether_the_checkpoint_caches_or_not(
+    extractor, sample_batch, monkeypatch
+):
+    """a checkpoint saved with `use_cache: false` builds no KV cache, and given
+    neither it nor the mask of ones `collate_fn` passes, transformers would
+    start a new sequence wherever position ids don't step by exactly 1, as
+    time-based ones don't at any gap between timestamps"""
+    features = dict()
+    for use_cache in (False, True):
+        monkeypatch.setattr(extractor.model.config, "use_cache", use_cache)
+        features[use_cache] = extractor.extract_final(dict(sample_batch))["features"]
+    np.testing.assert_allclose(features[False], features[True], rtol=1e-3, atol=1e-3)
+
+
 # ----------------------------------------------- the secondary heads' columns
 
 ALL_HEADS = ("tte", "tnt", "disposition")
@@ -827,8 +841,10 @@ def test_the_end_times_reach_neither_the_model_nor_the_tables(
 ):
     """
     inference tables winnowed with end times carry the outcome itself, as
-    `hours_to_end_time_past`; the model is still handed nothing but the tokens
-    and their position ids, and no feature table is written with the column
+    `hours_to_end_time_past`; the model is still handed nothing but the tokens,
+    their position ids and a mask of ones (beside what it's to return: its
+    hidden states, and the last position's logits), and no feature table is
+    written with the column
     """
     extractor = extract_from(
         model_with_heads("tte"),
@@ -854,7 +870,13 @@ def test_the_end_times_reach_neither_the_model_nor_the_tables(
     assert calls
     for args, kwargs in calls:
         assert args == ()
-        assert kwargs == ["input_ids", "output_hidden_states", "position_ids"]
+        assert kwargs == [
+            "attention_mask",
+            "input_ids",
+            "logits_to_keep",
+            "output_hidden_states",
+            "position_ids",
+        ]
 
 
 def test_only_the_context_bears_on_what_is_extracted(
@@ -1131,6 +1153,35 @@ def test_the_nlls_come_last_and_each_rows_its_own(
         alone = {k: v[i : i + 1] for k, v in ending_batch.items()}
         [by_itself] = extractor.extract_final(alone, token_nll=True)["token_nll_bits"]
         np.testing.assert_allclose(row, by_itself, rtol=1e-4)
+
+
+@pytest.mark.parametrize("names", [(), ALL_HEADS], ids=["stock", "every-head"])
+def test_only_token_nll_has_the_forward_make_every_positions_logits(
+    names, extract_from, model_with_heads, ending_batch, monkeypatch
+):
+    """the logits are read only for `token_nll`, so without it the forward makes
+    the last position's alone, not a vocabulary's worth at every position of
+    the batch, whatever the heads or `all_times`; the features and the heads'
+    columns are the same either way, as the test above checks"""
+    extractor = extract_from(model_with_heads(*names, mixture=bool(names)))
+    forward, made = extractor.model.forward, []
+
+    def recording(*args, **kwargs):
+        outputs = forward(*args, **kwargs)
+        made.append(outputs.logits.shape[1])  # the positions given logits
+        return outputs
+
+    monkeypatch.setattr(extractor.model, "forward", recording)
+    n = extractor.collate_fn(dict(ending_batch))["input_ids"].shape[-1]
+    for all_times in (False, True):
+        for token_nll in (False, True):
+            extractor.extract_final(
+                dict(ending_batch),
+                all_times=all_times,
+                heads=names,
+                token_nll=token_nll,
+            )
+    assert made == [1, n, 1, n]
 
 
 def test_every_shards_nlls_line_up_with_its_input_ids(

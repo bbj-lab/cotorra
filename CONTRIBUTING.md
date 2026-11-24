@@ -9,8 +9,8 @@ we want everyone to feel welcome.
 
 Read the [README](README.md) and the
 [documentation](https://cotorra.readthedocs.io). The
-[MIMIC-IV demo](recipes/mimic-iv-demo.md) is the quickest way to see what each
-stage does, and [CLAUDE.md](CLAUDE.md) maps the codebase's architecture and
+[MIMIC-IV demo](docs/recipes/mimic-iv-demo.md) is the quickest way to see what
+each stage does, and [CLAUDE.md](CLAUDE.md) maps the codebase's architecture and
 conventions for human contributors and coding agents alike. Cotorra trains on the
 tokenized timelines that [Cocoa](https://github.com/bbj-lab/cocoa) produces, so a
 problem with how your data was collated or tokenized may belong there instead.
@@ -26,9 +26,9 @@ and
 ## What we're looking for
 
 We welcome bug reports (ideally with a small example that reproduces the problem)
-and fixes; corrections to the README, recipes, and API docs; new recipes; new
-configuration options, model presets, training objectives, and scoring
-estimators; and tests for behavior that isn't covered yet.
+and fixes; corrections to the README, user guide, recipes, and API docs; new
+recipes; new configuration options, model presets, training objectives, and
+scoring estimators; and tests for behavior that isn't covered yet.
 
 Please open an issue to discuss it first if you want to:
 
@@ -54,8 +54,8 @@ or the public MIMIC-IV demo.
 [Search the existing issues](https://github.com/bbj-lab/cotorra/issues) first. If
 yours is new, open one, and for a bug include:
 
-- your Cotorra (`pip show cotorra`), Python, and PyTorch versions, and your GPU
-  and the CUDA version PyTorch was built for, if you have one
+- the output of `cotorra --version`, which lists the versions of Cotorra, its
+  dependencies, and Python, the CUDA version PyTorch was built for, and your GPU
 - the command you ran, with any configs and overrides you passed
 - the full traceback, and what you expected to happen
 
@@ -75,11 +75,12 @@ questions there.
     ```
 
     Without an NVIDIA GPU, use `https://download.pytorch.org/whl/cpu` as the
-    index. To work on `generative-score`, install `'.[all,gen]'`, which needs
-    Linux, Python 3.11 to 3.13, and an NVIDIA GPU (see the
-    [MIMIC-IV demo](recipes/mimic-iv-demo.md)); without it, its tests run against
-    a stand-in, `tests/fake_quick_sco_re.py`, and only the one holding that
-    stand-in to the real package skips.
+    index. To run `generative-score` itself, install `'.[all,gen]'`, which adds
+    SGLang and needs Linux, an NVIDIA GPU, and Python 3.11 or 3.12, or 3.13 with
+    a Rust compiler and a few build tools (see the
+    [MIMIC-IV demo](docs/recipes/mimic-iv-demo.md#6-predict-outcomes-generatively-linux-with-an-nvidia-gpu)).
+    Its tests don't need it: they run against quick-sco-re, which every install
+    has, with SGLang's part faked.
 
 As you work:
 
@@ -92,11 +93,12 @@ As you work:
   key you add, and older saved models must load and behave as before. Give each
   new feature or key a fallback to the old behavior, and test it. The
   "Configuration model" section of [CLAUDE.md](CLAUDE.md) has the details.
-- **Update the docs** to match: the [README](README.md) (which documents every
-  config key and CLI flag), the [recipes](recipes/), the [API docs](docs/api/),
-  and the shipped configs. Edit recipes in [recipes/](recipes/); a new one also
-  needs a stub in [docs/recipes/](docs/recipes/) and a `nav` entry in
-  [mkdocs.yml](mkdocs.yml).
+- **Update the docs** to match: the [user guide](docs/guide/) (which documents
+  every config key), the [CLI reference](docs/api/cli.md) (every flag: paste a
+  changed command's `COLUMNS=75 cotorra <command> --help` into its block), the
+  [recipes](docs/recipes/), the [API docs](docs/api/), and the shipped configs. A
+  new recipe or page of the guide also needs a `nav` entry in
+  [zensical.toml](zensical.toml).
 - **Match the surrounding style.** Ruff formats and lints the Python (line length
   88, double quotes); the code imports `torch as t` and logs through
   `self.logger` rather than `print`. Prettier wraps the Markdown, following

@@ -7,6 +7,7 @@ tags:
     - generative event models
     - healthcare
     - machine learning
+    - precision medicine
     - transformers
 authors:
     - surname: Burkhart
@@ -46,13 +47,13 @@ authors:
       orcid: 0000-0002-6700-1468
       affiliation: 1
 affiliations:
-    - name: University of Chicago, Chicago, IL, U.S.A. # JOSS typically drops dept names
+    - name: University of Chicago, Chicago, U.S.A. # JOSS typically drops dept names
       index: 1
       ror: 024mw5h28
-    - name: Rush University, Chicago, IL, U.S.A.
+    - name: Rush University, Chicago, U.S.A.
       index: 2
       ror: 01k9xac83
-date: 23 October 2026
+date: 25 November 2026
 bibliography: paper.bib
 ---
 
@@ -75,7 +76,7 @@ novel sequences typically proceeds in one of the following ways (see Figure
    model-derived representations from each variable-length sequence up to the
    point in time that inference is to be performed. These fixed-length vectors
    then serve as features to train outcome-specific supervised models, which
-   themselves take the form of off-the-shelf classifiers such a logistic
+   themselves take the form of off-the-shelf classifiers such as logistic
    regression or gradient boosted decision trees that can be learned with a
    fraction of the compute required to train the original model. See @Wor23,
    @Guo24, @Wor25, @Lee26, @Guo26, and @Zha26 for notable examples.
@@ -84,16 +85,16 @@ novel sequences typically proceeds in one of the following ways (see Figure
    capabilities of the trained model directly to a novel sequence to sample
    potential completions of the sequence. These generated sequences are then used
    to form a Monte Carlo-style estimate of the probability for a token-related
-   outcome of interest. @McD23, @Kra24, @Ren24, @Ren25, @Wax25, and @Sol26
-   provide notable examples.
+   outcome of interest. @McD23, @Kra24, @Ren24, @Ren25, @Wax25, @Sol26, and
+   @Lyu26 provide notable examples.
 
-3. _Supervised finetuning_ modifies the training objective to prioritize specific
-   downstream outcomes of interest. Oftentimes, a model's architecture will be
-   slightly modified to incorporate a time-to-event or classifier head. During
-   inference, these heads can be used to directly predict outcome(s) of interest.
-   In some cases, the models may be ``pretrained'' with the supervised objective
-   prior to additional epoch(s) of specialized training. See @Ste24, @Fal25,
-   @Bur25, and @Cha26 for examples.
+3. _Supervised training heads_ modify the training objective to prioritize
+   specific downstream outcomes of interest. Oftentimes, a model's architecture
+   will be slightly augmented to incorporate a time-to-event or classifier head.
+   During inference, these heads can be used to directly predict outcome(s) of
+   interest. In some cases, the models may be "pretrained" with the
+   self-supervised objective prior to additional epoch(s) of specialized
+   training. See @Ste24, @Fal25, @Bur25, and @Cha26 for examples.
 
 Cotorra supports all three types of inference, along with training and
 hyperparameter tuning, and does so via a configurable command-line interface. The
@@ -105,60 +106,60 @@ tokenization best practices [@Lee26], and federated learning [@Bur26b].
 
 # Statement of need
 
-Generative event models, or foundation model on tokenized event sequences, have
+Generative event models, or foundation models on tokenized event sequences, have
 generated a great deal of excitement in the research community for their
 promising performance and resilience to distribution shift. In healthcare, they
 holistically encode a patient’s hospital admission and could be used to overcome
-some of the challenges associated with fragmented model deployment [@Ram26].
-Outside of medicine, they have found applications in recommender systems [@Zha24;
-@Li26] and finance [@Dou26]. However, they have yet to be widely adopted or
-deployed in real-world scenarios [@Wor23b; @Guo26]. These models require data
-preprocessing and training to achieve their promised benefits. Configurable, open
-source tools to prepare data, train models, and perform inference lower the
-barrier to entry and empower potential practitioners.
+some of the challenges associated with fragmented model deployment. Outside of
+medicine, they have found applications in recommender systems [@Zha24; @Khr26;
+@Li26], finance [@Dou26; @Rus26], economics [@Vaf24], and sports modeling
+[@Men24]. However, they have yet to be widely adopted or deployed in real-world
+healthcare scenarios [@Wor23b; @Guo26]. These models require data preprocessing
+and training to achieve their promised benefits. Configurable, open source tools
+to prepare data, train models, and perform inference lower the barrier to entry
+and empower potential practitioners.
 
 # State of the field
 
 As research products of an actively developing field, much of the currently
 available code is designed to reproduce the results of a specific paper. Some
 repositories and tools have received sustained development and are worth
-consideration from a potential practitioner. The MEDS ecosystem [@McD26] offers
-tools both for converting data into the MEDS format and for training models. The
-Vector Institute's [odyssey](https://github.com/VectorInstitute/odyssey) library
-grew out of EHRMamba [@Fal25]; it takes MEDS event streams as input. The Shah
-lab's [femr](https://github.com/som-shahlab/femr) library grew out of work on the
-MOTOR [@Ste24] paper. However, at the time of writing, the most recent commit to
-the default (main) branch occurred over a year ago.
+consideration. The MEDS ecosystem [@McD26] offers tools both for converting data
+into the MEDS format and for training models. The Vector Institute's
+[odyssey](https://github.com/VectorInstitute/odyssey) library grew out of
+EHRMamba [@Fal25]; it takes MEDS event streams as input. The Shah lab's
+[femr](https://github.com/som-shahlab/femr) library grew out of work on the MOTOR
+[@Ste24] paper. However, at the time of writing, the most recent commit to main
+occurred over a year ago.
 
 # Software design
 
-We aimed to create configurable and reuseable code that can readily be adapted to
+We aimed to create configurable and reusable code that can readily be adapted to
 new datasets and formats. Methods for data collation and tokenization that do not
-depend on pytorch were placed into a separate library,
+depend on PyTorch were placed into a separate library,
 [`cocoa`](https://pypi.org/project/cocoa-tokenizer/), on which `cotorra` depends.
 Each of the library's main commands---`train`, `tune`, `extract`,
-`rep-based-score`, and `generative-score`---are configurable via yaml files to
+`rep-based-score`, and `generative-score`---is configurable via yaml files to
 allow for substantial customization without requiring a working knowledge of
-python. Configuration overrides can also be passed as command line arguments, to
+Python. Configuration overrides can also be passed as command-line arguments, to
 prevent the need to maintain multiple similar configurations.
 
 ## Training / tuning
 
 The `train` command supports any model architecture compatible with Hugging
-Face's `transformers` library [@Wol20]. It provides pre-configured Llama 3.2
-[@Gra24], Gemma 3 [@Kam25], and Qwen 3 [@Yan25] architectures in two sizing
+Face's causal language model backbones [@Wol20]. It provides pre-configured Llama
+3.2 [@Gra24], Gemma 3 [@Kam25], and Qwen 3 [@Yan25] architectures in two sizing
 regimes (~8M & ~75M parameters) for ease of use. It also offers:
 
-- customized loss functions (including a inspired quantile token loss _a la_
-  @Zau25),
-- time-to-event, time-to-next-token, and classification-style heads,
+- customized loss functions (including a quantile token loss inspired by @Zau25),
+- time-to-event, time-to-next-token, and classification heads,
 - time-based RoPE [@Wei26],
 - best-fit sequence packing [@Din24],
 
-and can report training metrics to the platform formerly known as weights and
-biases, as seen in Figure \ref{fig:scrnsht}.
+and can report training metrics to Weights & Biases, as seen in Figure
+\ref{fig:scrnsht}.
 
-![Loss components reported during training in weights and biases.\label{fig:scrnsht}](img/wandb.png)
+![Loss components reported during training in Weights & Biases.\label{fig:scrnsht}](img/wandb.png)
 
 The `tune` command runs a configurable number of training runs with `optuna`
 [@Aki19], over a user-determined set of hyperparameters.
@@ -166,23 +167,64 @@ The `tune` command runs a configurable number of training runs with `optuna`
 ## Rep-based inference
 
 Sequence representations up to a pre-configured point in time can be collected
-with the `extract` command. The `rep-based-score` then learns a supervised
-classifier on training and tuning datasets and applies it to the held-out data.
+with the `extract` command. The `rep-based-score` command then learns a
+supervised classifier on training data and applies it to the held-out data.
 Currently supported classifiers include logistic regression (with optional
 regularization selected via cross-validation), XGBoost, LightGBM, and k-NN.
 
 ## Generative inference
 
-The `generative-inference` command wraps L. Solo's
-[`quick-sco-re`](https://github.com/lukesolo-ml/SCOPE_REACH_optimized_inference.git)
-library.
+The `generative-score` command wraps L. Solo's
+[`quick-sco-re`](https://pypi.org/project/quick-sco-re/) library. In addition to
+the standard Monte Carlo estimator, we also support the SCOPE and REACH
+estimators [@Sol26], introduced as follows. Given a model or distribution $P$ on
+on sequences of tokens, let $T_O$ be a random variable denoting the first index
+at which some designated output token $O$ appears ($\infty$ otherwise) and $T_E$
+denote the first index corresponding to the end of the outcome window (where
+$T_E < \infty$ almost surely and $T_E \ne T_O$). Given sampled sequences
+$X^{(1)}, X^{(2)}, \dotsc, X^{(n)} \sim^\text{i.i.d.}P$, the Monte Carlo
+estimator for $\mathbb{P}(T_O < T_E)$ can be formed:
 
-## Inference via supervised finetuning
+$$
+M_0 = \textstyle \frac{1}{n} \sum_{i=1}^n \mathbb{1}_{\{T_O(X^{(i)})< T_E(X^{(i)})\}}
+$$
 
-Supervised finetuning can be performed by configuring `tte_objective` (for
-time-to-event modeling) or `disposition_objective` (for sequence-level
-classification) prior to training, and then running the `extract` command on
-held-out sequences of interest.
+In this setting, we have the SCOPE estimator:
+
+$$
+\mathcal{S} =  \tfrac{1}{n} \textstyle \sum_{i=1}^n \big[ \textstyle \sum_{t=1}^{\min\{T_E(X^{(i)}), T_O(X^{(i)})\}} P(X_t = O | X^{(i)}_{1:t-1}) \big]
+$$
+
+and the REACH estimator:
+
+$$
+\begin{aligned}
+\mathcal{R}
+& = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ \textstyle \sum_{t=1}^{T_E(\hat X^{(i)})} P(X_t = O | \hat X^{(i)}_{1:t-1}) \tfrac{ P(\hat X^{(i)}_{1:t-1}) }{ \hat P( \hat X^{(i)}_{1:t-1})} \right] \\
+& = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ 1 - \prod_{t=1}^{T_E(\hat X^{(i)})} \big( 1- P(X_t = O | \hat X^{(i)}_{1:t-1}) \big) \right]
+\end{aligned}
+$$
+
+where $\hat P$ is the law of an outcome-avoiding distribution, i.e.
+
+$$
+\hat{P}(X_t | X_{1:t-1}=x_{1:t-1}) \propto \mathbb{1}_{\{X_t \ne O\}} \cdot P(X_t | X_{1:t-1}=x_{1:t-1})
+$$
+
+for all token sequences $x_{1:t-1}$, and
+$\hat{X}^{(1)}, \hat{X}^{(2)}, \dotsc, \hat{X}^{(n)} \sim^\text{i.i.d.}\hat{P}$.
+Note that SCOPE and REACH are both unbiased,
+$\mathbb{E}[\mathcal{S}] = \mathbb{E}[\mathcal{R}] = \mathbb{P}(T_O < T_E)$, and
+that $\mathbb{V}[\mathcal{R}] \leq \mathbb{V}[M_0]$ as REACH is a
+Rao--Blackwellization of $M_0$. See @Sol26 for further details.
+
+## Inference via supervised training heads
+
+Supervised training heads can be learned in tandem with next-token prediction by
+configuring `tte_objective` (for time-to-event modeling) or
+`disposition_objective` (for sequence-level classification) prior to training.
+The `extract` command can then be used to apply the supervised heads on held-out
+sequences of interest.
 
 # Research impact statement
 
@@ -194,7 +236,7 @@ generative inference [@Sol26], establishing best practices for tokenization
 
 # AI usage disclosure
 
-Claude Code, OpenAI Codex, and Github Copilot were used to develop and document
+Claude Code, OpenAI Codex, and GitHub Copilot were used to develop and document
 this library. An emphasis on modularity, frequent commits, and testing was
 adopted specifically to allow these tools to perform their best. Humans reviewed,
 modified, and validated all AI-generated content. Architectural and design
@@ -204,8 +246,8 @@ hand.
 # Acknowledgements
 
 Compute resources used to develop and test this library were provided in part by
-the Center for Research Informatics (CRI) at the University of Chicago and funded
-by the Biological Sciences Division and the Institute for Translational
+the Center for Research Informatics (CRI) at the University of Chicago, funded by
+the Biological Sciences Division and the Institute for Translational
 Medicine/CTSA (NIH UL1TR002389).
 
 # References

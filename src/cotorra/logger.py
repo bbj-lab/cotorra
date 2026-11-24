@@ -67,13 +67,22 @@ class Logger(logging.Logger):
             )
 
     def summarize_preds(
-        self, df_res: pl.LazyFrame, target_tokens: collections.abc.Iterable[str]
+        self,
+        df_res: pl.LazyFrame,
+        target_tokens: collections.abc.Iterable[str],
+        methods: collections.abc.Iterable[str] = ("mc", "scope", "reach", "rep"),
     ) -> None:
+        """
+        logs bootstrapped intervals for the scores of each of `target_tokens`
+        that `df_res` has, a `<token>_<method>_score` column for each of
+        `methods`, over the rows whose past doesn't already hold the token
+        """
         cols = df_res.collect_schema().names()
+        methods = tuple(methods)  # gone through again for every token
         for tt in target_tokens:
             self.info("=" * 42)
             self.info(f"{tt=}")
-            for method in ("mc", "scope", "reach", "rep"):
+            for method in methods:
                 if f"{tt}_{method}_score" in cols:
                     self.info(f"{method=}")
                     y_qual, y_true, y_score = (

@@ -10,12 +10,11 @@ import pathlib
 
 import numpy as np
 import torch as t
-from omegaconf import OmegaConf
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModelForCausalLM
 
 import cotorra.model  # noqa: F401 -- registers `cotorra` with the auto classes
-from cotorra.configurable import Configurable
+from cotorra.configurable import Configurable, load_yaml
 from cotorra.loader import Loader
 from cotorra.model import CotorraForCausalLM
 
@@ -104,7 +103,7 @@ class Extractor(Configurable):
             if output_home is not None
             else self.processed_data_home
         )
-        self.tkzr_cfg = OmegaConf.load(self.processed_data_home / "tokenizer.yaml")
+        self.tkzr_cfg = load_yaml(self.processed_data_home / "tokenizer.yaml")
         self.loader = Loader(self.cfg, self.processed_data_home)
         self.device = (
             "cuda"
@@ -138,9 +137,14 @@ class Extractor(Configurable):
                 / self.cfg.time_based_rope.sec_per_pos_id
             )
             p_ids += t.arange(p_ids.shape[-1], device=p_ids.device, dtype=p_ids.dtype)
+            # as `Trainer.collate_fn` passes it: without a mask, a checkpoint
+            # saved with `use_cache: false` would start a new sequence wherever
+            # these ids don't step by exactly 1, as at every gap between
+            # timestamps, and attend only within one
+            mask = t.ones_like(input_ids)
         else:
-            p_ids = None
-        return {"input_ids": input_ids, "position_ids": p_ids}
+            p_ids = mask = None
+        return {"input_ids": input_ids, "position_ids": p_ids, "attention_mask": mask}
 
     def _check_heads(self, heads: collections.abc.Iterable[str]) -> list[str]:
         """`heads`, names in `HEAD_COLUMNS` (or just one), without repeats, once
@@ -185,7 +189,15 @@ class Extractor(Configurable):
         )
         columns = dict()
         with t.inference_mode():
-            outputs = self.model(**collated, output_hidden_states=True)
+            outputs = self.model(
+                **collated,
+                output_hidden_states=True,
+                # the logits are read only for `token_nll`, and a vocabulary's
+                # worth at every position of a batch runs to gigabytes (64 rows
+                # padded to 3,000 tokens, over 17,781 of them, to 14 GB in
+                # float32), so otherwise only the last position's are made
+                logits_to_keep=0 if token_nll else 1,
+            )
             features = outputs.hidden_states[-1]  # last hidden layer
             nll = (
                 token_nll_bits(outputs.logits, collated["input_ids"], n_tokens)

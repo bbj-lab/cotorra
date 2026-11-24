@@ -15,9 +15,8 @@ import polars as pl
 import sklearn as skl
 import tqdm
 import xgboost as xgb
-from omegaconf import OmegaConf
 
-from cotorra.configurable import Configurable
+from cotorra.configurable import Configurable, load_yaml
 
 # the estimators `score_label` hands the tuning split to evaluate on (lightgbm's
 # `eval_X`/`eval_y`, xgboost's `eval_set`); they are the only ones for which the
@@ -72,7 +71,7 @@ class RepBasedScorer(Configurable):
             if output_home is not None
             else self.processed_data_home
         ) / f"scores-rep-based-{self.model_home.name}.parquet"
-        self.tkzr_cfg = OmegaConf.load(self.processed_data_home / "tokenizer.yaml")
+        self.tkzr_cfg = load_yaml(self.processed_data_home / "tokenizer.yaml")
 
         self.splits = ("train", "tuning", "held_out")
         self.estimator_type = estimator_type

@@ -5,6 +5,7 @@
 import importlib.metadata
 import json
 import pathlib
+import platform
 import re
 import shutil
 import sys
@@ -16,16 +17,25 @@ import polars as pl
 import pytest
 from helpers import base_scoring_cfg, base_training_cfg, write_cfg
 from omegaconf import OmegaConf
+from quick_sco_re import GeneratedTrajectory, TrajectoryType
 from typer.testing import CliRunner
 
 import cotorra.cli
+from cotorra import scorer_generative
 from cotorra.cli import app
 from cotorra.model import HEADS
 from cotorra.scorer_rep_based import EstimatorType
 
 runner = CliRunner()
 
-COMMANDS = ("train", "tune", "extract", "generative-score", "rep-based-score")
+COMMANDS = (
+    "train",
+    "tune",
+    "extract",
+    "generative-score",
+    "rep-based-score",
+    "baseline-score",
+)
 
 
 def test_top_level_help_lists_every_pipeline_stage():
@@ -33,6 +43,7 @@ def test_top_level_help_lists_every_pipeline_stage():
     assert result.exit_code == 0
     for command in COMMANDS:
         assert command in result.output
+    assert "--version" in click.unstyle(result.output)
 
 
 @pytest.mark.parametrize("command", COMMANDS)
@@ -59,11 +70,10 @@ def test_each_command_takes_config_overrides(command):
 
 
 @pytest.mark.parametrize("command", COMMANDS)
-def test_each_command_hands_its_overrides_to_its_config(command, tmp_path, request):
+def test_each_command_hands_its_overrides_to_its_config(command, tmp_path):
     """an unreadable override fails as the config loads, before any data is read"""
-    if command == "generative-score":  # importable without the [gen] extra
-        request.getfixturevalue("scorer_generative")
-    second = "-o" if command in ("train", "tune") else "-m"
+    # the baselines need no model, so take a second directory to write to
+    second = "-o" if command in ("train", "tune", "baseline-score") else "-m"
     result = runner.invoke(
         app,
         # fmt: off
@@ -505,16 +515,19 @@ class Recording:
 
 
 @pytest.fixture
-def recorded(monkeypatch, request) -> list[Recording]:
-    """every stage a command builds swapped for a `Recording`, the generative
-    scorer's on the module `scorer_generative` gives, from which the command
-    imports it once it runs"""
+def recorded(monkeypatch) -> list[Recording]:
+    """every stage a command builds swapped for a `Recording` named for it"""
     built = []
     monkeypatch.setattr(Recording, "built", built)
-    for stage in ("Trainer", "Tuner", "RepBasedScorer"):
-        monkeypatch.setattr(cotorra.cli, stage, Recording)
-    scorer_generative = request.getfixturevalue("scorer_generative")
-    monkeypatch.setattr(scorer_generative, "GenerativeScorer", Recording)
+    for stage in (
+        "Trainer",
+        "Tuner",
+        "GenerativeScorer",
+        "RepBasedScorer",
+        "BagOfTokensScorer",
+        "TsfreshScorer",
+    ):
+        monkeypatch.setattr(cotorra.cli, stage, type(stage, (Recording,), {}))
     return built
 
 
@@ -689,8 +702,27 @@ def test_the_top_level_help_names_the_installed_version():
     assert f"(v{importlib.metadata.version('cotorra')})" in result.output
 
 
+def test_version_flag_prints_what_a_bug_report_needs_and_exits():
+    """cotorra's version first, then python's, torch's cuda build, the
+    accelerator, and each required dependency's version, but none from the
+    extras; the flag runs no command"""
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    lines = click.unstyle(result.output).splitlines()
+    assert lines[0].split() == ["cotorra", importlib.metadata.version("cotorra")]
+    found = dict(line.split(maxsplit=1) for line in lines)
+    assert found["python"] == platform.python_version()
+    assert found["platform"] == platform.platform()
+    assert {"cuda", "accelerator"} <= found.keys()
+    for name in ("torch", "cocoa-tokenizer"):
+        assert found[name] == importlib.metadata.version(name)
+    assert "not installed" not in found.values()
+    assert "pytest" not in found  # an optional dependency, of the test extra
+
+
 def test_main_runs_the_app(monkeypatch, capsys):
-    """the `cotorra` entry point pyproject.toml names"""
+    """what the `cotorra` command runs once `cotorra.openmp.main` has seen to
+    the OpenMP runtime"""
     monkeypatch.setattr(sys, "argv", ["cotorra", "--help"])
     with pytest.raises(SystemExit) as exited:
         cotorra.cli.main()
@@ -700,7 +732,7 @@ def test_main_runs_the_app(monkeypatch, capsys):
 
 
 def test_generative_score_writes_its_scores_and_reports_where(
-    scorer_generative, processed, target_token, tmp_path, monkeypatch
+    processed, target_token, tmp_path, monkeypatch
 ):
     """
     end to end on the synthetic data, sglang faked: every M1 trajectory gives
@@ -708,15 +740,22 @@ def test_generative_score_writes_its_scores_and_reports_where(
     outcome is ever generated, so each patient's mc, scope and reach are 0,
     0.25 and 0.5, written under `--output-home` and reported there
     """
-    qsr = sys.modules[scorer_generative.GeneratedTrajectory.__module__]
 
-    async def generate(engine, config, prompts, methods, stop_at_tracked_events=True):
+    async def generate(
+        engine,
+        config,
+        prompts,
+        methods,
+        stop_at_tracked_events=True,
+        first_token_biases=None,
+    ):
+        assert first_token_biases is None  # the shipped config restricts none
         n = len(config.tracked_ids)
         return [
-            qsr.GeneratedTrajectory(
+            GeneratedTrajectory(
                 patient_idx=i,
                 sample_idx=s,
-                traj_type=qsr.TrajectoryType.M1,
+                traj_type=TrajectoryType.M1,
                 prompt_len=len(prompt),
                 output_ids=[],
                 timeline_terminating_id=None,
@@ -761,3 +800,101 @@ def test_generative_score_writes_its_scores_and_reports_where(
         assert unhad[f"{target_token}_{kind}_score"].to_list() == [value] * unhad.height
     report = _report(result.output, "Generative scoring completed")
     assert "".join(str(scores).split()) in report
+
+
+# ------------------------------------------------------------- the baselines
+
+# the scorer each `--baseline` builds
+BASELINE_SCORERS = {
+    "counts": "BagOfTokensScorer",
+    "one-hot": "BagOfTokensScorer",
+    "tsfresh": "TsfreshScorer",
+}
+
+
+@pytest.mark.parametrize("baseline", list(BASELINE_SCORERS))
+def test_every_baseline_option_reaches_its_scorer(baseline, recorded, tmp_path):
+    """the config as a path, the three directories, the estimator, the overrides
+    and `--verbose`, and as well a bag of tokens' featurization (the baseline's
+    name) or tsfresh's processes; the estimator and featurization as plain
+    strings, as `rep-based-score` hands its estimator on"""
+    cfg = tmp_path / "scoring.yaml"
+    args = ["baseline-score", "-s", str(cfg), "-p", "data", "-o", "out"]
+    args += ["-t", "elsewhere", "-b", baseline, "-e", "logistic", "-v"]
+    args += ["-j", "3"] if baseline == "tsfresh" else []
+    result = runner.invoke(app, args + ["score.max_len=8"])
+    assert result.exit_code == 0, result.output
+    [scorer] = recorded
+    assert type(scorer).__name__ == BASELINE_SCORERS[baseline]
+    assert scorer.built_with == {
+        "scoring_cfg": cfg,
+        "processed_data_home": "data",
+        "output_home": "out",
+        "training_home": "elsewhere",
+        "estimator_type": "logistic",
+        "overrides": ["score.max_len=8"],
+    } | ({"n_jobs": 3} if baseline == "tsfresh" else {"featurization": baseline})
+    assert type(scorer.built_with["estimator_type"]) is str
+    assert type(scorer.built_with.get("featurization", "")) is str
+    assert scorer.asked == [("save_all", {"verbose": True})]
+    report = _report(result.output, "scoring completed in")
+    assert "".join(str(pathlib.Path("out")).split()) in report
+
+
+def test_a_baseline_option_left_out_takes_its_default(recorded):
+    """a bag of token counts fit by lightGBM, from the packaged config, its
+    scores beside the inference tables, fit on the same directory's, and quiet"""
+    result = runner.invoke(app, ["baseline-score", "-p", "data"])
+    assert result.exit_code == 0, result.output
+    [scorer] = recorded
+    assert type(scorer).__name__ == "BagOfTokensScorer"
+    assert scorer.built_with["featurization"] == "counts"
+    assert scorer.built_with["estimator_type"] == "lightGBM"
+    for left_out in ("scoring_cfg", "output_home", "training_home"):
+        assert scorer.built_with[left_out] is None
+    assert not scorer.built_with["overrides"]
+    assert scorer.asked == [("save_all", {"verbose": False})]
+
+
+@pytest.mark.parametrize("baseline", ["counts", "one-hot"])
+def test_n_jobs_is_refused_for_a_bag_of_tokens(baseline, recorded):
+    """only tsfresh extracts in processes; taken quietly, the flag would seem to
+    speed up a baseline it doesn't touch; unstyled, as GitHub Actions has typer
+    color the error, and rich highlights `--n-jobs` in pieces"""
+    result = runner.invoke(
+        app, ["baseline-score", "-p", "data", "-b", baseline, "-j", "2"]
+    )
+    assert result.exit_code == 2
+    assert "--n-jobs" in click.unstyle(result.output)
+    assert not recorded
+
+
+@pytest.mark.parametrize("flag, value", [("-b", "word2vec"), ("-e", "k-NN")])
+def test_baseline_score_rejects_an_unknown_baseline_or_estimator(flag, value, recorded):
+    result = runner.invoke(app, ["baseline-score", "-p", "data", flag, value])
+    assert result.exit_code == 2
+    assert value in result.output
+    assert not recorded
+
+
+@pytest.mark.parametrize("baseline", ["counts", "tsfresh"])
+def test_baseline_score_end_to_end(baseline, processed, target_token, tmp_path):
+    """no model needed: a run on the synthetic data writes a score column for the
+    outcome, named for the baseline, to the file it reports"""
+    scoring_cfg = write_cfg(
+        tmp_path / "scoring.yaml",
+        base_scoring_cfg(score={"target_tokens": [target_token]}),
+    )
+    args = ["baseline-score", "-s", str(scoring_cfg), "-p", str(processed)]
+    args += ["-o", str(tmp_path), "-b", baseline, "-e", "logistic"]
+    # tsfresh extracting in this process, sparing the suite a pool of workers
+    args += ["-j", "0"] if baseline == "tsfresh" else []
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+
+    name = "bag-of-tokens-counts" if baseline == "counts" else "tsfresh"
+    scores = (tmp_path / f"scores-{name}-logistic.parquet").resolve()
+    assert f"{target_token}_{baseline}_score" in pl.read_parquet(scores).columns
+    assert "".join(str(scores).split()) in _report(
+        result.output, "scoring completed in"
+    )

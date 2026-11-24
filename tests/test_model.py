@@ -3,9 +3,11 @@
 """tests for cotorra.model: the secondary heads, CotorraConfig and CotorraForCausalLM"""
 
 import itertools
+import json
 import math
 
 import pytest
+import quick_sco_re
 import torch as t
 from helpers import TINY_MODEL_ARGS, base_training_cfg, write_cfg
 from omegaconf import OmegaConf
@@ -316,6 +318,33 @@ def test_state_dict_matches_the_stock_class_once_the_heads_are_dropped(mixture):
     assert t.equal(mdl(input_ids=x).logits, stock(input_ids=x).logits)
 
 
+@pytest.mark.parametrize("tied", [False, True], ids=["untied", "tied"])
+def test_quick_sco_re_serves_a_saved_model_with_heads_through_its_backbone(
+    tied, tmp_path
+):
+    """
+    quick-sco-re's `create_engine`, which `generative-score` starts sglang with,
+    refuses a `cotorra` checkpoint, pointing to its `export_backbone`: that
+    writes the backbone alone, as the stock class, a checkpoint sglang can load
+    with the same next-token distribution
+    """
+    mdl = build(*HEADS, mixture=True, tie_word_embeddings=tied)
+    mdl.save_pretrained(home := tmp_path / "mdl")
+    with pytest.raises(ValueError, match="export_backbone"):
+        quick_sco_re.create_engine(model_path=str(home), max_len=8)
+
+    quick_sco_re.export_backbone(home, backbone := tmp_path / "backbone")
+    quick_sco_re.require_servable(backbone)
+    config = json.loads((backbone / "config.json").read_text())
+    assert config["architectures"] == ["LlamaForCausalLM"]
+    stock = AutoModelForCausalLM.from_pretrained(backbone)
+    assert stock.config.tie_word_embeddings == tied
+    x = ids(1, 5)
+    mdl.eval()
+    stock.eval()
+    assert t.equal(mdl(input_ids=x).logits, stock(input_ids=x).logits)
+
+
 def test_word_embeddings_are_tied_when_the_backbone_asks_for_it():
     mdl = build("tte", tie_word_embeddings=True)
     assert mdl.all_tied_weights_keys == {"lm_head.weight": "model.embed_tokens.weight"}
@@ -349,10 +378,10 @@ def test_tying_follows_a_backbone_that_names_its_embedding_differently():
 
 def test_a_saved_model_reloads_through_the_auto_class(model, tmp_path):
     """
-    `Extractor` and `GenerativeScorer` only ever see `mdl-<run_name>/`, which
-    they open with `AutoModelForCausalLM.from_pretrained`; importing
-    `cotorra.model` is what registers the pair that makes that resolve, and the
-    heads come back as they were saved, disposition classes included
+    `Extractor` only ever sees `mdl-<run_name>/`, which it opens with
+    `AutoModelForCausalLM.from_pretrained`; importing `cotorra.model` is what
+    registers the pair that makes that resolve, and the heads come back as they
+    were saved, disposition classes included
     """
     model.save_pretrained(tmp_path)
     reloaded = AutoModelForCausalLM.from_pretrained(tmp_path)
@@ -415,6 +444,28 @@ def test_the_loss_adds_each_heads_weighted_term(model):
     assert full.loss.item() == pytest.approx(expected, rel=1e-5)
 
 
+def test_given_the_steps_token_count_each_heads_term_counts_its_share(model):
+    """
+    hf's trainer, on `custom_loss: false`, passes `num_items_in_batch` in
+    training: the tokens scored over the whole step, every batch it accumulates
+    toward one (and every process's), over which the lm's term sums this
+    batch's losses. Each head's term is weighted by this batch's share of them
+    too, so that the loss is the batch's own scaled by that share; a head's
+    mean added as it is counted once a batch, its weight multiplied by the
+    accumulation steps. Without the count, as in evaluation, it's the batch's own
+    """
+    x = ids(2, 7)
+    labels = x.masked_fill(
+        t.tensor([[0, 0, 1, 0, 0, 0, 1], [0, 1, 0, 0, 0, 0, 0]]) == 1, -100
+    )
+    batch = {"input_ids": x, "labels": labels, **targets(model.heads)}
+    own = model(**batch).loss.item()
+    scored = int((labels[:, 1:] != -100).sum())
+    for step in (scored, 3 * scored):  # this batch alone, or a third of the step
+        counted = model(**batch, num_items_in_batch=t.tensor(step)).loss.item()
+        assert counted == pytest.approx(own * scored / step, rel=1e-5)
+
+
 def test_each_head_is_scored_without_labels(model):
     """
     on cotorra's default `custom_loss: true`, `TrainerWithCustomLoss` pops
@@ -469,6 +520,40 @@ def test_a_batch_with_nothing_to_score_still_reaches_every_parameter(model):
     out.loss.backward()
     assert all(p.grad is not None for p in model.parameters() if p.requires_grad)
     assert all(t.isfinite(p.grad).all() for p in model.heads.parameters())
+
+
+def test_each_heads_loss_divides_by_the_positions_it_says_it_scores(model):
+    """`Head.scored`, which `TrainerWithCustomLoss` counts to average a head's
+    term over a whole evaluation: two batches' losses, each weighted by its
+    count, add up to the loss of both together only if the count is what the
+    loss divides by. Every row has an unscored position, and only the first two
+    end on a usable target, so that a count taking in a row's last position --
+    which a mixture head leaves out, with no next token to condition it on --
+    comes apart, as does one leaving out a time-to-event target recorded past
+    the end time, which counts as 0 hours remaining"""
+    t.manual_seed(1)
+    x, tg = ids(4, 6), targets(model.heads, 4, 6)
+    for name, head in model.heads.items():
+        target = tg[head.target]
+        unusable = NAN if target.is_floating_point() else -100
+        target[:, 1] = unusable
+        target[2:, -1] = unusable
+        if name == "tte":
+            target[:, 2] = -3.0
+
+    def scored(rows: slice) -> dict:
+        out = model(input_ids=x[rows], **{k: v[rows] for k, v in tg.items()})
+        return {
+            name: (getattr(out, f"{name}_loss"), head.scored(tg[head.target][rows]))
+            for name, head in model.heads.items()
+        }
+
+    both, top, bottom = (scored(r) for r in (slice(None), slice(0, 2), slice(2, 4)))
+    for name in model.heads:
+        (loss, n), (a, n_a), (b, n_b) = both[name], top[name], bottom[name]
+        n, n_a, n_b = n.sum(), n_a.sum(), n_b.sum()
+        assert n == n_a + n_b and n_a > 0 and n_b > 0
+        assert (loss * n).item() == pytest.approx((a * n_a + b * n_b).item(), rel=1e-5)
 
 
 def test_logits_to_keep_trims_what_is_returned_but_not_what_is_scored(model):
@@ -1390,14 +1475,18 @@ def test_an_objective_naming_no_head_is_refused(processed, tmp_path):
 def test_the_model_consumes_what_the_trainers_collator_produces(configured):
     """
     the contract between `Trainer.collate_fn` and the model: the batch carries
-    float `position_ids` (time-based rope) and each configured head's target,
+    float `position_ids` (time-based rope), with the mask of ones that keeps
+    their jumps from splitting attention, and each configured head's target,
     and nothing else is needed
     """
     n_vocab = len(configured.tkzr_cfg.lookup)
     collated = configured.collate_fn(rows(n_vocab, n_classes(configured), 4))
-    assert set(collated) == {"input_ids", "labels", "position_ids"} | {
-        HEADS[name].target for name in configured.head_options
-    }
+    assert set(collated) == {
+        "input_ids",
+        "labels",
+        "position_ids",
+        "attention_mask",
+    } | {HEADS[name].target for name in configured.head_options}
 
     out = configured.model_init()(**collated)
     assert out.logits.shape == (2, 4, n_vocab)
@@ -1422,6 +1511,7 @@ def test_a_per_record_objective_batches_its_weights_beside_its_target(
         "input_ids",
         "labels",
         "position_ids",
+        "attention_mask",
         HEADS[name].target,
         HEADS[name].target_weight,
     }
@@ -1493,7 +1583,8 @@ def test_a_real_training_step_updates_every_head(configured, tmp_path):
 
 
 def test_a_head_has_to_say_what_it_predicts_and_how_it_is_scored():
-    """the base class leaves both to the subclass that sets its name and target"""
+    """the base class leaves both to the subclass that sets its name and target,
+    and with them, which positions its loss scores"""
 
     class Bare(Head):
         name, target = "bare", "bare_target"
@@ -1504,6 +1595,8 @@ def test_a_head_has_to_say_what_it_predicts_and_how_it_is_scored():
         head(t.zeros(1, 2, 4))
     with pytest.raises(NotImplementedError):
         head.loss(None, t.zeros(1, 2))
+    with pytest.raises(NotImplementedError):
+        head.scored(t.zeros(1, 2))
 
 
 def test_a_time_to_next_token_head_has_to_say_how_it_samples_and_averages():

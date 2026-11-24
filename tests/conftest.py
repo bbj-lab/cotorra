@@ -10,12 +10,10 @@ running full-size training
 
 import collections.abc
 import fnmatch
-import importlib
 import logging
 import pathlib
 import subprocess
 import sys
-import types
 import typing
 
 import joblib as jl
@@ -28,6 +26,7 @@ from helpers import (
     base_extraction_cfg,
     base_scoring_cfg,
     base_training_cfg,
+    default_cfg,
     tiny_model_dir,
     write_cfg,
 )
@@ -37,6 +36,7 @@ from rich.logging import RichHandler
 from cocoa.collator import Collator
 from cocoa.tokenizer import Tokenizer
 from cocoa.winnower import Winnower
+from cotorra import openmp
 
 if typing.TYPE_CHECKING:
     from cotorra.trainer import Trainer
@@ -44,8 +44,23 @@ if typing.TYPE_CHECKING:
 N_PATIENTS = 100
 
 
-# keyed by `EstimatorType` value; both boosting libraries ship their own
-# `libomp.dylib` and hit the clash described in `helpers.LIBOMP_HINT`
+def pytest_configure(config: pytest.Config) -> None:
+    """
+    on macOS, run the session again with torch's libomp the only one loaded, as
+    `cotorra.openmp` explains: collecting the test modules imports LightGBM and
+    XGBoost, and the first model trained afterwards would segfault. pytest has by
+    now pointed stdout and stderr at its capture files, which the new process
+    would write to, so its capture is stopped first, writing out what it holds
+    """
+    if (env := openmp.rerun_env()) is not None:
+        capture = config.pluginmanager.getplugin("capturemanager")
+        if capture is not None:
+            capture.stop_global_capturing()
+        openmp.rerun(env)
+
+
+# keyed by `EstimatorType` value; both boosting libraries load Homebrew's
+# `libomp.dylib` on macOS and hit the clash described in `helpers.LIBOMP_HINT`
 _BOOSTER_PROBES = {
     "lightGBM": """
 import numpy as np, torch, lightgbm as lgb
@@ -65,7 +80,9 @@ def boosters_usable() -> dict[str, bool]:
     """
     whether torch and each boosting library can be fit in one process here;
     tests that drive one skip with `helpers.LIBOMP_HINT` when it cannot, since
-    the failure mode is a segfault that would end the whole session. Probe
+    the failure mode is a segfault that would end the whole session. On macOS
+    they can once `pytest_configure` has re-run the session, so this is for the
+    sessions it doesn't (a debugger's, or one under `openmp.RERUN_FLAG`). Probe
     both: guarding only LightGBM left `--estimator XGBoost` to take the suite
     down as soon as its arm stopped raising before reaching `fit`.
     """
@@ -146,6 +163,43 @@ def processed_with_end_times(processed, tmp_path_factory) -> pathlib.Path:
     shutil.copytree(processed, home)
     Tokenizer(processed_data_home=home, include_hours_to_end_time=True).save_all()
     Winnower(processed_data_home=home).save_all()
+    return home
+
+
+@pytest.fixture(scope="session")
+def processed_with_spacers(processed, tmp_path_factory) -> pathlib.Path:
+    """
+    `processed` re-tokenized with cocoa's `insert_spacers`, a time spacer before
+    each instant some while after the one before, and re-winnowed at cocoa's
+    default threshold, a `duration_s` after each timeline's first token -- the
+    data `generation.silence_restriction` restricts the first token with
+    """
+    import shutil
+
+    home = tmp_path_factory.mktemp("processed-spacers") / "processed"
+    shutil.copytree(processed, home)
+    Tokenizer(processed_data_home=home, insert_spacers=True).save_all()
+    Winnower(processed_data_home=home).save_all()
+    return home
+
+
+@pytest.fixture(scope="session")
+def processed_with_spacers_after_start(
+    processed_with_spacers, tmp_path_factory
+) -> pathlib.Path:
+    """`processed_with_spacers` re-winnowed a day after each subject's start_time
+    (cocoa's `after_start_time_s`) instead"""
+    import copy
+    import shutil
+
+    home = tmp_path_factory.mktemp("processed-spacers-after-start") / "processed"
+    shutil.copytree(processed_with_spacers, home)
+    cfg = copy.deepcopy(default_cfg("cocoa", "winnowing"))  # the cached one stays
+    cfg["threshold"] = {"after_start_time_s": 86_400}
+    Winnower(
+        winnowing_cfg=write_cfg(home.parent / "winnowing.yaml", cfg),
+        processed_data_home=home,
+    ).save_all()
     return home
 
 
@@ -295,43 +349,6 @@ def model_with_heads(
         return built[key]
 
     return make
-
-
-@pytest.fixture
-def scorer_generative() -> collections.abc.Iterator[types.ModuleType]:
-    """
-    `cotorra.scorer_generative`, which imports `quick_sco_re` at load: imported
-    against the real package where the `[gen]` extra is installed, and otherwise
-    against `fake_quick_sco_re`, so that its tests run without it -- as in CI,
-    which can't install it. A test swaps the engine and the generation for fakes
-    on the module this gives (with `monkeypatch`); the fake, and the module
-    imported against it, are taken back out of `sys.modules` afterwards, so that
-    nothing else in the session sees either, and an import of the scorer there
-    fails without the extra as it would anywhere
-    """
-    try:
-        importlib.import_module("quick_sco_re")
-    except ImportError:
-        pass
-    else:
-        yield importlib.import_module("cotorra.scorer_generative")
-        return
-    names = ("quick_sco_re", "cotorra.scorer_generative")
-    saved = {name: sys.modules.pop(name) for name in names if name in sys.modules}
-    package = importlib.import_module("cotorra")
-    sys.modules["quick_sco_re"] = importlib.import_module("fake_quick_sco_re")
-    try:
-        yield importlib.import_module("cotorra.scorer_generative")
-    finally:
-        for name in names:
-            sys.modules.pop(name, None)
-        sys.modules.update(saved)
-        # importing a submodule also sets it on its package, which a later
-        # `from cotorra import scorer_generative` would find there
-        if "cotorra.scorer_generative" in saved:
-            package.scorer_generative = saved["cotorra.scorer_generative"]
-        elif hasattr(package, "scorer_generative"):
-            del package.scorer_generative
 
 
 @pytest.fixture

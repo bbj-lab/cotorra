@@ -1,0 +1,10 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://cotorra.readthedocs.io/latest/
+    about: The user guide, recipes, and CLI reference.
+  - name: A problem with collation or tokenization
+    url: https://github.com/bbj-lab/cocoa/issues
+    about:
+      Cocoa prepares the timelines that cotorra trains on; report those problems
+      there.

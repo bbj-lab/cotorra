@@ -4,12 +4,24 @@ The training stage fits a fresh causal language model on tokenized timelines.
 Both trainers read a `training.yaml` configuration, pull the training and
 validation splits out of the processed data, and wrap HuggingFace's `Trainer` so
 that sequences of event tokens are modeled autoregressively (each token predicts
-the next). Time-aware position ids for [time-based RoPE](../index.md#1-training)
+the next). Time-aware position ids for [time-based RoPE](../guide/training.md)
 and a custom loss are wired in when the configuration requests them. On
 completion the model weights and the exact configuration used are written to
 `output_home`.
 
 ## `Trainer`
+
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra train`
+>
+> Runs the trainer from the command line, reading the tokenized timelines in the
+> processed data directory `-p` and writing the model, `mdl-<run_name>/`, to `-o`
+> (see the [CLI reference](cli.md#cotorra-train) for every option):
+>
+> ```sh
+> cotorra train -p processed/ -o output/
+> ```
+<!-- prettier-ignore-end -->
 
 The workhorse. `Trainer` builds a model _from scratch_ from a HuggingFace
 architecture preset (its vocabulary, `BOS`, and `EOS` come from
@@ -22,6 +34,18 @@ in Weights & Biases, and `train()` can resume from the latest checkpoint.
 ::: cotorra.trainer.Trainer
 
 ## `Tuner`
+
+<!-- prettier-ignore-start -->
+> [!EXAMPLE] `cotorra tune`
+>
+> Runs the tuner from the command line, with the options of `cotorra train`
+> except `--resume-from-checkpoint` (see the [CLI reference](cli.md#cotorra-tune)
+> for every option):
+>
+> ```sh
+> cotorra tune -p processed/ -o output/
+> ```
+<!-- prettier-ignore-end -->
 
 `Tuner` extends [`Trainer`](#trainer) to run an [Optuna](https://optuna.org)
 hyperparameter search (over the `training_args` fields `tuning_args.hp_space`

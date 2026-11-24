@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest a new feature or an improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion! Please [search the existing issues](https://github.com/bbj-lab/cotorra/issues?q=is%3Aissue) first, in case it has been raised already.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: What you're trying to do, and what gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      description: >-
+        The feature or change you have in mind, such as a new config key, model
+        preset, training objective, or scoring estimator.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Other approaches or workarounds you've tried, if any.
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: >-
+        Links, examples, or references. Please don't include private data.
