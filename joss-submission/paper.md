@@ -174,7 +174,7 @@ regularization selected via cross-validation), XGBoost, LightGBM, and k-NN.
 
 ## Generative inference
 
-The `generative-score` command wraps L. Solo's
+The `generative-score` command wraps Solo's
 [`quick-sco-re`](https://pypi.org/project/quick-sco-re/) library. In addition to
 the standard Monte Carlo estimator, we also support the SCOPE and REACH
 estimators [@Sol26], introduced as follows. Given a model or distribution $P$ on
@@ -186,7 +186,7 @@ $X^{(1)}, X^{(2)}, \dotsc, X^{(n)} \sim^\text{i.i.d.}P$, the Monte Carlo
 estimator for $\mathbb{P}(T_O < T_E)$ can be formed:
 
 $$
-M_0 = \textstyle \frac{1}{n} \sum_{i=1}^n \mathbb{1}_{\{T_O(X^{(i)})< T_E(X^{(i)})\}}
+M_0 = \textstyle \frac{1}{n} \sum_{i=1}^n \mathbb{1}_{\{T_O(X^{(i)})< T_E(X^{(i)})\}}.
 $$
 
 In this setting, we have the SCOPE estimator:
@@ -201,7 +201,7 @@ $$
 \begin{aligned}
 \mathcal{R}
 & = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ \textstyle \sum_{t=1}^{T_E(\hat X^{(i)})} P(X_t = O | \hat X^{(i)}_{1:t-1}) \tfrac{ P(\hat X^{(i)}_{1:t-1}) }{ \hat P( \hat X^{(i)}_{1:t-1})} \right] \\
-& = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ 1 - \prod_{t=1}^{T_E(\hat X^{(i)})} \big( 1- P(X_t = O | \hat X^{(i)}_{1:t-1}) \big) \right]
+& = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ 1 - \prod_{t=1}^{T_E(\hat X^{(i)})} \big( 1- P(X_t = O | \hat X^{(i)}_{1:t-1}) \big) \right].
 \end{aligned}
 $$
 
