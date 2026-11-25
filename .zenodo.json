@@ -47,8 +47,18 @@
     }
   ],
   "description": "The `cotorra` library provides a configurable trainer for generative event models on tokenized timelines. It also supports three types of downstream inference on held-out data: (i) representation-based, (ii) generative, and (iii) inference via supervised training heads.",
-  "title": "Cotorra: a configurable trainer",
+  "keywords": [
+    "electronic health records",
+    "event stream data",
+    "foundation models",
+    "generative event models",
+    "healthcare",
+    "machine learning",
+    "precision medicine",
+    "transformers"
+  ],
+  "language": "eng",
   "license": "mit",
-  "upload_type": "software",
-  "language": "eng"
+  "title": "Cotorra: a configurable trainer",
+  "upload_type": "software"
 }

@@ -1,5 +1,5 @@
 ---
-title: "Cotorra for modeling tokenized event sequences" # _training_ the models is only a small part of what this package does
+title: "Cotorra for modeling tokenized event sequences"
 tags:
     - electronic health records
     - event stream data
@@ -47,7 +47,7 @@ authors:
       orcid: 0000-0002-6700-1468
       affiliation: 1
 affiliations:
-    - name: University of Chicago, Chicago, U.S.A. # JOSS typically drops dept names
+    - name: University of Chicago, Chicago, U.S.A.
       index: 1
       ror: 024mw5h28
     - name: Rush University, Chicago, U.S.A.
@@ -141,13 +141,14 @@ depend on PyTorch were placed into a separate library,
 Each of the library's main commands---`train`, `tune`, `extract`,
 `rep-based-score`, and `generative-score`---is configurable via yaml files to
 allow for substantial customization without requiring a working knowledge of
-Python. Configuration overrides can also be passed as command-line arguments, to
-prevent the need to maintain multiple similar configurations.
+Python. Configuration overrides can also be passed as command-line arguments to
+obviate the need to maintain multiple copies of the same configuration with minor
+changes.
 
 ## Training / tuning
 
 The `train` command supports any model architecture compatible with Hugging
-Face's causal language model backbones [@Wol20]. It provides pre-configured Llama
+Face's causal language model backbone [@Wol20]. It provides pre-configured Llama
 3.2 [@Gra24], Gemma 3 [@Kam25], and Qwen 3 [@Yan25] architectures in two sizing
 regimes (~8M & ~75M parameters) for ease of use. It also offers:
 
@@ -174,19 +175,19 @@ regularization selected via cross-validation), XGBoost, LightGBM, and k-NN.
 
 ## Generative inference
 
-The `generative-score` command wraps L. Solo's
+The `generative-score` command wraps Solo's
 [`quick-sco-re`](https://pypi.org/project/quick-sco-re/) library. In addition to
 the standard Monte Carlo estimator, we also support the SCOPE and REACH
 estimators [@Sol26], introduced as follows. Given a model or distribution $P$ on
-on sequences of tokens, let $T_O$ be a random variable denoting the first index
-at which some designated output token $O$ appears ($\infty$ otherwise) and $T_E$
+sequences of tokens, let $T_O$ be a random variable denoting the first index at
+which some designated output token $O$ appears ($\infty$ otherwise) and $T_E$
 denote the first index corresponding to the end of the outcome window (where
 $T_E < \infty$ almost surely and $T_E \ne T_O$). Given sampled sequences
 $X^{(1)}, X^{(2)}, \dotsc, X^{(n)} \sim^\text{i.i.d.}P$, the Monte Carlo
 estimator for $\mathbb{P}(T_O < T_E)$ can be formed:
 
 $$
-M_0 = \textstyle \frac{1}{n} \sum_{i=1}^n \mathbb{1}_{\{T_O(X^{(i)})< T_E(X^{(i)})\}}
+M_0 = \textstyle \frac{1}{n} \sum_{i=1}^n \mathbb{1}_{\{T_O(X^{(i)})< T_E(X^{(i)})\}}.
 $$
 
 In this setting, we have the SCOPE estimator:
@@ -201,7 +202,7 @@ $$
 \begin{aligned}
 \mathcal{R}
 & = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ \textstyle \sum_{t=1}^{T_E(\hat X^{(i)})} P(X_t = O | \hat X^{(i)}_{1:t-1}) \tfrac{ P(\hat X^{(i)}_{1:t-1}) }{ \hat P( \hat X^{(i)}_{1:t-1})} \right] \\
-& = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ 1 - \prod_{t=1}^{T_E(\hat X^{(i)})} \big( 1- P(X_t = O | \hat X^{(i)}_{1:t-1}) \big) \right]
+& = \tfrac{1}{n} \textstyle \sum_{i=1}^n \left[ 1 - \prod_{t=1}^{T_E(\hat X^{(i)})} \big( 1- P(X_t = O | \hat X^{(i)}_{1:t-1}) \big) \right].
 \end{aligned}
 $$
 
@@ -236,12 +237,12 @@ generative inference [@Sol26], establishing best practices for tokenization
 
 # AI usage disclosure
 
-Claude Code, OpenAI Codex, and GitHub Copilot were used to develop and document
-this library. An emphasis on modularity, frequent commits, and testing was
-adopted specifically to allow these tools to perform their best. Humans reviewed,
-modified, and validated all AI-generated content. Architectural and design
-decisions were made by humans. This document in particular was entirely typed by
-hand.
+Claude Code, OpenAI Codex, and GitHub Copilot were extensively used to develop
+and document this library. An emphasis on modularity, frequent commits, and
+testing was adopted specifically to allow these tools to perform their best.
+Humans reviewed, modified, and validated all AI-generated content. Architectural
+and design decisions were made by humans. This document in particular was
+entirely typed by hand.
 
 # Acknowledgements
 

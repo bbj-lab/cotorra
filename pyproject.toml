@@ -33,9 +33,14 @@
     ]
     description = "configurable trainer for generative event models"
     keywords = [
-        "model training",
+        "electronic health records",
+        "event stream data",
+        "foundation models",
         "generative event models",
-        "configurable training",
+        "healthcare",
+        "machine learning",
+        "precision medicine",
+        "transformers",
     ]
     license = "MIT"
     license-files = [ "LICEN[CS]E.*" ]
