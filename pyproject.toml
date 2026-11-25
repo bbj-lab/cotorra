@@ -31,7 +31,7 @@
         "xgboost>=1.7",
         "wandb>=0.17.2",
     ]
-    description = "configurable trainer for generative event models"
+    description = "a configurable library for modeling tokenized event sequences"
     keywords = [
         "electronic health records",
         "event stream data",
@@ -47,7 +47,7 @@
     name = "cotorra"
     readme = { file = "README.md", content-type = "text/markdown" }
     requires-python = ">=3.11,<3.15"
-    version = "26.11.1"
+    version = "26.11.2"
 
     [project.scripts]
         cotorra = "cotorra.openmp:main"
