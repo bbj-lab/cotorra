@@ -100,6 +100,7 @@ generative scoring reads the rest of `scoring.yaml`:
     - **patient_chunk_size**: Number of patients generated per batch.
 - **prompt_overflow**: How to handle `tokens_past` longer than `score.max_len` —
   `"drop"` skips the patient, `"truncate_left"` keeps the last `max_len` tokens.
+  `generative-score` refuses any other value before starting the engine.
 
 ## Outputs
 

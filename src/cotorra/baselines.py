@@ -244,12 +244,12 @@ class BaselineScorer(Configurable):
                 return lgb.LGBMClassifier(
                     min_data_in_leaf=5, num_leaves=64, n_estimators=250, n_jobs=-1
                 )
-            case BaselineEstimator.logistic:
-                return self.logistic()
             case BaselineEstimator.xgboost:
                 return xgb.XGBClassifier(
                     min_child_weight=5, max_leaves=64, n_estimators=250, n_jobs=-1
                 )
+            case _:
+                return self.logistic()
 
     def score_label(self, target_token: str = "DSCG//expired") -> np.ndarray:
         """

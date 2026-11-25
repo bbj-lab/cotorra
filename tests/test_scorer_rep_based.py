@@ -72,15 +72,39 @@ def make_scorer(scorer_data, fake_model_home, estimator_type="logistic", cfg=Non
     )
 
 
-def test_missing_extracted_features_raises_a_compute_error(processed, fake_model_home):
+@pytest.mark.parametrize(
+    "held_out_home, training_home, missing",
+    [
+        ("processed", None, ("train", "tuning", "held_out")),
+        ("scorer_data", "processed", ("train", "tuning")),
+        ("processed", "scorer_data", ("held_out",)),
+    ],
+    ids=["none-extracted", "none-to-fit-on", "none-to-score"],
+)
+def test_missing_features_are_named_with_a_pointer_to_extract(
+    held_out_home, training_home, missing, fake_model_home, request
+):
     """
-    the constructor's `except FileNotFoundError` clause is dead code: polars
-    raises its own `ComputeError` (not the builtin `FileNotFoundError`) when a
-    glob pattern matches no files, so the intended "please run `cotorra
-    extract` first" message is never actually shown
+    each split whose features match nothing in the directory it's read from,
+    the held-out split's `processed_data_home` and the others' `training_home`
+    (`processed` holds none), where polars would raise a `ComputeError` that
+    doesn't say to run `cotorra extract`
     """
-    with pytest.raises(pl.exceptions.ComputeError):
-        RepBasedScorer(processed_data_home=processed, model_home=fake_model_home)
+    homes = {
+        name: request.getfixturevalue(name) for name in ("processed", "scorer_data")
+    }
+    with pytest.raises(FileNotFoundError, match="; run `cotorra extract` first$") as e:
+        RepBasedScorer(
+            processed_data_home=homes[held_out_home],
+            model_home=fake_model_home,
+            training_home=homes.get(training_home),
+        )
+    home = homes["processed"].resolve()
+    globs = {
+        s: str(home / f"features-{s}*-{fake_model_home.name}.parquet")
+        for s in ("train", "tuning", "held_out")
+    }
+    assert {s for s, g in globs.items() if g in str(e.value)} == set(missing)
 
 
 def test_grokked_outcome_tokens_are_discovered_from_scoring_config(

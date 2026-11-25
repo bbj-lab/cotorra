@@ -76,28 +76,27 @@ class RepBasedScorer(Configurable):
         self.splits = ("train", "tuning", "held_out")
         self.estimator_type = estimator_type
 
-        try:
-            self.features = {
-                s: np.vstack(
-                    pl.scan_parquet(
-                        (
-                            self.processed_data_home
-                            if s == "held_out"
-                            else self.training_home
-                        )
-                        / f"features-{s}*-{self.model_home.name}.parquet"
-                    )
-                    .select("features")
-                    .collect()
-                    .to_series()
-                    .to_list()
-                )
-                for s in self.splits
-            }
-        except FileNotFoundError as e:
+        # each split's features, in shards if extract cut them: the held-out
+        # split's from `processed_data_home`, the others' from `training_home`
+        globs = {
+            s: (self.processed_data_home if s == "held_out" else self.training_home)
+            / f"features-{s}*-{self.model_home.name}.parquet"
+            for s in self.splits
+        }
+        # looked for first, as polars, given a pattern that matches nothing,
+        # raises a ComputeError of its own, which doesn't say to extract them
+        missing = [str(g) for g in globs.values() if not any(g.parent.glob(g.name))]
+        if missing:
             raise FileNotFoundError(
-                "Features not found. Please run `cotorra extract` first."
-            ) from e
+                f"found no features matching {', '.join(missing)}; run "
+                "`cotorra extract` first"
+            )
+        self.features = {
+            s: np.vstack(
+                pl.scan_parquet(g).select("features").collect().to_series().to_list()
+            )
+            for s, g in globs.items()
+        }
 
         self.labels = {
             s: pl.scan_parquet(

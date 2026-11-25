@@ -15,6 +15,7 @@ import click
 import numpy as np
 import polars as pl
 import pytest
+import torch as t
 from helpers import base_scoring_cfg, base_training_cfg, write_cfg
 from omegaconf import OmegaConf
 from quick_sco_re import GeneratedTrajectory, TrajectoryType
@@ -718,6 +719,49 @@ def test_version_flag_prints_what_a_bug_report_needs_and_exits():
         assert found[name] == importlib.metadata.version(name)
     assert "not installed" not in found.values()
     assert "pytest" not in found  # an optional dependency, of the test extra
+
+
+@pytest.mark.parametrize(
+    "gpus, mps, accelerator",
+    [
+        (
+            ["NVIDIA H100", "NVIDIA A100", "NVIDIA H100"],
+            False,
+            "2 x NVIDIA H100, 1 x NVIDIA A100",
+        ),
+        ([], True, "mps"),
+        ([], False, "none"),
+    ],
+    ids=["cuda", "mps", "neither"],
+)
+def test_version_flag_names_the_accelerator_torch_finds(
+    gpus, mps, accelerator, monkeypatch
+):
+    """cuda's gpus counted by name, in the order torch first numbers each, or
+    else apple's mps; torch's checks faked, so that any machine runs each"""
+    monkeypatch.setattr(t.cuda, "is_available", lambda: bool(gpus))
+    monkeypatch.setattr(t.cuda, "device_count", lambda: len(gpus))
+    monkeypatch.setattr(t.cuda, "get_device_name", gpus.__getitem__)
+    monkeypatch.setattr(t.backends.mps, "is_available", lambda: mps)
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    lines = click.unstyle(result.output).splitlines()
+    assert dict(line.split(maxsplit=1) for line in lines)["accelerator"] == accelerator
+
+
+def test_version_flag_marks_a_dependency_that_isnt_installed(monkeypatch):
+    """rather than failing, as the broken install a bug report comes from may be
+    missing one; the others are still found"""
+    monkeypatch.setattr(
+        cotorra.cli, "requires", lambda _: ["torch>=2.6", "no-such-dependency>=1"]
+    )
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    found = dict(
+        line.split(maxsplit=1) for line in click.unstyle(result.output).splitlines()
+    )
+    assert found["no-such-dependency"] == "not installed"
+    assert found["torch"] == importlib.metadata.version("torch")
 
 
 def test_main_runs_the_app(monkeypatch, capsys):

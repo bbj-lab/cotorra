@@ -267,6 +267,11 @@ class GenerativeScorer(Configurable):
         self.tokens_past = self.ds.select("tokens_past").to_series().to_list()
 
         self.overflow = self.cfg.get("prompt_overflow", "truncate_left")
+        # any other value would leave a prompt past max_len whole, for the engine
+        if self.overflow not in ("drop", "truncate_left"):
+            raise ValueError(
+                f"`prompt_overflow` is `drop` or `truncate_left`; got {self.overflow!r}"
+            )
         max_len = self.gen_config.max_len
         self.final_tokens = []
         self.final_ids = []
@@ -279,9 +284,8 @@ class GenerativeScorer(Configurable):
                     n_dropped += 1
                     self.keep_mask.append(False)
                     continue
-                elif self.overflow == "truncate_left":
-                    toks = toks[-max_len:]
-                    n_truncated += 1
+                toks = toks[-max_len:]
+                n_truncated += 1
             self.final_tokens.append(toks)
             self.final_ids.append(sid)
             self.keep_mask.append(True)

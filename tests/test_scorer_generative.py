@@ -795,6 +795,26 @@ def test_a_prompt_past_max_len_is_dropped_or_cut_to_its_last_tokens(
     assert message in logged
 
 
+def test_an_unknown_prompt_overflow_is_refused_before_the_engine_starts(
+    processed, tmp_path, monkeypatch
+):
+    """a typo of either would have handed the engine every prompt past
+    `score.max_len` whole"""
+    cfg = base_scoring_cfg()
+    cfg["prompt_overflow"] = "truncate-left"
+    fake = FakeSGLang().install(monkeypatch)
+    with pytest.raises(
+        ValueError,
+        match="^`prompt_overflow` is `drop` or `truncate_left`; got 'truncate-left'$",
+    ):
+        scorer_generative.GenerativeScorer(
+            scoring_cfg=write_cfg(tmp_path / "scoring.yaml", cfg),
+            processed_data_home=processed,
+            model_home=tmp_path / "mdl-stub",
+        )
+    assert fake.started is None
+
+
 @pytest.mark.parametrize(
     "blocks, started",
     [

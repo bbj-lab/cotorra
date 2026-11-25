@@ -21,6 +21,7 @@ from sklearn.metrics import roc_auc_score
 from cotorra.baselines import (
     BagOfTokensScorer,
     BaselineEstimator,
+    BaselineScorer,
     Featurization,
     TsfreshScorer,
     bag_of_tokens,
@@ -347,6 +348,19 @@ def test_an_unknown_featurization_or_estimator_is_refused(processed, name, kwarg
     """rather than fit as something else, as `RepBasedScorer` does lightGBM"""
     with pytest.raises(ValueError, match="is not a valid"):
         baseline(name, processed_data_home=processed, **kwargs)
+
+
+def test_a_baseline_has_to_say_how_logistic_regression_takes_its_features(processed):
+    """the base class leaves it to the baseline that sets the features, as only
+    it knows whether they need scaling first"""
+    bare = BaselineScorer(
+        processed_data_home=processed,
+        estimator_type="logistic",
+        name="bare",
+        method="bare",
+    )
+    with pytest.raises(NotImplementedError):
+        bare.estimator()
 
 
 @pytest.mark.parametrize("name", BASELINES)
